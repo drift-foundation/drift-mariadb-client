@@ -39,7 +39,3 @@ AGENTS.md
 - Track Drift toolchain `main` (see `AGENTS.md`).
 - Regression-first for core defects.
 - No workaround-only masking for protocol/concurrency/lifetime bugs.
-
-## Status
-
-Scaffold and plan are in place. Implementation starts from `work-progress.md` Phase 0 (contract pinning).
