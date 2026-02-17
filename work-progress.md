@@ -137,6 +137,12 @@ Two packages in one repository:
 - Arg encoding rules (MVP subset).
 - Result mapping for common SP return patterns.
 - Error tag normalization.
+- Metadata caching + optional metadata suppression (controlled server profile):
+  - Treat metadata suppression as an optimization, never a correctness dependency.
+  - Cache key should include normalized SQL/proc signature + default schema + server version + session settings that affect result shape.
+  - Keep a cached column-signature hash and refresh on mismatch.
+  - Add invalidation checks against schema metadata (for controlled deployments, use `information_schema`-based freshness checks and/or pinned schema version table).
+  - On uncertainty/mismatch/protocol rejection, force full metadata path, refresh cache, and continue.
 
 ### Phase 3: Integration/hardening
 - E2E with real MariaDB instance in controlled config.

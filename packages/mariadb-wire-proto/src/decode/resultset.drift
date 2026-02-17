@@ -27,6 +27,8 @@ pub const FIRST_RESPONSE_ERR_HEADER: Byte = 255;
 pub const FIRST_RESPONSE_LOCAL_INFILE_HEADER: Byte = 251;
 pub const RESULTSET_NULL_HEADER: Byte = 251;
 pub const RESULTSET_EOF_TERMINATOR_HEADER: Byte = 254;
+pub const RESULTSET_METADATA_FOLLOWS_FALSE: Byte = 0;
+pub const RESULTSET_METADATA_FOLLOWS_TRUE: Byte = 1;
 
 type ResultSetCell = types.ResultSetCell;
 
@@ -95,8 +97,19 @@ pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> co
 		core.Result::Ok(v) => { col_count_dec = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	if col_count_dec.next_offset != first_packet.len {
-		return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset));
+	if col_count_dec.next_offset < first_packet.len {
+		val metadata_flag_res = lenenc.decode_lenenc_int_at(first_packet, col_count_dec.next_offset);
+		var metadata_flag = lenenc.LenEncIntDecoded(value = cast<Uint>(0), next_offset = 0);
+		match metadata_flag_res {
+			core.Result::Ok(v) => { metadata_flag = move v; },
+			core.Result::Err(_) => { return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset)); }
+		}
+		if metadata_flag.next_offset != first_packet.len {
+			return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset));
+		}
+		if metadata_flag.value != cast<Uint>(RESULTSET_METADATA_FOLLOWS_FALSE) and metadata_flag.value != cast<Uint>(RESULTSET_METADATA_FOLLOWS_TRUE) {
+			return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset));
+		}
 	}
 	val column_count = cast<Int>(col_count_dec.value);
 	if column_count < 0 {
@@ -106,8 +119,18 @@ pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> co
 	if packets.len < row_start + 1 {
 		return core.Result::Err(_error(errors.TAG_RESULTSET_TRUNCATED_BEFORE_ROWS, packets.len));
 	}
+	var first_row_idx = row_start;
+	if first_row_idx < packets.len {
+		val maybe_coldef_terminator = &packets[first_row_idx];
+		if _is_eof_terminator_packet(maybe_coldef_terminator) {
+			first_row_idx = first_row_idx + 1;
+		}
+	}
+	if packets.len < first_row_idx + 1 {
+		return core.Result::Err(_error(errors.TAG_RESULTSET_TRUNCATED_BEFORE_ROWS, packets.len));
+	}
 	var rows: Array<Array<ResultSetCell>> = [];
-	var i = row_start;
+	var i = first_row_idx;
 	while i < packets.len {
 		val payload = &packets[i];
 		if _is_eof_terminator_packet(payload) {
