@@ -1,0 +1,14 @@
+{
+  "scenario": "sp_call_err_missing_proc_mdb114a",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 34115
+  },
+  "target": {
+    "host": "127.0.0.1",
+    "port": 34114
+  },
+  "created_at_ns": 1771360089559059910,
+  "format_version": 1,
+  "notes": "Chunk-level TCP capture; files are ordered by events.jsonl index."
+}

@@ -1,0 +1,7 @@
+{
+  "scenario": "sp_call_int_args_mdb114a",
+  "run_id": "20260217-132657-181998",
+  "source_run_dir": "tests/fixtures/scenarios/bin/sp_call_int_args_mdb114a/20260217-132657-181998",
+  "c2s_packets": 3,
+  "s2c_packets": 8
+}

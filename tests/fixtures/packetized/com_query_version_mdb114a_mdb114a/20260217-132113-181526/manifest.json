@@ -1,0 +1,7 @@
+{
+  "scenario": "com_query_version_mdb114a_mdb114a",
+  "run_id": "20260217-132113-181526",
+  "source_run_dir": "tests/fixtures/scenarios/bin/com_query_version_mdb114a_mdb114a/20260217-132113-181526",
+  "c2s_packets": 3,
+  "s2c_packets": 7
+}

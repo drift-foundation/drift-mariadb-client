@@ -1,0 +1,7 @@
+{
+  "scenario": "com_query_err_no_database_mdb114a",
+  "run_id": "20260217-132330-181711",
+  "source_run_dir": "tests/fixtures/scenarios/bin/com_query_err_no_database_mdb114a/20260217-132330-181711",
+  "c2s_packets": 1,
+  "s2c_packets": 2
+}

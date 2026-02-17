@@ -1,0 +1,7 @@
+{
+  "scenario": "handshake_mdb114a",
+  "run_id": "20260217-131032-181053",
+  "source_run_dir": "tests/fixtures/scenarios/bin/handshake_mdb114a/20260217-131032-181053",
+  "c2s_packets": 3,
+  "s2c_packets": 7
+}

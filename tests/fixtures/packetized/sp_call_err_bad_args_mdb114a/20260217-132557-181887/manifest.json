@@ -1,0 +1,7 @@
+{
+  "scenario": "sp_call_err_bad_args_mdb114a",
+  "run_id": "20260217-132557-181887",
+  "source_run_dir": "tests/fixtures/scenarios/bin/sp_call_err_bad_args_mdb114a/20260217-132557-181887",
+  "c2s_packets": 3,
+  "s2c_packets": 3
+}

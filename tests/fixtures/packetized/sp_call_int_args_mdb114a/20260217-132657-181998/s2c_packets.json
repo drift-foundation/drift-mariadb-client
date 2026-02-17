@@ -1,0 +1,44 @@
+{
+  "packets": [
+    {
+      "sequence_id": 0,
+      "payload_len": 91,
+      "payload_hex": "0a31312e342e31302d4d6172696144422d7562753234303400150000006a455a724f73777b00feffe00200ff81150000000000001d0000002647732f2d345e5b2e737b32006d7973716c5f6e61746976655f70617373776f726400"
+    },
+    {
+      "sequence_id": 2,
+      "payload_len": 82,
+      "payload_hex": "00000002400000410135364443363336363045463146434643434433333743434135374635303341434438324335464432364543463243304439413035344243433232433137384531080106056170706462"
+    },
+    {
+      "sequence_id": 1,
+      "payload_len": 2,
+      "payload_hex": "0101"
+    },
+    {
+      "sequence_id": 2,
+      "payload_len": 24,
+      "payload_hex": "03646566000000017300000c3f000c000000088000000000"
+    },
+    {
+      "sequence_id": 3,
+      "payload_len": 5,
+      "payload_hex": "fe00000a00"
+    },
+    {
+      "sequence_id": 4,
+      "payload_len": 2,
+      "payload_hex": "0133"
+    },
+    {
+      "sequence_id": 5,
+      "payload_len": 5,
+      "payload_hex": "fe00000a00"
+    },
+    {
+      "sequence_id": 6,
+      "payload_len": 7,
+      "payload_hex": "00000002000000"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "scenario": "com_query_err_no_database_mdb114a",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 34115
+  },
+  "target": {
+    "host": "127.0.0.1",
+    "port": 34114
+  },
+  "created_at_ns": 1771359810682470475,
+  "format_version": 1,
+  "notes": "Chunk-level TCP capture; files are ordered by events.jsonl index."
+}
