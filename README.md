@@ -26,6 +26,11 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `bash`
 - `just`
 - `docker` with Compose support (`docker compose` or `docker-compose`)
+- `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/src/drift-lang/bin/driftc`)
+
+### Compiler env
+
+- `DRIFTC` should point to the compiler launcher.
 
 ## Local MariaDB Dev Instances
 

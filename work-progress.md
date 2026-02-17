@@ -41,6 +41,12 @@ Two packages in one repository:
 - Operations: Stored Procedure invocation only (`COM_QUERY` path first).
 - Concurrency model: integrates with Drift virtual-thread runtime through existing network I/O primitives.
 
+## User-land validation objective
+
+- This is the first Drift user-land library effort, not just a protocol implementation task.
+- We expect real package-development pressure to surface integration gaps in `driftc` and/or stdlib.
+- When such issues are found, record minimal repros and treat them as first-class integration outcomes while continuing delivery of a useful MariaDB client.
+
 ## Proposed phases
 
 ### Phase 0: Contract pinning
@@ -53,6 +59,77 @@ Two packages in one repository:
 - Handshake/auth happy path.
 - `COM_QUERY` request + OK/ERR/resultset decode.
 - Deterministic parser tests with fixed binary fixtures.
+
+#### Phase 1 concrete checklist (with file-level TODOs)
+
+1. Package skeleton and module boundaries
+- [x] Create package root and public modules:
+  - `packages/mariadb-wire-proto/src/lib.drift`
+  - `packages/mariadb-wire-proto/src/types.drift`
+  - `packages/mariadb-wire-proto/src/errors.drift`
+- [x] Define internal module split:
+  - `packages/mariadb-wire-proto/src/packet/header.drift`
+  - `packages/mariadb-wire-proto/src/packet/lenenc.drift`
+  - `packages/mariadb-wire-proto/src/handshake/hello.drift`
+  - `packages/mariadb-wire-proto/src/handshake/auth.drift`
+  - `packages/mariadb-wire-proto/src/command/com_query.drift`
+  - `packages/mariadb-wire-proto/src/decode/ok_packet.drift`
+  - `packages/mariadb-wire-proto/src/decode/err_packet.drift`
+  - `packages/mariadb-wire-proto/src/decode/resultset.drift`
+
+2. Packet framing + length-encoded primitives
+- [ ] Implement packet header encode/decode in `packages/mariadb-wire-proto/src/packet/header.drift`.
+- [ ] Implement length-encoded integer/string helpers in `packages/mariadb-wire-proto/src/packet/lenenc.drift`.
+- [ ] Add unit fixtures and roundtrip tests:
+  - `packages/mariadb-wire-proto/tests/unit/packet_header_test.drift`
+  - `packages/mariadb-wire-proto/tests/unit/lenenc_test.drift`
+  - `packages/mariadb-wire-proto/tests/fixtures/packet/*.hex`
+
+3. Handshake/auth happy path (MVP plugin set)
+- [ ] Parse server handshake in `packages/mariadb-wire-proto/src/handshake/hello.drift`.
+- [ ] Build client handshake response in `packages/mariadb-wire-proto/src/handshake/auth.drift`.
+- [ ] Implement constrained auth flow state transition (happy path only) in `packages/mariadb-wire-proto/src/handshake/auth.drift`.
+- [ ] Add deterministic transcript tests:
+  - `packages/mariadb-wire-proto/tests/unit/handshake_decode_test.drift`
+  - `packages/mariadb-wire-proto/tests/fixtures/handshake/*.hex`
+
+4. `COM_QUERY` encode + first response discriminator
+- [ ] Implement query packet encode in `packages/mariadb-wire-proto/src/command/com_query.drift`.
+- [ ] Implement response routing (OK vs ERR vs resultset header) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
+- [ ] Add command/decode tests:
+  - `packages/mariadb-wire-proto/tests/unit/com_query_test.drift`
+  - `packages/mariadb-wire-proto/tests/unit/response_discriminator_test.drift`
+
+5. OK/ERR/resultset decode
+- [ ] Implement OK packet decode in `packages/mariadb-wire-proto/src/decode/ok_packet.drift`.
+- [ ] Implement ERR packet decode in `packages/mariadb-wire-proto/src/decode/err_packet.drift`.
+- [ ] Implement resultset decode (column count, column definitions, row values, terminator handling) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
+- [ ] Add fixture-driven parser tests:
+  - `packages/mariadb-wire-proto/tests/unit/ok_packet_test.drift`
+  - `packages/mariadb-wire-proto/tests/unit/err_packet_test.drift`
+  - `packages/mariadb-wire-proto/tests/unit/resultset_decode_test.drift`
+  - `packages/mariadb-wire-proto/tests/fixtures/resultset/*.hex`
+
+6. Wire error model
+- [ ] Define stable wire-layer error tags and payloads in `packages/mariadb-wire-proto/src/errors.drift`.
+- [ ] Ensure decode/auth code paths return structured errors (no ad-hoc strings) across:
+  - `packages/mariadb-wire-proto/src/handshake/auth.drift`
+  - `packages/mariadb-wire-proto/src/decode/ok_packet.drift`
+  - `packages/mariadb-wire-proto/src/decode/err_packet.drift`
+  - `packages/mariadb-wire-proto/src/decode/resultset.drift`
+- [ ] Add unit tests for error mapping:
+  - `packages/mariadb-wire-proto/tests/unit/error_tags_test.drift`
+
+7. Real-DB smoke validation against local instance tooling
+- [ ] Add smoke harness:
+  - `packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift`
+- [ ] Validate: connect/auth/query success and server-side SQL error decode.
+- [ ] Keep this as controlled-config E2E only (no TLS, no pooling).
+
+8. Phase 1 exit criteria
+- [ ] Packet/handshake/OK/ERR/resultset unit tests green with fixed binary fixtures.
+- [ ] E2E smoke green against local MariaDB instance.
+- [ ] No RPC/SP call-surface code introduced in `mariadb-wire-proto`.
 
 ### Phase 2: RPC layer (`mariadb-rpc`)
 - Stored procedure call builder.

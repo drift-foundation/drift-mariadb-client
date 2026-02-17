@@ -1,0 +1,18 @@
+module mariadb.wire.proto.errors
+
+import std.core as core;
+
+export {
+	PacketDecodeError
+};
+
+pub struct PacketDecodeError {
+	pub tag: String,
+	pub offset: Int
+}
+
+implement core.Diagnostic for PacketDecodeError {
+	pub fn to_diag(self: &PacketDecodeError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag);
+	}
+}

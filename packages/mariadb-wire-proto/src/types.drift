@@ -1,0 +1,10 @@
+module mariadb.wire.proto.types
+
+export {
+	PacketHeader
+};
+
+pub struct PacketHeader {
+	pub payload_len: Int,
+	pub sequence_id: Byte
+}

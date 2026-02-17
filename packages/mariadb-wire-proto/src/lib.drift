@@ -1,0 +1,59 @@
+module mariadb.wire.proto
+
+import std.core as core;
+import mariadb.wire.proto.types as types;
+import mariadb.wire.proto.errors as errors;
+import mariadb.wire.proto.packet.header as packet_header;
+import mariadb.wire.proto.packet.lenenc as packet_lenenc;
+
+export {
+	PacketHeader,
+	PacketDecodeError,
+	MAX_PAYLOAD_LEN,
+	encode_packet_header,
+	decode_packet_header,
+	LenEncIntDecoded,
+	LenEncBytesDecoded,
+	encode_lenenc_int,
+	decode_lenenc_int_at,
+	encode_lenenc_string,
+	decode_lenenc_bytes_at,
+	LenEncStringDecoded,
+	decode_lenenc_string_at
+};
+
+pub type PacketHeader = types.PacketHeader;
+pub type PacketDecodeError = errors.PacketDecodeError;
+pub type LenEncIntDecoded = packet_lenenc.LenEncIntDecoded;
+pub type LenEncBytesDecoded = packet_lenenc.LenEncBytesDecoded;
+pub type LenEncStringDecoded = packet_lenenc.LenEncStringDecoded;
+
+pub const MAX_PAYLOAD_LEN: Int = 16777215;
+
+pub fn encode_packet_header(payload_len: Int, sequence_id: Byte) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	return packet_header.encode_packet_header(payload_len, sequence_id);
+}
+
+pub fn decode_packet_header(input: &Array<Byte>) nothrow -> core.Result<PacketHeader, PacketDecodeError> {
+	return packet_header.decode_packet_header(input);
+}
+
+pub fn encode_lenenc_int(value: Uint) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	return packet_lenenc.encode_lenenc_int(value);
+}
+
+pub fn decode_lenenc_int_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncIntDecoded, PacketDecodeError> {
+	return packet_lenenc.decode_lenenc_int_at(input, offset);
+}
+
+pub fn encode_lenenc_string(s: &String) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	return packet_lenenc.encode_lenenc_string(s);
+}
+
+pub fn decode_lenenc_bytes_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncBytesDecoded, PacketDecodeError> {
+	return packet_lenenc.decode_lenenc_bytes_at(input, offset);
+}
+
+pub fn decode_lenenc_string_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncStringDecoded, PacketDecodeError> {
+	return packet_lenenc.decode_lenenc_string_at(input, offset);
+}
