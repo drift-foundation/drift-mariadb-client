@@ -63,6 +63,26 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `just wire-compile-check-unit <test-file>`
   - Compile-only check for a specific unit test entrypoint.
 
+### Wire Capture Proxy (Fixture Generation)
+
+- `just wire-capture <scenario> <listen_port> <target_port> [target_host]`
+  - Starts a one-shot TCP MITM proxy and records both directions as raw `.bin` chunks.
+  - Output root: `tests/fixtures/scenarios/bin/<scenario>/<run-id>/`
+  - Files written per run:
+    - `manifest.json`
+    - `events.jsonl` (ordered chunk metadata)
+    - `0000_c2s.bin`, `0001_s2c.bin`, ...
+    - `summary.json`
+
+Example against local DB instance `mdb114-a`:
+
+1. Start capture proxy:
+   - `just wire-capture handshake_mdb114a 34115 34114`
+2. Point your client to `127.0.0.1:34115` (proxy), not directly to `34114`.
+3. Run the handshake/query scenario once; proxy exits when connection closes.
+4. Inspect captured binaries under:
+   - `tests/fixtures/scenarios/bin/handshake_mdb114a/<run-id>/`
+
 ## Local MariaDB Dev Instances
 
 ### Layout (generated, not checked in)

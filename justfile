@@ -35,3 +35,9 @@ wire-check:
 
 wire-check-unit FILE:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file "{{FILE}}" --target-word-bits 64
+
+# Capture raw wire bytes through a local TCP MITM proxy.
+# Example:
+# just wire-capture handshake_mdb114a 34115 34114
+wire-capture SCENARIO LISTEN_PORT TARGET_PORT TARGET_HOST="127.0.0.1":
+	@python3 tools/wire_capture_proxy.py --scenario "{{SCENARIO}}" --listen-port "{{LISTEN_PORT}}" --target-host "{{TARGET_HOST}}" --target-port "{{TARGET_PORT}}"

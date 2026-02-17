@@ -27,7 +27,7 @@ fn _append_nul_terminated_string(out: &mut Array<Byte>, s: &String, label: Strin
 	while i < n {
 		val b = core.string_byte_at(s, i);
 		if b == cast<Byte>(0) {
-			return core.Result::Err(_error("handshake-auth-nul-in-" + label, i));
+			return core.Result::Err(_error(errors.TAG_HANDSHAKE_AUTH_NUL_IN_PREFIX + label, i));
 		}
 		out.push(b);
 		i = i + 1;

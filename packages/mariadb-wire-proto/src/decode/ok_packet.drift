@@ -22,10 +22,10 @@ fn _read_u16le(input: &Array<Byte>, offset: Int) nothrow -> Uint {
 
 pub fn decode_ok_packet(payload: &Array<Byte>) nothrow -> core.Result<types.OkPacket, errors.PacketDecodeError> {
 	if payload.len < 1 {
-		return core.Result::Err(_error("short-ok-packet", 0));
+		return core.Result::Err(_error(errors.TAG_SHORT_OK_PACKET, 0));
 	}
 	if payload[0] != OK_PACKET_HEADER {
-		return core.Result::Err(_error("invalid-ok-header", 0));
+		return core.Result::Err(_error(errors.TAG_INVALID_OK_HEADER, 0));
 	}
 	val affected_res = lenenc.decode_lenenc_int_at(payload, 1);
 	var affected = lenenc.LenEncIntDecoded(value = cast<Uint>(0), next_offset = 0);
@@ -40,7 +40,7 @@ pub fn decode_ok_packet(payload: &Array<Byte>) nothrow -> core.Result<types.OkPa
 		Err(e) => { return core.Result::Err(e); }
 	}
 	if last_id.next_offset + 4 > payload.len {
-		return core.Result::Err(_error("ok-missing-status-or-warnings", last_id.next_offset));
+		return core.Result::Err(_error(errors.TAG_OK_MISSING_STATUS_OR_WARNINGS, last_id.next_offset));
 	}
 	val status = _read_u16le(payload, last_id.next_offset);
 	val warnings = _read_u16le(payload, last_id.next_offset + 2);

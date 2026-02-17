@@ -36,7 +36,7 @@ fn _error(tag: String, offset: Int) nothrow -> errors.PacketDecodeError {
 
 pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result<FirstResponseRoute, errors.PacketDecodeError> {
 	if payload.len < 1 {
-		return core.Result::Err(_error("short-response-payload", 0));
+		return core.Result::Err(_error(errors.TAG_SHORT_RESPONSE_PAYLOAD, 0));
 	}
 	val header = payload[0];
 	if header == FIRST_RESPONSE_OK_HEADER {
@@ -46,7 +46,7 @@ pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result
 		return core.Result::Ok(FirstResponseRoute::ErrPacket());
 	}
 	if header == FIRST_RESPONSE_LOCAL_INFILE_HEADER {
-		return core.Result::Err(_error("unsupported-local-infile", 0));
+		return core.Result::Err(_error(errors.TAG_UNSUPPORTED_LOCAL_INFILE, 0));
 	}
 	return core.Result::Ok(FirstResponseRoute::ResultSet());
 }
@@ -61,7 +61,7 @@ fn _decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core.Re
 	var col = 0;
 	while col < column_count {
 		if idx >= payload.len {
-			return core.Result::Err(_error("resultset-row-truncated", idx));
+			return core.Result::Err(_error(errors.TAG_RESULTSET_ROW_TRUNCATED, idx));
 		}
 		if payload[idx] == RESULTSET_NULL_HEADER {
 			row.push(ResultSetCell::Null());
@@ -79,14 +79,14 @@ fn _decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core.Re
 		}
 	}
 	if idx != payload.len {
-		return core.Result::Err(_error("resultset-row-trailing-bytes", idx));
+		return core.Result::Err(_error(errors.TAG_RESULTSET_ROW_TRAILING_BYTES, idx));
 	}
 	return core.Result::Ok(move row);
 }
 
 pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> core.Result<types.ResultSetDecoded, errors.PacketDecodeError> {
 	if packets.len < 1 {
-		return core.Result::Err(_error("resultset-missing-column-count", 0));
+		return core.Result::Err(_error(errors.TAG_RESULTSET_MISSING_COLUMN_COUNT, 0));
 	}
 	val first_packet = &packets[0];
 	val col_count_res = lenenc.decode_lenenc_int_at(first_packet, 0);
@@ -96,15 +96,15 @@ pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> co
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
 	if col_count_dec.next_offset != first_packet.len {
-		return core.Result::Err(_error("resultset-invalid-column-count-packet", col_count_dec.next_offset));
+		return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset));
 	}
 	val column_count = cast<Int>(col_count_dec.value);
 	if column_count < 0 {
-		return core.Result::Err(_error("resultset-invalid-column-count", 0));
+		return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT, 0));
 	}
 	val row_start = 1 + column_count;
 	if packets.len < row_start + 1 {
-		return core.Result::Err(_error("resultset-truncated-before-rows", packets.len));
+		return core.Result::Err(_error(errors.TAG_RESULTSET_TRUNCATED_BEFORE_ROWS, packets.len));
 	}
 	var rows: Array<Array<ResultSetCell>> = [];
 	var i = row_start;
@@ -119,5 +119,5 @@ pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> co
 		}
 		i = i + 1;
 	}
-	return core.Result::Err(_error("resultset-missing-terminator", packets.len));
+	return core.Result::Err(_error(errors.TAG_RESULTSET_MISSING_TERMINATOR, packets.len));
 }

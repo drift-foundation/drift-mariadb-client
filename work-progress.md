@@ -103,21 +103,22 @@ Two packages in one repository:
 5. OK/ERR/resultset decode
 - [x] Implement OK packet decode in `packages/mariadb-wire-proto/src/decode/ok_packet.drift`.
 - [x] Implement ERR packet decode in `packages/mariadb-wire-proto/src/decode/err_packet.drift`.
-- [ ] Implement resultset decode (column count, column definitions, row values, terminator handling) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
+- [x] Implement resultset decode (column count, column definitions, row values, terminator handling) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
 - [ ] Add fixture-driven parser tests:
   - `packages/mariadb-wire-proto/tests/unit/ok_packet_test.drift`
   - `packages/mariadb-wire-proto/tests/unit/err_packet_test.drift`
   - `packages/mariadb-wire-proto/tests/unit/resultset_decode_test.drift`
   - `packages/mariadb-wire-proto/tests/fixtures/resultset/*.hex`
+  Note: unit tests are now in place; `.hex` fixture files are still pending.
 
 6. Wire error model
-- [ ] Define stable wire-layer error tags and payloads in `packages/mariadb-wire-proto/src/errors.drift`.
-- [ ] Ensure decode/auth code paths return structured errors (no ad-hoc strings) across:
+- [x] Define stable wire-layer error tags and payloads in `packages/mariadb-wire-proto/src/errors.drift`.
+- [x] Ensure decode/auth code paths return structured errors (no ad-hoc strings) across:
   - `packages/mariadb-wire-proto/src/handshake/auth.drift`
   - `packages/mariadb-wire-proto/src/decode/ok_packet.drift`
   - `packages/mariadb-wire-proto/src/decode/err_packet.drift`
   - `packages/mariadb-wire-proto/src/decode/resultset.drift`
-- [ ] Add unit tests for error mapping:
+- [x] Add unit tests for error mapping:
   - `packages/mariadb-wire-proto/tests/unit/error_tags_test.drift`
 
 7. Real-DB smoke validation against local instance tooling

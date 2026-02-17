@@ -24,21 +24,21 @@ fn _read_u16le(input: &Array<Byte>, offset: Int) nothrow -> Uint {
 
 pub fn decode_err_packet(payload: &Array<Byte>) nothrow -> core.Result<types.ErrPacket, errors.PacketDecodeError> {
 	if payload.len < 3 {
-		return core.Result::Err(_error("short-err-packet", 0));
+		return core.Result::Err(_error(errors.TAG_SHORT_ERR_PACKET, 0));
 	}
 	if payload[0] != ERR_PACKET_HEADER {
-		return core.Result::Err(_error("invalid-err-header", 0));
+		return core.Result::Err(_error(errors.TAG_INVALID_ERR_HEADER, 0));
 	}
 	val code = _read_u16le(payload, 1);
 	var idx = 3;
 	var sql_state = "";
 	if idx < payload.len and payload[idx] == ERR_SQLSTATE_MARKER {
 		if idx + 6 > payload.len {
-			return core.Result::Err(_error("truncated-sql-state", idx));
+			return core.Result::Err(_error(errors.TAG_TRUNCATED_SQL_STATE, idx));
 		}
 		match text.utf8_from_bytes_range(payload, idx + 1, idx + 6) {
 			core.Result::Ok(s) => { sql_state = move s; },
-			core.Result::Err(e) => { return core.Result::Err(_error("err-sqlstate-utf8-" + e.tag, idx + 1 + e.offset)); }
+			core.Result::Err(e) => { return core.Result::Err(_error(errors.TAG_ERR_SQLSTATE_UTF8_PREFIX + e.tag, idx + 1 + e.offset)); }
 		}
 		idx = idx + 6;
 	}
@@ -47,7 +47,7 @@ pub fn decode_err_packet(payload: &Array<Byte>) nothrow -> core.Result<types.Err
 			return core.Result::Ok(types.ErrPacket(error_code = code, sql_state = move sql_state, message = move message));
 		},
 		core.Result::Err(e) => {
-			return core.Result::Err(_error("err-message-utf8-" + e.tag, idx + e.offset));
+			return core.Result::Err(_error(errors.TAG_ERR_MESSAGE_UTF8_PREFIX + e.tag, idx + e.offset));
 		}
 	}
 }
