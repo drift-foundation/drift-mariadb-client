@@ -1,1 +1,43 @@
 module mariadb.wire.proto.decode.resultset
+
+import std.core as core;
+import mariadb.wire.proto.errors as errors;
+
+export {
+	FirstResponseRoute,
+	FIRST_RESPONSE_OK_HEADER,
+	FIRST_RESPONSE_ERR_HEADER,
+	FIRST_RESPONSE_LOCAL_INFILE_HEADER,
+	discriminate_first_response
+};
+
+pub variant FirstResponseRoute {
+	OkPacket,
+	ErrPacket,
+	ResultSet
+}
+
+pub const FIRST_RESPONSE_OK_HEADER: Byte = 0;
+pub const FIRST_RESPONSE_ERR_HEADER: Byte = 255;
+pub const FIRST_RESPONSE_LOCAL_INFILE_HEADER: Byte = 251;
+
+fn _error(tag: String, offset: Int) nothrow -> errors.PacketDecodeError {
+	return errors.PacketDecodeError(tag = tag, offset = offset);
+}
+
+pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result<FirstResponseRoute, errors.PacketDecodeError> {
+	if payload.len < 1 {
+		return core.Result::Err(_error("short-response-payload", 0));
+	}
+	val header = payload[0];
+	if header == FIRST_RESPONSE_OK_HEADER {
+		return core.Result::Ok(FirstResponseRoute::OkPacket());
+	}
+	if header == FIRST_RESPONSE_ERR_HEADER {
+		return core.Result::Ok(FirstResponseRoute::ErrPacket());
+	}
+	if header == FIRST_RESPONSE_LOCAL_INFILE_HEADER {
+		return core.Result::Err(_error("unsupported-local-infile", 0));
+	}
+	return core.Result::Ok(FirstResponseRoute::ResultSet());
+}

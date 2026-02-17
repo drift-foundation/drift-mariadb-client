@@ -94,9 +94,9 @@ Two packages in one repository:
   - `packages/mariadb-wire-proto/tests/fixtures/handshake/*.hex`
 
 4. `COM_QUERY` encode + first response discriminator
-- [ ] Implement query packet encode in `packages/mariadb-wire-proto/src/command/com_query.drift`.
-- [ ] Implement response routing (OK vs ERR vs resultset header) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
-- [ ] Add command/decode tests:
+- [x] Implement query packet encode in `packages/mariadb-wire-proto/src/command/com_query.drift`.
+- [x] Implement response routing (OK vs ERR vs resultset header) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
+- [x] Add command/decode tests:
   - `packages/mariadb-wire-proto/tests/unit/com_query_test.drift`
   - `packages/mariadb-wire-proto/tests/unit/response_discriminator_test.drift`
 

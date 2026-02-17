@@ -21,6 +21,14 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - TLS disabled for MVP.
 - Stored procedure workflow first (via `COM_QUERY` path).
 
+## Protocol References
+
+- MariaDB Client/Server Protocol (overview): https://mariadb.com/docs/server/reference/clientserver-protocol
+- Packet format: https://mariadb.com/docs/server/reference/clientserver-protocol/0-packet
+- Connection/handshake phase: https://mariadb.com/docs/server/reference/clientserver-protocol/1-connecting/connection
+- MariaDB vs MySQL protocol differences: https://mariadb.com/docs/server/reference/clientserver-protocol/mariadb-protocol-differences-with-mysql
+- Accessed: 2026-02-17
+
 ## Dependencies
 
 - `bash`
@@ -31,6 +39,29 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 ### Compiler env
 
 - `DRIFTC` should point to the compiler launcher.
+
+### Build Support Flags
+
+- `DRIFT_ALLOC_TRACK=1`
+  - Enables allocator tracking instrumentation in runtime and enforces per-case leak checks when expected config requires it.
+- `DRIFT_MEMCHECK=1`
+  - For execute-time checks (`just wire-check`, `just wire-check-unit ...`), runs binaries under `valgrind --tool=memcheck`.
+- `DRIFT_MASSIF=1`
+  - For execute-time checks (`just wire-check`, `just wire-check-unit ...`), runs binaries under `valgrind --tool=massif`.
+- `DRIFT_ASAN=1`
+  - For execute-time checks, sets default `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` unless explicitly provided.
+  - Incompatible with `DRIFT_MEMCHECK` and `DRIFT_MASSIF` in the same run.
+
+### Wire Recipes
+
+- `just wire-check`
+  - Compile and execute all unit test entrypoints under `packages/mariadb-wire-proto/tests/unit`.
+- `just wire-check-unit packages/mariadb-wire-proto/tests/unit/packet_header_test.drift`
+  - Compile and execute one unit test entrypoint.
+- `just wire-compile-check`
+  - Compile-only check for library sources.
+- `just wire-compile-check-unit <test-file>`
+  - Compile-only check for a specific unit test entrypoint.
 
 ## Local MariaDB Dev Instances
 

@@ -161,7 +161,8 @@ pub fn decode_lenenc_string_at(input: &Array<Byte>, offset: Int) nothrow -> core
 			return core.Result::Ok(LenEncStringDecoded(value = move s, next_offset = bytes.next_offset));
 		},
 		core.Result::Err(e) => {
-			return core.Result::Err(_error("utf8-" + e.tag, offset + e.offset));
+			val string_offset = bytes.next_offset - bytes.value.len;
+			return core.Result::Err(_error("utf8-" + e.tag, string_offset + e.offset));
 		}
 	}
 }

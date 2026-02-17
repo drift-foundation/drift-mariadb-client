@@ -1,10 +1,33 @@
 module mariadb.wire.proto.types
 
 export {
-	PacketHeader
+	PacketHeader,
+	HandshakeHello,
+	HandshakeResponse41
 };
 
 pub struct PacketHeader {
 	pub payload_len: Int,
 	pub sequence_id: Byte
+}
+
+pub struct HandshakeHello {
+	pub protocol_version: Byte,
+	pub server_version: String,
+	pub connection_id: Uint,
+	pub capabilities: Uint,
+	pub character_set: Byte,
+	pub status_flags: Uint,
+	pub auth_plugin_data: Array<Byte>,
+	pub auth_plugin_name: String
+}
+
+pub struct HandshakeResponse41 {
+	pub capabilities: Uint,
+	pub max_packet_size: Uint,
+	pub character_set: Byte,
+	pub username: String,
+	pub auth_response: Array<Byte>,
+	pub database: String,
+	pub auth_plugin_name: String
 }
