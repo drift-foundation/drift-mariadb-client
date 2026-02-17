@@ -41,3 +41,11 @@ wire-check-unit FILE:
 # just wire-capture handshake_mdb114a 34115 34114
 wire-capture SCENARIO LISTEN_PORT TARGET_PORT TARGET_HOST="127.0.0.1":
 	@python3 tools/wire_capture_proxy.py --scenario "{{SCENARIO}}" --listen-port "{{LISTEN_PORT}}" --target-host "{{TARGET_HOST}}" --target-port "{{TARGET_PORT}}"
+
+# List available capture runs under tests/fixtures/scenarios/bin.
+wire-capture-list:
+	@bash -lc 'find tests/fixtures/scenarios/bin -mindepth 2 -maxdepth 2 -type d 2>/dev/null | sort || true'
+
+# Convert one capture run into packetized fixtures for deterministic replay.
+wire-fixture-extract SCENARIO RUN_ID:
+	@python3 tools/wire_fixture_extract.py --scenario "{{SCENARIO}}" --run-id "{{RUN_ID}}"

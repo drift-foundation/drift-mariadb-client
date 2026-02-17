@@ -83,6 +83,32 @@ Example against local DB instance `mdb114-a`:
 4. Inspect captured binaries under:
    - `tests/fixtures/scenarios/bin/handshake_mdb114a/<run-id>/`
 
+Important:
+- For fixture extraction/replay parsing, capture plaintext protocol sessions (disable TLS in the client).
+- Example for mariadb CLI:
+  - `mariadb --ssl=OFF -h 127.0.0.1 -P 34115 -u root -prootpw -e "SELECT VERSION();"`
+
+### Packetized Replay Fixtures
+
+Use capture runs to build deterministic packet fixtures (no live TCP needed in tests):
+
+1. List captured runs:
+   - `just wire-capture-list`
+2. Extract one run into packetized artifacts:
+   - `just wire-fixture-extract <scenario> <run-id>`
+3. Output is written to:
+   - `tests/fixtures/packetized/<scenario>/<run-id>/`
+4. Key files:
+   - `c2s_packets.json`
+   - `s2c_packets.json`
+   - `c2s_stream.bin`
+   - `s2c_stream.bin`
+   - `manifest.json`
+
+Notes:
+- Packetization reconstructs MariaDB packet boundaries from the TCP stream (`3-byte length + 1-byte sequence + payload`).
+- These packetized files are intended for deterministic replay tests without running a live DB instance.
+
 ## Local MariaDB Dev Instances
 
 ### Layout (generated, not checked in)

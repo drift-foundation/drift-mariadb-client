@@ -1,9 +1,0 @@
-{"index":0,"direction":"s2c","bytes":95,"ts_ns":1771357273543271382,"file":"0000_s2c.bin"}
-{"index":1,"direction":"c2s","bytes":36,"ts_ns":1771357273543682175,"file":"0001_c2s.bin"}
-{"index":2,"direction":"c2s","bytes":1533,"ts_ns":1771357273550261318,"file":"0002_c2s.bin"}
-{"index":3,"direction":"s2c","bytes":2078,"ts_ns":1771357273553998432,"file":"0003_s2c.bin"}
-{"index":4,"direction":"c2s","bytes":344,"ts_ns":1771357273554479162,"file":"0004_c2s.bin"}
-{"index":5,"direction":"s2c","bytes":609,"ts_ns":1771357273554746907,"file":"0005_s2c.bin"}
-{"index":6,"direction":"c2s","bytes":59,"ts_ns":1771357273555894393,"file":"0006_c2s.bin"}
-{"index":7,"direction":"s2c","bytes":126,"ts_ns":1771357273556076951,"file":"0007_s2c.bin"}
-{"index":8,"direction":"c2s","bytes":27,"ts_ns":1771357303952460584,"file":"0008_c2s.bin"}

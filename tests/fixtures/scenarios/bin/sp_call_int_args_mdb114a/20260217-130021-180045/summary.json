@@ -1,9 +1,0 @@
-{
-  "start_ns": 1771358427794454186,
-  "end_ns": 1771358427849705055,
-  "duration_ms": 55,
-  "chunks": 9,
-  "bytes_c2s": 1989,
-  "bytes_s2c": 2904,
-  "status": "ok"
-}
