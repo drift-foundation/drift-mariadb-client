@@ -3,7 +3,11 @@ module mariadb.wire.proto.types
 export {
 	PacketHeader,
 	HandshakeHello,
-	HandshakeResponse41
+	HandshakeResponse41,
+	OkPacket,
+	ErrPacket,
+	ResultSetCell,
+	ResultSetDecoded
 };
 
 pub struct PacketHeader {
@@ -30,4 +34,27 @@ pub struct HandshakeResponse41 {
 	pub auth_response: Array<Byte>,
 	pub database: String,
 	pub auth_plugin_name: String
+}
+
+pub struct OkPacket {
+	pub affected_rows: Uint,
+	pub last_insert_id: Uint,
+	pub status_flags: Uint,
+	pub warnings: Uint
+}
+
+pub struct ErrPacket {
+	pub error_code: Uint,
+	pub sql_state: String,
+	pub message: String
+}
+
+pub variant ResultSetCell {
+	Null,
+	Text(value: String)
+}
+
+pub struct ResultSetDecoded {
+	pub column_count: Uint,
+	pub rows: Array<Array<ResultSetCell>>
 }

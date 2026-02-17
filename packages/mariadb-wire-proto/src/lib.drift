@@ -9,11 +9,17 @@ import mariadb.wire.proto.handshake.hello as handshake_hello;
 import mariadb.wire.proto.handshake.auth as handshake_auth;
 import mariadb.wire.proto.command.com_query as command_com_query;
 import mariadb.wire.proto.decode.resultset as decode_resultset;
+import mariadb.wire.proto.decode.ok_packet as ok_packet_decode;
+import mariadb.wire.proto.decode.err_packet as err_packet_decode;
 
 export {
 	PacketHeader,
 	HandshakeHello,
 	HandshakeResponse41,
+	OkPacket,
+	ErrPacket,
+	ResultSetCell,
+	ResultSetDecoded,
 	PacketDecodeError,
 	MAX_PAYLOAD_LEN,
 	encode_packet_header,
@@ -31,12 +37,19 @@ export {
 	,
 	encode_com_query_payload,
 	FirstResponseRoute,
-	discriminate_first_response
+	discriminate_first_response,
+	decode_text_resultset_packets,
+	decode_ok_packet,
+	decode_err_packet
 };
 
 pub type PacketHeader = types.PacketHeader;
 pub type HandshakeHello = types.HandshakeHello;
 pub type HandshakeResponse41 = types.HandshakeResponse41;
+pub type OkPacket = types.OkPacket;
+pub type ErrPacket = types.ErrPacket;
+pub type ResultSetCell = types.ResultSetCell;
+pub type ResultSetDecoded = types.ResultSetDecoded;
 pub type PacketDecodeError = errors.PacketDecodeError;
 pub type LenEncIntDecoded = packet_lenenc.LenEncIntDecoded;
 pub type LenEncBytesDecoded = packet_lenenc.LenEncBytesDecoded;
@@ -87,4 +100,16 @@ pub fn encode_com_query_payload(query: &String) nothrow -> core.Result<Array<Byt
 
 pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result<FirstResponseRoute, PacketDecodeError> {
 	return decode_resultset.discriminate_first_response(payload);
+}
+
+pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> core.Result<ResultSetDecoded, PacketDecodeError> {
+	return decode_resultset.decode_text_resultset_packets(packets);
+}
+
+pub fn decode_ok_packet(payload: &Array<Byte>) nothrow -> core.Result<OkPacket, PacketDecodeError> {
+	return ok_packet_decode.decode_ok_packet(payload);
+}
+
+pub fn decode_err_packet(payload: &Array<Byte>) nothrow -> core.Result<ErrPacket, PacketDecodeError> {
+	return err_packet_decode.decode_err_packet(payload);
 }

@@ -101,8 +101,8 @@ Two packages in one repository:
   - `packages/mariadb-wire-proto/tests/unit/response_discriminator_test.drift`
 
 5. OK/ERR/resultset decode
-- [ ] Implement OK packet decode in `packages/mariadb-wire-proto/src/decode/ok_packet.drift`.
-- [ ] Implement ERR packet decode in `packages/mariadb-wire-proto/src/decode/err_packet.drift`.
+- [x] Implement OK packet decode in `packages/mariadb-wire-proto/src/decode/ok_packet.drift`.
+- [x] Implement ERR packet decode in `packages/mariadb-wire-proto/src/decode/err_packet.drift`.
 - [ ] Implement resultset decode (column count, column definitions, row values, terminator handling) in `packages/mariadb-wire-proto/src/decode/resultset.drift`.
 - [ ] Add fixture-driven parser tests:
   - `packages/mariadb-wire-proto/tests/unit/ok_packet_test.drift`
