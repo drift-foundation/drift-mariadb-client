@@ -109,3 +109,48 @@
   - ERR packet decode
   - associated unit tests
 
+## 2026-02-18
+
+### Fixture capture and replay workflow improvements
+- Added automatic SQL transcript generation to fixture extraction flow:
+  - `just wire-fixture-extract <scenario> <run-id>` now also runs `tools/write_scenario_sql.py`.
+  - `scenario.sql` is written for both:
+    - `tests/fixtures/packetized/<scenario>/<run-id>/`
+    - `tests/fixtures/scenarios/bin/<scenario>/<run-id>/`
+- Updated `README.md` capture docs to describe:
+  - wire-capture usage
+  - packetized extraction outputs
+  - `scenario.sql` auto-generation behavior
+  - file layout for raw and packetized artifacts
+
+### New captured transaction scenarios
+- Added and extracted new transaction fixture runs:
+  - `tx_manual_commit_sp_chain`
+  - `tx_manual_rollback_sp_chain`
+  - `tx_error_then_rollback` (interactive capture preserving post-error rollback commands)
+- Verified generated `scenario.sql` transcripts for each run and packetized counterpart.
+
+### Schema updates for fixture scenarios
+- Updated `tests/fixtures/appdb_schema.sql`:
+  - included consolidated appdb reset + stored procedure definitions used by captures
+  - added `sp_multi_rs()` returning two resultsets in one call
+- Reapplied schema to local dev instance and verified procedure availability.
+
+### Replay test coverage expansion
+- Added new unit replay entrypoint:
+  - `packages/mariadb-wire-proto/tests/unit/tx_fixture_replay_test.drift`
+  - validates commit/rollback/error chains by decoding captured OK/ERR packets and response routing.
+- Expanded existing SP fixture replay coverage:
+  - `packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift`
+  - added multi-resultset replay assertions for `CALL sp_multi_rs()`:
+    - first resultset decode
+    - second resultset decode
+    - trailing final OK packet decode
+
+### Validation runs completed
+- `just wire-check-unit packages/mariadb-wire-proto/tests/unit/tx_fixture_replay_test.drift` passed.
+- `DRIFT_ASAN=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/tx_fixture_replay_test.drift` passed.
+- `DRIFT_MEMCHECK=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/tx_fixture_replay_test.drift` passed (0 errors/leaks).
+- `just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed after multi-resultset additions.
+- `DRIFT_ASAN=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed.
+- `DRIFT_MEMCHECK=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed (0 errors/leaks).
