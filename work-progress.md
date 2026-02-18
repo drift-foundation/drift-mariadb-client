@@ -133,6 +133,52 @@ Two packages in one repository:
 - [x] E2E smoke green against local MariaDB instance fixtures (captured from controlled local instance).
 - [x] No RPC/SP call-surface code introduced in `mariadb-wire-proto`.
 
+### Phase 1.5: Protocol session API plan (`mariadb-wire-proto`)
+
+Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-rpc` call ergonomics.
+
+1. Live tx validation gate (before API freeze)
+- [x] Add/extend live e2e for manual transaction flows in:
+  - `packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift`
+  - `packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift`
+  - include explicit commit, rollback, and error-then-rollback paths.
+- [x] Validate in normal + ASAN + memcheck.
+
+2. Session/result API shapes
+- [ ] Define public protocol session types in:
+  - `packages/mariadb-wire-proto/src/types.drift`
+  - include:
+    - response route/shape for `OK | ERR | ResultSet`
+    - session state snapshot fields needed by pooling (`autocommit`, transaction/status view).
+- [ ] Export these through:
+  - `packages/mariadb-wire-proto/src/lib.drift`
+
+3. COM_QUERY low-level wrappers
+- [ ] Implement/land low-level wrappers in:
+  - `packages/mariadb-wire-proto/src/lib.drift`
+  - target shape:
+    - `query(...)` for single COM_QUERY submit + first-route decode
+    - explicit drain/iterate API for multi-resultset flows from one query.
+- [ ] Ensure SPs yielding multiple resultsets are first-class (no single-result assumption).
+
+4. Explicit tx command wrappers (wire-level sugar)
+- [ ] Add wrappers for:
+  - `set_autocommit(...)`
+  - `commit(...)`
+  - `rollback(...)`
+- [ ] Keep wrappers as thin COM_QUERY sugar (no RPC/business policy here).
+- [ ] Ensure returned OK packet status flags are surfaced to caller.
+
+5. Pooling compatibility contract
+- [ ] Add wire-session reuse/reset contract in:
+  - `packages/mariadb-wire-proto/src/lib.drift`
+  - include:
+    - reusable/non-reusable determination
+    - reset path suitable before returning a connection to pool.
+- [ ] Add deterministic tests in:
+  - `packages/mariadb-wire-proto/tests/unit/*`
+  - `packages/mariadb-wire-proto/tests/e2e/*`
+
 ### Phase 2: RPC layer (`mariadb-rpc`)
 - Stored procedure call builder.
 - Arg encoding rules (MVP subset).

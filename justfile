@@ -45,6 +45,9 @@ wire-live:
 wire-live-load:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift --target-word-bits 64
 
+wire-live-tx:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift --target-word-bits 64
+
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:
 # just wire-capture handshake_mdb114a 34115 34114
