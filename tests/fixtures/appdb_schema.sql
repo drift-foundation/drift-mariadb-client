@@ -20,6 +20,12 @@ BEGIN
   SELECT 2 AS a;
 END//
 
+CREATE PROCEDURE sp_multi_rs()
+BEGIN
+  SELECT 1 AS a;
+  SELECT 2 AS b;
+END//
+
 CREATE PROCEDURE sp_add(IN a INT, IN b INT)
 BEGIN
   SELECT a + b AS s;

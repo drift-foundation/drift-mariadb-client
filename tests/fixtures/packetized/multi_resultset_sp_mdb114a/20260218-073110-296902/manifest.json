@@ -1,0 +1,7 @@
+{
+  "scenario": "multi_resultset_sp_mdb114a",
+  "run_id": "20260218-073110-296902",
+  "source_run_dir": "tests/fixtures/scenarios/bin/multi_resultset_sp_mdb114a/20260218-073110-296902",
+  "c2s_packets": 5,
+  "s2c_packets": 15
+}
