@@ -154,3 +154,27 @@
 - `just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed after multi-resultset additions.
 - `DRIFT_ASAN=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed.
 - `DRIFT_MEMCHECK=1 just wire-check-unit packages/mariadb-wire-proto/tests/unit/sp_fixture_replay_test.drift` passed (0 errors/leaks).
+
+### Live transaction e2e added
+- Added dedicated live transaction e2e entrypoint:
+  - `packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift`
+- Added recipe:
+  - `just wire-live-tx`
+- Scenarios covered in one authenticated TCP session flow per scenario:
+  - manual commit chain (`SET autocommit=0; CALL sp_1(); CALL sp_2(); COMMIT; SET autocommit=1;`)
+  - manual rollback chain (`SET autocommit=0; CALL sp_1(); CALL sp_2(); ROLLBACK; SET autocommit=1;`)
+  - error-then-rollback (`SET autocommit=0; CALL sp_1(); CALL sp_error(); ROLLBACK; SET autocommit=1;`)
+  - multi-resultset procedure (`CALL sp_multi_rs();`) with explicit decode of:
+    - first resultset
+    - second resultset
+    - trailing final OK packet
+
+### Live e2e validation
+- `just wire-live-tx` passed.
+- `DRIFT_ASAN=1 just wire-live-tx` passed.
+- `DRIFT_MEMCHECK=1 just wire-live-tx` passed (0 errors/leaks; expected virtual-thread stack-switch warnings from valgrind).
+
+### Progress tracking updates
+- Updated `work-progress.md` (Phase 1.5) to mark live tx gate complete:
+  - added dedicated live tx e2e file reference
+  - marked normal + ASAN + memcheck validation complete
