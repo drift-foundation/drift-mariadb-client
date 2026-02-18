@@ -42,6 +42,9 @@ wire-smoke:
 wire-live:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift --target-word-bits 64
 
+wire-live-load:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift --target-word-bits 64
+
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:
 # just wire-capture handshake_mdb114a 34115 34114
@@ -55,3 +58,4 @@ wire-capture-list:
 # Convert one capture run into packetized fixtures for deterministic replay.
 wire-fixture-extract SCENARIO RUN_ID:
 	@python3 tools/wire_fixture_extract.py --scenario "{{SCENARIO}}" --run-id "{{RUN_ID}}"
+	@python3 tools/write_scenario_sql.py --scenario "{{SCENARIO}}" --run-id "{{RUN_ID}}"

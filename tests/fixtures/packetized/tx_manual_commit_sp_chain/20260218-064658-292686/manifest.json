@@ -1,0 +1,7 @@
+{
+  "scenario": "tx_manual_commit_sp_chain",
+  "run_id": "20260218-064658-292686",
+  "source_run_dir": "tests/fixtures/scenarios/bin/tx_manual_commit_sp_chain/20260218-064658-292686",
+  "c2s_packets": 7,
+  "s2c_packets": 7
+}

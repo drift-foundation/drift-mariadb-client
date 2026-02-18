@@ -1,0 +1,14 @@
+{
+  "scenario": "tx_error_then_rollback",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 34115
+  },
+  "target": {
+    "host": "127.0.0.1",
+    "port": 34114
+  },
+  "created_at_ns": 1771423806942529050,
+  "format_version": 1,
+  "notes": "Chunk-level TCP capture; files are ordered by events.jsonl index."
+}

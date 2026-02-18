@@ -149,6 +149,10 @@ Two packages in one repository:
 - E2E with real MariaDB instance in controlled config.
 - Negative tests: auth fail, malformed response, server error packets.
 - Stress/concurrency smoke via virtual threads.
+  - Added live load harness:
+    - `packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift`
+    - `just wire-live-load`
+  - Current baseline profile: 32 workers x 100 queries (`DO 1`), passing in normal + ASAN + memcheck.
 
 ## Initial test plan
 

@@ -1,0 +1,7 @@
+{
+  "scenario": "tx_error_then_rollback",
+  "run_id": "20260218-071006-294852",
+  "source_run_dir": "tests/fixtures/scenarios/bin/tx_error_then_rollback/20260218-071006-294852",
+  "c2s_packets": 11,
+  "s2c_packets": 29
+}

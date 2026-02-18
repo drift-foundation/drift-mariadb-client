@@ -73,6 +73,7 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
     - `events.jsonl` (ordered chunk metadata)
     - `0000_c2s.bin`, `0001_s2c.bin`, ...
     - `summary.json`
+    - `scenario.sql` (SQL transcript when extracted; see packetized step below)
 
 Example against local DB instance `mdb114-a`:
 
@@ -104,6 +105,9 @@ Use capture runs to build deterministic packet fixtures (no live TCP needed in t
    - `c2s_stream.bin`
    - `s2c_stream.bin`
    - `manifest.json`
+   - `scenario.sql` (reconstructed SQL transcript from COM_QUERY packets)
+5. `wire-fixture-extract` also writes matching `scenario.sql` into:
+   - `tests/fixtures/scenarios/bin/<scenario>/<run-id>/scenario.sql`
 
 Notes:
 - Packetization reconstructs MariaDB packet boundaries from the TCP stream (`3-byte length + 1-byte sequence + payload`).
