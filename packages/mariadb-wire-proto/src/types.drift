@@ -7,7 +7,12 @@ export {
 	OkPacket,
 	ErrPacket,
 	ResultSetCell,
-	ResultSetDecoded
+	ResultSetDecoded,
+	WireConnectOptions,
+	WireSession,
+	WireSessionState,
+	QueryResponse,
+	QueryResponsePart
 };
 
 pub struct PacketHeader {
@@ -57,4 +62,42 @@ pub variant ResultSetCell {
 pub struct ResultSetDecoded {
 	pub column_count: Uint,
 	pub rows: Array<Array<ResultSetCell>>
+}
+
+pub struct WireConnectOptions {
+	pub host: String,
+	pub port: Int,
+	pub username: String,
+	pub password: String,
+	pub database: String,
+	pub character_set: Byte,
+	pub client_capabilities: Uint,
+	pub connect_timeout_ms: Int,
+	pub io_timeout_ms: Int
+}
+
+pub struct WireSessionState {
+	pub autocommit_enabled: Bool,
+	pub in_transaction: Bool,
+	pub reusable: Bool,
+	pub last_status_flags: Uint,
+	pub last_warnings: Uint
+}
+
+pub struct WireSession {
+	pub connection_id: Uint,
+	pub next_sequence_id: Byte,
+	pub state: WireSessionState
+}
+
+pub variant QueryResponse {
+	OkPacket(value: OkPacket),
+	ErrPacket(value: ErrPacket),
+	ResultSet(value: ResultSetDecoded)
+}
+
+pub variant QueryResponsePart {
+	OkPacket(value: OkPacket),
+	ErrPacket(value: ErrPacket),
+	ResultSet(value: ResultSetDecoded)
 }

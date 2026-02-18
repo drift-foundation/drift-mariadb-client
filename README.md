@@ -21,6 +21,11 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - TLS disabled for MVP.
 - Stored procedure workflow first (via `COM_QUERY` path).
 
+## Effective Usage Guides
+
+- RPC-first guide (most users): `docs/effective-mariadb-rpc.md`
+- Wire-proto advanced guide: `docs/effective-mariadb-wire-proto.md`
+
 ## Protocol References
 
 - MariaDB Client/Server Protocol (overview): https://mariadb.com/docs/server/reference/clientserver-protocol

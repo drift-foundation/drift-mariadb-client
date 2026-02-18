@@ -157,9 +157,16 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
 - [ ] Implement/land low-level wrappers in:
   - `packages/mariadb-wire-proto/src/lib.drift`
   - target shape:
-    - `query(...)` for single COM_QUERY submit + first-route decode
-    - explicit drain/iterate API for multi-resultset flows from one query.
+    - `query(...)` to start statement execution
+    - iterator-style consume API (`next_result` / `next_row`) for multi-resultset flows.
 - [ ] Ensure SPs yielding multiple resultsets are first-class (no single-result assumption).
+- [x] Pin API policy:
+  - do not provide `query_all` / eager full aggregation in the current wire API.
+  - public surface must be streaming-first and iterator-driven.
+- [x] Pin buffering policy:
+  - internal read-ahead/buffering is allowed for transport efficiency.
+  - buffering must be bounded (no unbounded read-all accumulation before user consumption).
+  - no implicit whole-result materialization in wire core.
 
 4. Explicit tx command wrappers (wire-level sugar)
 - [ ] Add wrappers for:
@@ -168,6 +175,10 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
   - `rollback(...)`
 - [ ] Keep wrappers as thin COM_QUERY sugar (no RPC/business policy here).
 - [ ] Ensure returned OK packet status flags are surfaced to caller.
+- [x] Pin behavior policy:
+  - safe-by-default for tx control on partially consumed statements.
+  - `commit` / `rollback` must auto-drain remaining response parts before issuing tx command.
+  - if auto-drain fails, mark session non-reusable and return deterministic error.
 
 5. Pooling compatibility contract
 - [ ] Add wire-session reuse/reset contract in:
@@ -190,6 +201,13 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
   - Keep a cached column-signature hash and refresh on mismatch.
   - Add invalidation checks against schema metadata (for controlled deployments, use `information_schema`-based freshness checks and/or pinned schema version table).
   - On uncertainty/mismatch/protocol rejection, force full metadata path, refresh cache, and continue.
+- Streaming/transaction operational guidance (to document in README/docs):
+  - tx control commands may be delayed by required statement drain when prior SP/query responses are not fully consumed.
+  - large in-transaction resultsets can extend lock/resource hold time until drain completes.
+  - guidance:
+    - prefer streaming consumption and early skip where possible.
+    - avoid large resultset-returning SPs in latency-sensitive tx paths.
+    - enforce timeout/size policies; on drain failure/timeouts mark connection non-reusable.
 
 ### Phase 3: Integration/hardening
 - E2E with real MariaDB instance in controlled config.

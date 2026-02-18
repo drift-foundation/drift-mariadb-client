@@ -3,113 +3,79 @@ module mariadb.wire.proto
 import std.core as core;
 import mariadb.wire.proto.types as types;
 import mariadb.wire.proto.errors as errors;
-import mariadb.wire.proto.packet.header as packet_header;
-import mariadb.wire.proto.packet.lenenc as packet_lenenc;
-import mariadb.wire.proto.handshake.hello as handshake_hello;
-import mariadb.wire.proto.handshake.auth as handshake_auth;
-import mariadb.wire.proto.command.com_query as command_com_query;
-import mariadb.wire.proto.decode.resultset as decode_resultset;
-import mariadb.wire.proto.decode.ok_packet as ok_packet_decode;
-import mariadb.wire.proto.decode.err_packet as err_packet_decode;
 
 export {
-	PacketHeader,
-	HandshakeHello,
-	HandshakeResponse41,
 	OkPacket,
 	ErrPacket,
 	ResultSetCell,
 	ResultSetDecoded,
+	WireConnectOptions,
+	WireSession,
+	WireSessionState,
+	QueryResponse,
+	QueryResponsePart,
 	PacketDecodeError,
-	MAX_PAYLOAD_LEN,
-	encode_packet_header,
-	decode_packet_header,
-	LenEncIntDecoded,
-	LenEncBytesDecoded,
-	encode_lenenc_int,
-	decode_lenenc_int_at,
-	encode_lenenc_string,
-	decode_lenenc_bytes_at,
-	LenEncStringDecoded,
-	decode_lenenc_string_at,
-	decode_handshake_hello,
-	encode_handshake_response41
-	,
-	encode_com_query_payload,
-	FirstResponseRoute,
-	discriminate_first_response,
-	decode_text_resultset_packets,
-	decode_ok_packet,
-	decode_err_packet
+	connect,
+	close,
+	session_state,
+	session_is_reusable,
+	query,
+	set_autocommit,
+	commit,
+	rollback,
+	reset_for_pool_reuse
 };
 
-pub type PacketHeader = types.PacketHeader;
-pub type HandshakeHello = types.HandshakeHello;
-pub type HandshakeResponse41 = types.HandshakeResponse41;
 pub type OkPacket = types.OkPacket;
 pub type ErrPacket = types.ErrPacket;
 pub type ResultSetCell = types.ResultSetCell;
 pub type ResultSetDecoded = types.ResultSetDecoded;
+pub type WireConnectOptions = types.WireConnectOptions;
+pub type WireSession = types.WireSession;
+pub type WireSessionState = types.WireSessionState;
+pub type QueryResponse = types.QueryResponse;
+pub type QueryResponsePart = types.QueryResponsePart;
 pub type PacketDecodeError = errors.PacketDecodeError;
-pub type LenEncIntDecoded = packet_lenenc.LenEncIntDecoded;
-pub type LenEncBytesDecoded = packet_lenenc.LenEncBytesDecoded;
-pub type LenEncStringDecoded = packet_lenenc.LenEncStringDecoded;
-pub type FirstResponseRoute = decode_resultset.FirstResponseRoute;
 
-pub const MAX_PAYLOAD_LEN: Int = 16777215;
-
-pub fn encode_packet_header(payload_len: Int, sequence_id: Byte) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
-	return packet_header.encode_packet_header(payload_len, sequence_id);
+fn _api_not_implemented(offset: Int) nothrow -> PacketDecodeError {
+	return errors.PacketDecodeError(tag = "wire-api-not-implemented", offset = offset);
 }
 
-pub fn decode_packet_header(input: &Array<Byte>) nothrow -> core.Result<PacketHeader, PacketDecodeError> {
-	return packet_header.decode_packet_header(input);
+pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, PacketDecodeError> {
+	val _ = opts;
+	return core.Result::Err(_api_not_implemented(0));
 }
 
-pub fn encode_lenenc_int(value: Uint) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
-	return packet_lenenc.encode_lenenc_int(value);
+pub fn close(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
+	return core.Result::Err(_api_not_implemented(1));
 }
 
-pub fn decode_lenenc_int_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncIntDecoded, PacketDecodeError> {
-	return packet_lenenc.decode_lenenc_int_at(input, offset);
+pub fn session_state(session: &WireSession) nothrow -> WireSessionState {
+	return session.state;
 }
 
-pub fn encode_lenenc_string(s: &String) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
-	return packet_lenenc.encode_lenenc_string(s);
+pub fn session_is_reusable(session: &WireSession) nothrow -> Bool {
+	return session.state.reusable;
 }
 
-pub fn decode_lenenc_bytes_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncBytesDecoded, PacketDecodeError> {
-	return packet_lenenc.decode_lenenc_bytes_at(input, offset);
+pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<QueryResponse, PacketDecodeError> {
+	val _ = sql;
+	return core.Result::Err(_api_not_implemented(2));
 }
 
-pub fn decode_lenenc_string_at(input: &Array<Byte>, offset: Int) nothrow -> core.Result<LenEncStringDecoded, PacketDecodeError> {
-	return packet_lenenc.decode_lenenc_string_at(input, offset);
+pub fn set_autocommit(session: &mut WireSession, enabled: Bool) nothrow -> core.Result<OkPacket, PacketDecodeError> {
+	val _ = enabled;
+	return core.Result::Err(_api_not_implemented(4));
 }
 
-pub fn decode_handshake_hello(payload: &Array<Byte>) nothrow -> core.Result<HandshakeHello, PacketDecodeError> {
-	return handshake_hello.decode_handshake_hello(payload);
+pub fn commit(session: &mut WireSession) nothrow -> core.Result<OkPacket, PacketDecodeError> {
+	return core.Result::Err(_api_not_implemented(5));
 }
 
-pub fn encode_handshake_response41(req: &HandshakeResponse41) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
-	return handshake_auth.encode_handshake_response41(req);
+pub fn rollback(session: &mut WireSession) nothrow -> core.Result<OkPacket, PacketDecodeError> {
+	return core.Result::Err(_api_not_implemented(6));
 }
 
-pub fn encode_com_query_payload(query: &String) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
-	return command_com_query.encode_com_query_payload(query);
-}
-
-pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result<FirstResponseRoute, PacketDecodeError> {
-	return decode_resultset.discriminate_first_response(payload);
-}
-
-pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> core.Result<ResultSetDecoded, PacketDecodeError> {
-	return decode_resultset.decode_text_resultset_packets(packets);
-}
-
-pub fn decode_ok_packet(payload: &Array<Byte>) nothrow -> core.Result<OkPacket, PacketDecodeError> {
-	return ok_packet_decode.decode_ok_packet(payload);
-}
-
-pub fn decode_err_packet(payload: &Array<Byte>) nothrow -> core.Result<ErrPacket, PacketDecodeError> {
-	return err_packet_decode.decode_err_packet(payload);
+pub fn reset_for_pool_reuse(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
+	return core.Result::Err(_api_not_implemented(7));
 }
