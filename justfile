@@ -36,6 +36,12 @@ wire-check:
 wire-check-unit FILE:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file "{{FILE}}" --target-word-bits 64
 
+wire-smoke:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift --target-word-bits 64
+
+wire-live:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift --target-word-bits 64
+
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:
 # just wire-capture handshake_mdb114a 34115 34114

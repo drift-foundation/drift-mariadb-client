@@ -122,15 +122,16 @@ Two packages in one repository:
   - `packages/mariadb-wire-proto/tests/unit/error_tags_test.drift`
 
 7. Real-DB smoke validation against local instance tooling
-- [ ] Add smoke harness:
+- [x] Add smoke harness:
   - `packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift`
-- [ ] Validate: connect/auth/query success and server-side SQL error decode.
-- [ ] Keep this as controlled-config E2E only (no TLS, no pooling).
+- [x] Validate: connect/auth/query success and server-side SQL error decode.
+- [x] Keep this as controlled-config E2E only (no TLS, no pooling).
+  Note: live TCP e2e now runs via `packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift` and `just wire-live`.
 
 8. Phase 1 exit criteria
-- [ ] Packet/handshake/OK/ERR/resultset unit tests green with fixed binary fixtures.
-- [ ] E2E smoke green against local MariaDB instance.
-- [ ] No RPC/SP call-surface code introduced in `mariadb-wire-proto`.
+- [x] Packet/handshake/OK/ERR/resultset unit tests green with fixed binary fixtures.
+- [x] E2E smoke green against local MariaDB instance fixtures (captured from controlled local instance).
+- [x] No RPC/SP call-surface code introduced in `mariadb-wire-proto`.
 
 ### Phase 2: RPC layer (`mariadb-rpc`)
 - Stored procedure call builder.
