@@ -1,5 +1,8 @@
 module mariadb.wire.proto.types
 
+import std.net as net;
+import std.core as core;
+
 export {
 	PacketHeader,
 	HandshakeHello,
@@ -11,8 +14,8 @@ export {
 	WireConnectOptions,
 	WireSession,
 	WireSessionState,
-	QueryResponse,
-	QueryResponsePart
+	Statement,
+	StatementEvent
 };
 
 pub struct PacketHeader {
@@ -48,10 +51,16 @@ pub struct OkPacket {
 	pub warnings: Uint
 }
 
+implement core.Copy for OkPacket {
+}
+
 pub struct ErrPacket {
 	pub error_code: Uint,
 	pub sql_state: String,
 	pub message: String
+}
+
+implement core.Copy for ErrPacket {
 }
 
 pub variant ResultSetCell {
@@ -85,19 +94,30 @@ pub struct WireSessionState {
 }
 
 pub struct WireSession {
+	pub stream: net.TcpStream,
+	pub io_timeout_ms: Int,
+	pub is_closed: Bool,
+	pub active_statement: Bool,
 	pub connection_id: Uint,
 	pub next_sequence_id: Byte,
 	pub state: WireSessionState
 }
 
-pub variant QueryResponse {
-	OkPacket(value: OkPacket),
-	ErrPacket(value: ErrPacket),
-	ResultSet(value: ResultSetDecoded)
+pub struct Statement {
+	pub session: &mut WireSession,
+	pub mode: Int,
+	pub column_count: Int,
+	pub column_defs_remaining: Int,
+	pub awaiting_coldef_terminator: Bool,
+	pub emit_resultset_end_pending: Bool,
+	pub pending_ok: OkPacket,
+	pub pending_err: ErrPacket,
+	pub consumed_terminal: Bool
 }
 
-pub variant QueryResponsePart {
-	OkPacket(value: OkPacket),
-	ErrPacket(value: ErrPacket),
-	ResultSet(value: ResultSetDecoded)
+pub variant StatementEvent {
+	Row(value: Array<ResultSetCell>),
+	ResultSetEnd,
+	StatementEnd(value: OkPacket),
+	StatementErr(value: ErrPacket)
 }

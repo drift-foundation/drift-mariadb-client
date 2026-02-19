@@ -189,6 +189,13 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
 - [ ] Add deterministic tests in:
   - `packages/mariadb-wire-proto/tests/unit/*`
   - `packages/mariadb-wire-proto/tests/e2e/*`
+- [x] Pin lifecycle/ownership policy:
+  - single-active-statement per session: `query()` must reject if prior statement is not terminal/drained.
+  - drain completion may be via normal event consumption or explicit skip APIs (`skip_result` / `skip_remaining`).
+  - `Statement` uses max-safety ownership: holds mutable borrow to parent session for its lifetime.
+  - `Statement` drop on non-terminal state must auto-drain remaining response parts.
+  - if drop-drain fails/timeouts: immediately close connection and never reuse that session.
+  - `commit` / `rollback` / `set_autocommit` with active non-terminal statement: auto `skip_remaining` first, then issue command.
 
 ### Phase 2: RPC layer (`mariadb-rpc`)
 - Stored procedure call builder.
