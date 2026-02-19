@@ -481,7 +481,6 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 		}
 		if statement.mode == MODE_PENDING_ERR {
 			val err = statement.pending_err;
-			statement.session.state.reusable = false;
 			_set_statement_terminal(statement);
 			return core.Result::Ok(StatementEvent::StatementErr(err));
 		}
