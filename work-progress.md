@@ -198,17 +198,21 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
   - `commit` / `rollback` / `set_autocommit` with active non-terminal statement: auto `skip_remaining` first, then issue command.
 
 ### Phase 2: RPC layer (`mariadb-rpc`)
-- Stored procedure call builder.
-- Arg encoding rules (MVP subset).
-- Result mapping for common SP return patterns.
-- Error tag normalization.
-- Metadata caching + optional metadata suppression (controlled server profile):
+- [ ] Step 1 (contract-first): pin exact public `mariadb-rpc` API signatures and error tags in this file before implementation.
+- [ ] Step 2 (type surface): add `packages/mariadb-rpc/src/types.drift` with request/response and streaming result primitives aligned with wire `StatementEvent`.
+- [ ] Step 3 (minimal implementation): add `packages/mariadb-rpc/src/lib.drift` with a first call path on top of `mariadb-wire-proto` (no buffer-all API).
+- [ ] Step 4 (live validation): add live e2e RPC smoke covering success + server error + explicit drain/close behavior.
+- [ ] Stored procedure call builder.
+- [ ] Arg encoding rules (MVP subset).
+- [ ] Result mapping for common SP return patterns.
+- [ ] Error tag normalization.
+- [ ] Metadata caching + optional metadata suppression (controlled server profile):
   - Treat metadata suppression as an optimization, never a correctness dependency.
   - Cache key should include normalized SQL/proc signature + default schema + server version + session settings that affect result shape.
   - Keep a cached column-signature hash and refresh on mismatch.
   - Add invalidation checks against schema metadata (for controlled deployments, use `information_schema`-based freshness checks and/or pinned schema version table).
   - On uncertainty/mismatch/protocol rejection, force full metadata path, refresh cache, and continue.
-- Streaming/transaction operational guidance (to document in README/docs):
+- [ ] Streaming/transaction operational guidance (to document in README/docs):
   - tx control commands may be delayed by required statement drain when prior SP/query responses are not fully consumed.
   - large in-transaction resultsets can extend lock/resource hold time until drain completes.
   - guidance:
@@ -243,9 +247,146 @@ Goal: expose a low-level, pooling-friendly wire session surface before `mariadb-
 ## Open decisions to pin next
 
 1. Exact `mariadb-rpc` public API signatures.
-2. Supported argument types in MVP.
-3. Transaction semantics in MVP (explicitly out or minimal support).
-4. Connection lifecycle/pooling shape (single connection first vs pool-first).
+2. `call` result progression shape (single event API vs helper wrappers), while keeping streaming-only as default.
+3. How server SQL errors are surfaced at RPC boundary (nested result shape and canonical error tags).
+4. Pool-facing statement/session lifecycle hooks exposed by RPC (and what remains wire-only).
+
+## API signature discussion queue (next)
+
+1. `connect` and connection options surface for `mariadb-rpc`.
+2. `call` return type and event progression shape.
+3. Row access shape (column-name lookup, typed accessors, conversion errors).
+4. Tx operations (`set_autocommit`, `commit`, `rollback`) at RPC layer and their drain semantics.
+5. Finalized error envelope (`transport` vs `server` vs `decode` classes).
+
+## Phase 2 decisions pinned
+
+1. Connection configuration is builder-first:
+  - `RpcConnectionConfigBuilder` -> validated immutable `RpcConnectionConfig`.
+  - `connect` accepts only `RpcConnectionConfig` (no long arg list).
+2. MVP connection options to support in builder/config:
+  - `host` (default `127.0.0.1`)
+  - `port` (default `3306`)
+  - `user` (required)
+  - `password` (required)
+  - `database` (optional/default empty)
+  - `connect_timeout_ms`
+  - `read_timeout_ms`
+  - `write_timeout_ms`
+  - `autocommit` (default `false`)
+  - `strict_reuse` (default `true`)
+3. Charset/collation policy for MVP:
+  - default charset: `utf8mb4`
+  - default collation: `utf8mb4_unicode_ci`
+  - configurable via connection config (overridable defaults)
+  - `connect` must pin session behavior with `SET NAMES ... COLLATE ...` after handshake.
+  - RPC text decoding is UTF-8 strict; invalid text bytes return deterministic decode error (no silent replacement).
+4. `call` API uses overload set (arity-based):
+  - `call(proc_name: &String)`
+  - `call(proc_name: &String, args: &Array<RpcArg>)`
+5. `RpcArg` MVP variant domain:
+  - `Null`, `Bool`, `Int`, `Float`, `String`, `Bytes`
+6. Temporal helper policy:
+  - keep wire encoding as SQL text literals for COM_QUERY path.
+  - expose helpers so caller does not hand-format literals:
+    - `rpc.date(std.time.Date) -> RpcArg`
+    - `rpc.datetime_utc(std.time.UtcTimestamp) -> RpcArg`
+    - `rpc.time_hms(h: Int, m: Int, s: Int, micros: Int) -> core.Result<RpcArg, RpcArgError>`
+  - keep explicit string-based helpers for interop (`date_str` / `datetime_str` / `time_str`) with deterministic validation errors.
+  - `datetime_utc` naming is intentional to reflect current native type semantics and avoid implicit timezone assumptions.
+7. Bytes argument encoding policy:
+  - `RpcArg::Bytes` is encoded as canonical SQL hex literal `0x...` (uppercase hex).
+  - empty bytes encode as `0x`.
+8. Transaction safety policy:
+  - if connection/session drops with manual transaction still open, run best-effort rollback in RAII cleanup.
+  - before rollback, auto-drain active non-terminal statement (`skip_remaining`).
+  - if drain/rollback fails during cleanup, close socket and mark non-reusable.
+9. Result metadata policy:
+  - MVP consumes and exposes resultset metadata on every call (correctness-first).
+  - metadata suppression/cache optimization is deferred and optional; never required for correctness.
+10. Row access API shape:
+  - index-based access is primary.
+  - name-based access is convenience.
+  - overload-based typed getters are preferred:
+    - `row.get_int(index: Int)` and `row.get_int(name: &String)`
+    - same pattern for other typed getters (`get_string`, `get_bool`, etc.).
+
+## Proposed `mariadb-rpc` API signatures (draft v1)
+
+```drift
+module mariadb.rpc
+
+import std.core as core;
+
+pub struct RpcConnectionConfig {
+  host: String,
+  port: Int,
+  user: String,
+  password: String,
+  database: String,
+  connect_timeout_ms: Int,
+  read_timeout_ms: Int,
+  write_timeout_ms: Int,
+  autocommit: Bool,
+  strict_reuse: Bool,
+  charset: String,
+  collation: String
+}
+
+pub struct RpcConnectionConfigBuilder { /* internal mutable fields */ }
+
+pub fn new_connection_config_builder() -> RpcConnectionConfigBuilder;
+pub fn with_host(builder: RpcConnectionConfigBuilder, host: String) -> RpcConnectionConfigBuilder;
+pub fn with_port(builder: RpcConnectionConfigBuilder, port: Int) -> RpcConnectionConfigBuilder;
+pub fn with_user(builder: RpcConnectionConfigBuilder, user: String) -> RpcConnectionConfigBuilder;
+pub fn with_password(builder: RpcConnectionConfigBuilder, password: String) -> RpcConnectionConfigBuilder;
+pub fn with_database(builder: RpcConnectionConfigBuilder, database: String) -> RpcConnectionConfigBuilder;
+pub fn with_connect_timeout_ms(builder: RpcConnectionConfigBuilder, timeout_ms: Int) -> RpcConnectionConfigBuilder;
+pub fn with_read_timeout_ms(builder: RpcConnectionConfigBuilder, timeout_ms: Int) -> RpcConnectionConfigBuilder;
+pub fn with_write_timeout_ms(builder: RpcConnectionConfigBuilder, timeout_ms: Int) -> RpcConnectionConfigBuilder;
+pub fn with_autocommit(builder: RpcConnectionConfigBuilder, enabled: Bool) -> RpcConnectionConfigBuilder;
+pub fn with_strict_reuse(builder: RpcConnectionConfigBuilder, enabled: Bool) -> RpcConnectionConfigBuilder;
+pub fn with_charset(builder: RpcConnectionConfigBuilder, charset: String) -> RpcConnectionConfigBuilder;
+pub fn with_collation(builder: RpcConnectionConfigBuilder, collation: String) -> RpcConnectionConfigBuilder;
+pub fn build_connection_config(builder: RpcConnectionConfigBuilder) -> core.Result<RpcConnectionConfig, RpcConfigError>;
+
+pub struct RpcConnection { /* wraps wire session */ }
+pub struct RpcStatement { /* wraps wire statement */ }
+pub struct RpcRow { /* metadata-aware row view */ }
+
+pub enum RpcEvent {
+  Row(RpcRow),
+  ResultSetEnd(RpcResultSetSummary),
+  StatementEnd(RpcStatementSummary),
+  ServerErr(RpcServerError)
+}
+
+pub fn connect(config: RpcConnectionConfig) -> core.Result<RpcConnection, RpcError>;
+pub fn close(conn: RpcConnection) -> core.Result<(), RpcError>;
+pub fn call(conn: &mut RpcConnection, proc_name: &String) -> core.Result<RpcStatement, RpcError>;
+pub fn call(conn: &mut RpcConnection, proc_name: &String, args: &Array<RpcArg>) -> core.Result<RpcStatement, RpcError>;
+pub fn next_event(stmt: &mut RpcStatement) -> core.Result<RpcEvent, RpcError>;
+pub fn skip_result(stmt: &mut RpcStatement) -> core.Result<(), RpcError>;
+pub fn skip_remaining(stmt: &mut RpcStatement) -> core.Result<(), RpcError>;
+
+pub fn set_autocommit(conn: &mut RpcConnection, enabled: Bool) -> core.Result<(), RpcError>;
+pub fn commit(conn: &mut RpcConnection) -> core.Result<(), RpcError>;
+pub fn rollback(conn: &mut RpcConnection) -> core.Result<(), RpcError>;
+pub fn reset_for_pool_reuse(conn: &mut RpcConnection) -> core.Result<(), RpcError>;
+```
+
+Notes:
+- `call` is the only statement entry point in MVP; no raw `query` API and no `query_all` / buffer-all helper.
+- tx commands auto-drain active non-terminal statement first; drain failure marks connection non-reusable.
+- server SQL errors are surfaced as `RpcEvent::ServerErr(...)` (wire-successful statement progression), while transport/decode failures are outer `RpcError`.
+- overloaded `call` supports zero-arg SP invocation without special method names.
+- row typed getter surface uses overloads by index/name (e.g. `get_int(Int)` and `get_int(&String)`).
+
+## Deferred decisions
+
+1. Supported argument types in MVP.
+2. Transaction semantics in MVP (explicitly out or minimal support).
+3. Connection lifecycle/pooling shape (single connection first vs pool-first).
 
 ## Status
 

@@ -1,0 +1,470 @@
+module mariadb.rpc
+
+import std.core as core;
+import std.format as format;
+import std.io as io;
+import mariadb.wire.proto as wire;
+
+export {
+	RpcConnectionConfig,
+	RpcConnectionConfigBuilder,
+	RpcConnection,
+	RpcStatement,
+	RpcRow,
+	RpcEvent,
+	RpcArg,
+	RpcServerError,
+	RpcResultSetSummary,
+	RpcStatementSummary,
+	RpcConfigError,
+	RpcArgError,
+	RpcError,
+	new_connection_config_builder,
+	build_connection_config,
+	new_args,
+	arg_null,
+	arg_bool,
+	arg_int,
+	arg_float,
+	arg_string,
+	arg_bytes,
+	connect,
+	close,
+	next_event,
+	skip_result,
+	skip_remaining,
+	set_autocommit,
+	commit,
+	rollback,
+	reset_for_pool_reuse
+};
+
+pub struct RpcConnectionConfig {
+	pub host: String,
+	pub port: Int,
+	pub user: String,
+	pub password: String,
+	pub database: String,
+	pub connect_timeout_ms: Int,
+	pub read_timeout_ms: Int,
+	pub write_timeout_ms: Int,
+	pub autocommit: Bool,
+	pub strict_reuse: Bool,
+	pub charset: String,
+	pub collation: String
+}
+
+pub struct RpcConnectionConfigBuilder {
+	pub host: String,
+	pub port: Int,
+	pub user: String,
+	pub password: String,
+	pub database: String,
+	pub connect_timeout_ms: Int,
+	pub read_timeout_ms: Int,
+	pub write_timeout_ms: Int,
+	pub autocommit: Bool,
+	pub strict_reuse: Bool,
+	pub charset: String,
+	pub collation: String,
+	pub has_user: Bool,
+	pub has_password: Bool
+}
+
+pub struct RpcConnection {
+	pub wire_session: wire.WireSession,
+	pub strict_reuse: Bool
+}
+
+pub struct RpcStatement {
+	pub inner: wire.Statement
+}
+
+pub struct RpcRow {
+	pub values: Array<wire.ResultSetCell>
+}
+
+pub struct RpcServerError {
+	pub error_code: Uint,
+	pub sql_state: String,
+	pub message: String
+}
+
+pub struct RpcResultSetSummary {
+	pub done: Bool
+}
+
+implement core.Copy for RpcResultSetSummary {
+}
+
+pub struct RpcStatementSummary {
+	pub affected_rows: Uint,
+	pub last_insert_id: Uint,
+	pub status_flags: Uint,
+	pub warnings: Uint
+}
+
+implement core.Copy for RpcStatementSummary {
+}
+
+pub variant RpcEvent {
+	Row(value: RpcRow),
+	ResultSetEnd(value: RpcResultSetSummary),
+	StatementEnd(value: RpcStatementSummary),
+	ServerErr(value: RpcServerError)
+}
+
+pub variant RpcArg {
+	Null,
+	Bool(value: Bool),
+	Int(value: Int),
+	Float(value: Float),
+	String(value: String),
+	Bytes(value: Array<Byte>)
+}
+
+pub struct RpcConfigError {
+	pub tag: String,
+	pub field: String,
+	pub message: String
+}
+
+pub struct RpcArgError {
+	pub tag: String,
+	pub message: String
+}
+
+pub struct RpcError {
+	pub tag: String,
+	pub message: String
+}
+
+implement core.Diagnostic for RpcConfigError {
+	pub fn to_diag(self: &RpcConfigError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag + ":" + self.field);
+	}
+}
+
+implement core.Diagnostic for RpcArgError {
+	pub fn to_diag(self: &RpcArgError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag);
+	}
+}
+
+implement core.Diagnostic for RpcError {
+	pub fn to_diag(self: &RpcError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag);
+	}
+}
+
+const DEFAULT_HOST: String = "127.0.0.1";
+const DEFAULT_PORT: Int = 3306;
+const DEFAULT_TIMEOUT_MS: Int = 3000;
+const DEFAULT_CHARSET: String = "utf8mb4";
+const DEFAULT_COLLATION: String = "utf8mb4_unicode_ci";
+const DEFAULT_WIRE_CHARSET: Byte = 45;
+const DEFAULT_CLIENT_CAPS: Uint = 11510412;
+
+fn _rpc_error(tag: String, message: String) nothrow -> RpcError {
+	return RpcError(tag = tag, message = message);
+}
+
+fn _dup_string(s: &String) nothrow -> String {
+	val n = s.byte_length();
+	var b = io.buffer(n);
+	var i = 0;
+	while i < n {
+		io.buffer_write(&mut b, i, core.string_byte_at(s, i));
+		i = i + 1;
+	}
+	return core.string_from_utf8_bytes(io.buffer_ptr(&b), n);
+}
+
+fn _is_ident_char(b: Byte) nothrow -> Bool {
+	val u = cast<Int>(b);
+	if u >= 48 and u <= 57 { return true; }
+	if u >= 65 and u <= 90 { return true; }
+	if u >= 97 and u <= 122 { return true; }
+	return u == 95;
+}
+
+fn _is_valid_proc_name(proc_name: &String) nothrow -> Bool {
+	val n = proc_name.byte_length();
+	if n <= 0 {
+		return false;
+	}
+	var i = 0;
+	while i < n {
+		val b = core.string_byte_at(proc_name, i);
+		if not _is_ident_char(b) {
+			return false;
+		}
+		i = i + 1;
+	}
+	return true;
+}
+
+fn _one_byte_string(b: Byte) nothrow -> String {
+	var one = io.buffer(1);
+	io.buffer_write(&mut one, 0, b);
+	return core.string_from_utf8_bytes(io.buffer_ptr(&one), 1);
+}
+
+fn _sql_quote_string(s: &String) nothrow -> String {
+	var out = "'";
+	var i = 0;
+	val n = s.byte_length();
+	while i < n {
+		val b = core.string_byte_at(s, i);
+		if b == cast<Byte>(39) {
+			out = out + "''";
+		} else {
+			out = out + _one_byte_string(b);
+		}
+		i = i + 1;
+	}
+	out = out + "'";
+	return out;
+}
+
+fn _hex_digit_upper(v: Int) nothrow -> Byte {
+	if v >= 0 and v <= 9 {
+		return cast<Byte>(48 + v);
+	}
+	return cast<Byte>(65 + (v - 10));
+}
+
+fn _sql_hex_literal(bytes: &Array<Byte>) nothrow -> String {
+	var out = "0x";
+	var i = 0;
+	while i < bytes.len {
+		val u = cast<Int>(bytes[i]);
+		val hi = ((u / 16) % 16);
+		val lo = (u % 16);
+		out = out + _one_byte_string(_hex_digit_upper(hi));
+		out = out + _one_byte_string(_hex_digit_upper(lo));
+		i = i + 1;
+	}
+	return out;
+}
+
+fn _encode_arg(arg: &RpcArg) nothrow -> core.Result<String, RpcError> {
+	match arg {
+		RpcArg::Null => { return core.Result::Ok("NULL"); },
+		RpcArg::Bool(v) => { val x: Bool = *v; if x { return core.Result::Ok("1"); } return core.Result::Ok("0"); },
+		RpcArg::Int(v) => { val x: Int = *v; return core.Result::Ok(format.format_int(x)); },
+		RpcArg::Float(v) => { val x: Float = *v; return core.Result::Ok(format.format_float(x)); },
+		RpcArg::String(v) => { return core.Result::Ok(_sql_quote_string(v)); },
+		RpcArg::Bytes(v) => { return core.Result::Ok(_sql_hex_literal(v)); }
+	}
+}
+
+fn _build_call_sql(proc_name: &String, args: &Array<RpcArg>) nothrow -> core.Result<String, RpcError> {
+	if not _is_valid_proc_name(proc_name) {
+		return core.Result::Err(_rpc_error("rpc-invalid-proc-name", _dup_string(proc_name)));
+	}
+	var sql = "CALL " + _dup_string(proc_name) + "(";
+	var i = 0;
+	while i < args.len {
+		if i > 0 {
+			sql = sql + ", ";
+		}
+			match _encode_arg(&args[i]) {
+				core.Result::Ok(v) => { sql = sql + _dup_string(&v); },
+				core.Result::Err(e) => { return core.Result::Err(e); }
+			}
+		i = i + 1;
+	}
+	sql = sql + ")";
+	return core.Result::Ok(sql);
+}
+
+pub fn new_connection_config_builder() nothrow -> RpcConnectionConfigBuilder {
+	return RpcConnectionConfigBuilder(host = DEFAULT_HOST, port = DEFAULT_PORT, user = "", password = "", database = "", connect_timeout_ms = DEFAULT_TIMEOUT_MS, read_timeout_ms = DEFAULT_TIMEOUT_MS, write_timeout_ms = DEFAULT_TIMEOUT_MS, autocommit = false, strict_reuse = true, charset = DEFAULT_CHARSET, collation = DEFAULT_COLLATION, has_user = false, has_password = false);
+}
+
+implement RpcConnectionConfigBuilder {
+	pub fn with_host(self: &mut RpcConnectionConfigBuilder, host: String) nothrow -> &mut RpcConnectionConfigBuilder { self.host = move host; return self; }
+	pub fn with_port(self: &mut RpcConnectionConfigBuilder, port: Int) nothrow -> &mut RpcConnectionConfigBuilder { self.port = port; return self; }
+	pub fn with_user(self: &mut RpcConnectionConfigBuilder, user: String) nothrow -> &mut RpcConnectionConfigBuilder { self.user = move user; self.has_user = true; return self; }
+	pub fn with_password(self: &mut RpcConnectionConfigBuilder, password: String) nothrow -> &mut RpcConnectionConfigBuilder { self.password = move password; self.has_password = true; return self; }
+	pub fn with_database(self: &mut RpcConnectionConfigBuilder, database: String) nothrow -> &mut RpcConnectionConfigBuilder { self.database = move database; return self; }
+	pub fn with_connect_timeout_ms(self: &mut RpcConnectionConfigBuilder, timeout_ms: Int) nothrow -> &mut RpcConnectionConfigBuilder { self.connect_timeout_ms = timeout_ms; return self; }
+	pub fn with_read_timeout_ms(self: &mut RpcConnectionConfigBuilder, timeout_ms: Int) nothrow -> &mut RpcConnectionConfigBuilder { self.read_timeout_ms = timeout_ms; return self; }
+	pub fn with_write_timeout_ms(self: &mut RpcConnectionConfigBuilder, timeout_ms: Int) nothrow -> &mut RpcConnectionConfigBuilder { self.write_timeout_ms = timeout_ms; return self; }
+	pub fn with_autocommit(self: &mut RpcConnectionConfigBuilder, enabled: Bool) nothrow -> &mut RpcConnectionConfigBuilder { self.autocommit = enabled; return self; }
+	pub fn with_strict_reuse(self: &mut RpcConnectionConfigBuilder, enabled: Bool) nothrow -> &mut RpcConnectionConfigBuilder { self.strict_reuse = enabled; return self; }
+	pub fn with_charset(self: &mut RpcConnectionConfigBuilder, charset: String) nothrow -> &mut RpcConnectionConfigBuilder { self.charset = move charset; return self; }
+	pub fn with_collation(self: &mut RpcConnectionConfigBuilder, collation: String) nothrow -> &mut RpcConnectionConfigBuilder { self.collation = move collation; return self; }
+}
+
+pub fn build_connection_config(builder: RpcConnectionConfigBuilder) nothrow -> core.Result<RpcConnectionConfig, RpcConfigError> {
+	if not builder.has_user {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-missing-required", field = "user", message = "user is required"));
+	}
+	if not builder.has_password {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-missing-required", field = "password", message = "password is required"));
+	}
+	if builder.port <= 0 or builder.port > 65535 {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-invalid-port", field = "port", message = "port must be in 1..65535"));
+	}
+	if builder.connect_timeout_ms <= 0 {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-invalid-timeout", field = "connect_timeout_ms", message = "timeout must be > 0"));
+	}
+	if builder.read_timeout_ms <= 0 {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-invalid-timeout", field = "read_timeout_ms", message = "timeout must be > 0"));
+	}
+	if builder.write_timeout_ms <= 0 {
+		return core.Result::Err(RpcConfigError(tag = "rpc-config-invalid-timeout", field = "write_timeout_ms", message = "timeout must be > 0"));
+	}
+	return core.Result::Ok(RpcConnectionConfig(host = builder.host, port = builder.port, user = builder.user, password = builder.password, database = builder.database, connect_timeout_ms = builder.connect_timeout_ms, read_timeout_ms = builder.read_timeout_ms, write_timeout_ms = builder.write_timeout_ms, autocommit = builder.autocommit, strict_reuse = builder.strict_reuse, charset = builder.charset, collation = builder.collation));
+}
+
+pub fn new_args() nothrow -> Array<RpcArg> { var args: Array<RpcArg> = []; return move args; }
+pub fn arg_null() nothrow -> RpcArg { return RpcArg::Null(); }
+pub fn arg_bool(v: Bool) nothrow -> RpcArg { return RpcArg::Bool(v); }
+pub fn arg_int(v: Int) nothrow -> RpcArg { return RpcArg::Int(v); }
+pub fn arg_float(v: Float) nothrow -> RpcArg { return RpcArg::Float(v); }
+pub fn arg_string(v: String) nothrow -> RpcArg { return RpcArg::String(move v); }
+pub fn arg_bytes(v: Array<Byte>) nothrow -> RpcArg { return RpcArg::Bytes(move v); }
+
+fn _exec_expect_ok(conn: &mut RpcConnection, sql: &String) nothrow -> core.Result<Void, RpcError> {
+	match wire.query(&mut conn.wire_session, sql) {
+		core.Result::Ok(v) => {
+			var stmt = move v;
+			while true {
+				match wire.next_event(&mut stmt) {
+					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(&e.tag))); },
+					core.Result::Ok(ev) => {
+						match ev {
+							wire.StatementEvent::Row(_) => {},
+							wire.StatementEvent::ResultSetEnd => {},
+							wire.StatementEvent::StatementEnd(_) => { return core.Result::Ok(core.void_value()); },
+							wire.StatementEvent::StatementErr(e2) => { return core.Result::Err(_rpc_error("rpc-server-error", _dup_string(&e2.message))); }
+						}
+					}
+				}
+			}
+		},
+		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(&e.tag))); }
+	}
+}
+
+pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection, RpcError> {
+	val opts = wire.WireConnectOptions(host = config.host, port = config.port, username = config.user, password = config.password, database = config.database, character_set = DEFAULT_WIRE_CHARSET, client_capabilities = DEFAULT_CLIENT_CAPS, connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
+	match wire.connect(&opts) {
+		core.Result::Ok(v) => {
+			var session = move v;
+			var conn = RpcConnection(wire_session = move session, strict_reuse = config.strict_reuse);
+			val set_names_sql = "SET NAMES " + config.charset + " COLLATE " + config.collation;
+			match _exec_expect_ok(&mut conn, &set_names_sql) {
+				core.Result::Ok(_) => {},
+				core.Result::Err(e) => {
+					val _ = wire.close(&mut conn.wire_session);
+					return core.Result::Err(e);
+				}
+			}
+			match wire.set_autocommit(&mut conn.wire_session, config.autocommit) {
+				core.Result::Ok(_) => { return core.Result::Ok(move conn); },
+				core.Result::Err(e) => {
+					val _ = wire.close(&mut conn.wire_session);
+					return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));
+				}
+			}
+		},
+		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(&e.tag))); }
+	}
+}
+
+implement RpcConnection {
+	pub fn call(self: &mut RpcConnection, proc_name: &String) nothrow -> core.Result<RpcStatement, RpcError> {
+		var args: Array<RpcArg> = [];
+		return self.call(proc_name, &args);
+	}
+
+	pub fn call(self: &mut RpcConnection, proc_name: &String, args: &Array<RpcArg>) nothrow -> core.Result<RpcStatement, RpcError> {
+		match _build_call_sql(proc_name, args) {
+			core.Result::Ok(sql) => {
+				match wire.query(&mut self.wire_session, &sql) {
+					core.Result::Ok(v) => { var st = move v; return core.Result::Ok(RpcStatement(inner = move st)); },
+					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(&e.tag))); }
+				}
+			},
+			core.Result::Err(e) => { return core.Result::Err(e); }
+		}
+	}
+
+	pub fn set_autocommit(self: &mut RpcConnection, enabled: Bool) nothrow -> core.Result<Void, RpcError> {
+		match wire.set_autocommit(&mut self.wire_session, enabled) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	pub fn commit(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+		match wire.commit(&mut self.wire_session) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-commit-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	pub fn rollback(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+		match wire.rollback(&mut self.wire_session) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-rollback-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	pub fn reset_for_pool_reuse(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+		match wire.reset_for_pool_reuse(&mut self.wire_session) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-reset-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	pub fn close(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+		match wire.close(&mut self.wire_session) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-close-failed", _dup_string(&e.tag))); }
+		}
+	}
+}
+
+implement RpcStatement {
+	pub fn next_event(self: &mut RpcStatement) nothrow -> core.Result<RpcEvent, RpcError> {
+		match wire.next_event(&mut self.inner) {
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(&e.tag))); },
+			core.Result::Ok(v) => {
+				match v {
+					wire.StatementEvent::Row(v2) => { var row = move v2; return core.Result::Ok(RpcEvent::Row(RpcRow(values = move row))); },
+					wire.StatementEvent::ResultSetEnd => { return core.Result::Ok(RpcEvent::ResultSetEnd(RpcResultSetSummary(done = true))); },
+					wire.StatementEvent::StatementEnd(v2) => { return core.Result::Ok(RpcEvent::StatementEnd(RpcStatementSummary(affected_rows = v2.affected_rows, last_insert_id = v2.last_insert_id, status_flags = v2.status_flags, warnings = v2.warnings))); },
+					wire.StatementEvent::StatementErr(v2) => { return core.Result::Ok(RpcEvent::ServerErr(RpcServerError(error_code = v2.error_code, sql_state = v2.sql_state, message = v2.message))); }
+				}
+			}
+		}
+	}
+
+	pub fn skip_result(self: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> {
+		match wire.skip_result(&mut self.inner) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-result-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	pub fn skip_remaining(self: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> {
+		match wire.skip_remaining(&mut self.inner) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-remaining-failed", _dup_string(&e.tag))); }
+		}
+	}
+}
+
+pub fn next_event(statement: &mut RpcStatement) nothrow -> core.Result<RpcEvent, RpcError> { return statement.next_event(); }
+pub fn skip_result(statement: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> { return statement.skip_result(); }
+pub fn skip_remaining(statement: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> { return statement.skip_remaining(); }
+pub fn set_autocommit(conn: &mut RpcConnection, enabled: Bool) nothrow -> core.Result<Void, RpcError> { return conn.set_autocommit(enabled); }
+pub fn commit(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.commit(); }
+pub fn rollback(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.rollback(); }
+pub fn reset_for_pool_reuse(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.reset_for_pool_reuse(); }
+pub fn close(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.close(); }

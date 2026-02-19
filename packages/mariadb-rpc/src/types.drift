@@ -1,0 +1,138 @@
+module mariadb.rpc.types
+
+import std.core as core;
+import mariadb.wire.proto as wire;
+
+export {
+	RpcConnectionConfig,
+	RpcConnectionConfigBuilder,
+	RpcConnection,
+	RpcStatement,
+	RpcRow,
+	RpcEvent,
+	RpcArg,
+	RpcServerError,
+	RpcResultSetSummary,
+	RpcStatementSummary,
+	RpcConfigError,
+	RpcArgError,
+	RpcError
+};
+
+pub struct RpcConnectionConfig {
+	pub host: String,
+	pub port: Int,
+	pub user: String,
+	pub password: String,
+	pub database: String,
+	pub connect_timeout_ms: Int,
+	pub read_timeout_ms: Int,
+	pub write_timeout_ms: Int,
+	pub autocommit: Bool,
+	pub strict_reuse: Bool,
+	pub charset: String,
+	pub collation: String
+}
+
+pub struct RpcConnectionConfigBuilder {
+	pub host: String,
+	pub port: Int,
+	pub user: String,
+	pub password: String,
+	pub database: String,
+	pub connect_timeout_ms: Int,
+	pub read_timeout_ms: Int,
+	pub write_timeout_ms: Int,
+	pub autocommit: Bool,
+	pub strict_reuse: Bool,
+	pub charset: String,
+	pub collation: String,
+	pub has_user: Bool,
+	pub has_password: Bool
+}
+
+pub struct RpcConnection {
+	pub wire_session: wire.WireSession,
+	pub strict_reuse: Bool
+}
+
+pub struct RpcStatement {
+	pub inner: wire.Statement
+}
+
+pub struct RpcRow {
+	pub values: Array<wire.ResultSetCell>
+}
+
+pub struct RpcServerError {
+	pub error_code: Uint,
+	pub sql_state: String,
+	pub message: String
+}
+
+pub struct RpcResultSetSummary {
+	pub done: Bool
+}
+
+implement core.Copy for RpcResultSetSummary {
+}
+
+pub struct RpcStatementSummary {
+	pub affected_rows: Uint,
+	pub last_insert_id: Uint,
+	pub status_flags: Uint,
+	pub warnings: Uint
+}
+
+implement core.Copy for RpcStatementSummary {
+}
+
+pub variant RpcEvent {
+	Row(value: RpcRow),
+	ResultSetEnd(value: RpcResultSetSummary),
+	StatementEnd(value: RpcStatementSummary),
+	ServerErr(value: RpcServerError)
+}
+
+pub variant RpcArg {
+	Null,
+	Bool(value: Bool),
+	Int(value: Int),
+	Float(value: Float),
+	String(value: String),
+	Bytes(value: Array<Byte>)
+}
+
+pub struct RpcConfigError {
+	pub tag: String,
+	pub field: String,
+	pub message: String
+}
+
+pub struct RpcArgError {
+	pub tag: String,
+	pub message: String
+}
+
+pub struct RpcError {
+	pub tag: String,
+	pub message: String
+}
+
+implement core.Diagnostic for RpcConfigError {
+	pub fn to_diag(self: &RpcConfigError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag + ":" + self.field);
+	}
+}
+
+implement core.Diagnostic for RpcArgError {
+	pub fn to_diag(self: &RpcArgError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag);
+	}
+}
+
+implement core.Diagnostic for RpcError {
+	pub fn to_diag(self: &RpcError) nothrow -> DiagnosticValue {
+		return DiagnosticValue::String(self.tag);
+	}
+}
