@@ -60,9 +60,6 @@ pub struct ErrPacket {
 	pub message: String
 }
 
-implement core.Copy for ErrPacket {
-}
-
 pub variant ResultSetCell {
 	Null,
 	Text(value: String)

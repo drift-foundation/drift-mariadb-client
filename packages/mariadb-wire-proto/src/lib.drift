@@ -2,6 +2,7 @@ module mariadb.wire.proto
 
 import std.core as core;
 import std.io as io;
+import std.mem as mem;
 import std.net as net;
 import std.concurrent as conc;
 import std.crypto as crypto;
@@ -480,9 +481,9 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			return core.Result::Ok(StatementEvent::StatementEnd(ok));
 		}
 		if statement.mode == MODE_PENDING_ERR {
-			val err = statement.pending_err;
 			_set_statement_terminal(statement);
-			return core.Result::Ok(StatementEvent::StatementErr(err));
+			val err = mem.replace(&mut statement.pending_err, types.ErrPacket(error_code = cast<Uint>(0), sql_state = "", message = ""));
+			return core.Result::Ok(StatementEvent::StatementErr(move err));
 		}
 		if statement.mode == MODE_NEED_NEXT_FIRST {
 			var first: Array<Byte> = [];

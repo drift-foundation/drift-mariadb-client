@@ -178,3 +178,37 @@
 - Updated `work-progress.md` (Phase 1.5) to mark live tx gate complete:
   - added dedicated live tx e2e file reference
   - marked normal + ASAN + memcheck validation complete
+
+## 2026-02-19
+
+### Compiler integration: Result/variant payload handoff corruption closure
+- Integrated latest toolchain fixes targeting aggregate payload handoff/bind corruption paths:
+  - LLVM variant payload sizing corrected for forward/alias nominal recursive fields in `_size_align_typeid`.
+  - Undersized `Result::Ok` aggregate payload storage issue addressed (post-bind state flip class).
+  - Regressions added/kept upstream for:
+    - forward-nominal variant payload sizing (`test_variant_payload_forward_nominal_size`)
+    - match binder extraction
+    - `CopyValue`/phi retain path
+    - non-copy ref-scrutinee rejection
+
+### Repository-side regression reruns
+- Ran live handoff regressions with current compiler from this repo:
+  - `just rpc-live-connect-state-probe`
+  - `just rpc-live-connect-state-stage`
+  - `just rpc-live-connect-state-regression`
+- In this sandboxed environment, runs compile/link successfully but live connect path fails at runtime (`exit 11/111`) due environment access limits, so end-to-end host confirmation must be read from host runs.
+
+### Non-network verification in-repo
+- Executed non-network rpc handoff unit suite:
+  - `tools/drift_test_runner.sh run-all --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-root packages/mariadb-rpc/tests/unit --target-word-bits 64`
+- Result: pass.
+
+### Host closure note
+- Host-side repro closure target for this defect remains:
+  - before fix signal: `EXIT:135` (`connect_state_handoff_probe_regression_test`)
+  - after fix target: `EXIT:0`
+- Host verification run (outside sandbox) completed:
+  - `just rpc-live-connect-state-probe` -> `0`
+  - `just rpc-live-connect-state-stage` -> `0`
+  - `just rpc-live-connect-state-regression` -> `0`
+  - summary: `probe=0 stage=0 regression=0`

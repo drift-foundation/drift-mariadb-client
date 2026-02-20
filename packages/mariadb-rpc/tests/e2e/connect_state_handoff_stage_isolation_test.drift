@@ -1,0 +1,115 @@
+module mariadb.rpc.tests.e2e.connect_state_handoff_stage_isolation_test
+
+import std.core as core;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _connect_passthrough(cfg: rpc.RpcConnectionConfig) nothrow -> core.Result<rpc.RpcConnection, rpc.RpcError> {
+	return rpc.connect(move cfg);
+}
+
+fn _connect_rebind(cfg: rpc.RpcConnectionConfig) nothrow -> core.Result<rpc.RpcConnection, rpc.RpcError> {
+	match rpc.connect(move cfg) {
+		core.Result::Ok(v) => {
+			var conn = move v;
+			return core.Result::Ok(move conn);
+		},
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+}
+
+fn _assert_post_bind_state(conn: &rpc.RpcConnection, base: Int) nothrow -> Int {
+	val st = wire.session_state(&conn.wire_session);
+	if not st.reusable { return base + 1; }
+	if st.autocommit_enabled { return base + 2; }
+	if st.in_transaction { return base + 3; }
+	return 0;
+}
+
+fn _connect_err_code(e: &rpc.RpcError) nothrow -> Int {
+	if e.tag == "rpc-wire-connect-failed" { return 1; }
+	if e.tag == "rpc-wire-query-failed" { return 2; }
+	if e.tag == "rpc-server-error" { return 3; }
+	if e.tag == "rpc-wire-set-autocommit-failed" { return 4; }
+	return 9;
+}
+
+fn _scenario_direct() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 10; },
+		core.Result::Ok(c) => {
+			var cfg = move c;
+			match rpc.connect(move cfg) {
+				core.Result::Err(e) => { return 110 + _connect_err_code(&e); },
+				core.Result::Ok(v) => {
+					var conn = move v;
+					return _assert_post_bind_state(&conn, 120);
+				}
+			}
+		}
+	}
+}
+
+fn _scenario_passthrough() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 30; },
+		core.Result::Ok(c) => {
+			var cfg = move c;
+			match _connect_passthrough(move cfg) {
+				core.Result::Err(e) => { return 130 + _connect_err_code(&e); },
+				core.Result::Ok(v) => {
+					var conn = move v;
+					return _assert_post_bind_state(&conn, 140);
+				}
+			}
+		}
+	}
+}
+
+fn _scenario_rebind() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 50; },
+		core.Result::Ok(c) => {
+			var cfg = move c;
+			match _connect_rebind(move cfg) {
+				core.Result::Err(e) => { return 150 + _connect_err_code(&e); },
+				core.Result::Ok(v) => {
+					var conn = move v;
+					return _assert_post_bind_state(&conn, 160);
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val a = _scenario_direct();
+	if a != 0 { return a; }
+	val b = _scenario_passthrough();
+	if b != 0 { return b; }
+	val c = _scenario_rebind();
+	if c != 0 { return c; }
+	return 0;
+}

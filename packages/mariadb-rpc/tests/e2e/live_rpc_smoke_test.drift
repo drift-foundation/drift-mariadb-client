@@ -1,0 +1,157 @@
+module mariadb.rpc.tests.e2e.live_rpc_smoke_test
+
+import std.core as core;
+import std.concurrent as conc;
+import std.log as log;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _make_logger() nothrow -> log.Logger {
+	var b = log.config_builder();
+	b.min_level(log.Level::Debug());
+	b.sink(log.stderr_sink());
+	return log.create_logger("rpc-live-smoke", b.build());
+}
+
+fn _probe_wire_connect(logger: &log.Logger) nothrow -> Int {
+	val _ = logger.info("probe-wire-connect-start", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"});
+	val opts = wire.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = cast<Byte>(45), client_capabilities = cast<Uint>(11510412), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(_) => { val _ = logger.error("probe-wire-connect-failed", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"}); return 1; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			val _ = wire.close(&mut session);
+			val _ = logger.info("probe-wire-connect-ok", {"scenario": "rpc-live-smoke"});
+			return 0;
+		}
+	}
+}
+
+fn _drain_expect_statement_end(stmt: &mut rpc.RpcStatement, base: Int) nothrow -> Int {
+	while true {
+		match stmt.next_event() {
+			core.Result::Err(_) => { return base; },
+			core.Result::Ok(ev) => {
+				match ev {
+					rpc.RpcEvent::Row(_) => {},
+					rpc.RpcEvent::ResultSetEnd(_) => {},
+					rpc.RpcEvent::ServerErr(_) => { return base + 1; },
+					rpc.RpcEvent::StatementEnd(_) => { return 0; }
+				}
+			}
+		}
+	}
+}
+
+fn scenario_ping_no_args(logger: &log.Logger) nothrow -> Int {
+	val probe = _probe_wire_connect(logger);
+	if probe != 0 {
+		val _ = logger.error("scenario-ping-probe-failed", {"scenario": "ping-no-args"});
+		return 1099;
+	}
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "ping-no-args", "step": "build-config"}); return 1000; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "ping-no-args", "step": "connect"}); return 1001; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					val st = wire.session_state(&conn.wire_session);
+					val _ = logger.info("rpc-connect-state", {"scenario": "ping-no-args", "reusable": (st.reusable ? "true" : "false"), "autocommit": (st.autocommit_enabled ? "true" : "false"), "in_tx": (st.in_transaction ? "true" : "false")});
+					match conn.call(&"sp_ping") {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "ping-no-args", "proc": "sp_ping"}); val _ = rpc.close(&mut conn); return 1002; },
+						core.Result::Ok(s) => {
+							var stmt = move s;
+							val rc = _drain_expect_statement_end(&mut stmt, 1003);
+							if rc != 0 { val _ = rpc.close(&mut conn); return rc; }
+						}
+					}
+					match conn.commit() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1004; }
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "call-with-args", "step": "build-config"}); return 1100; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "call-with-args", "step": "connect"}); return 1101; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					var args: Array<rpc.RpcArg> = [];
+					args.push(rpc.arg_int(1));
+					args.push(rpc.arg_int(2));
+					match conn.call(&"sp_add", &args) {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1102; },
+						core.Result::Ok(s) => {
+							var stmt = move s;
+							var saw_row = false;
+							while true {
+								match stmt.next_event() {
+									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "call-with-args", "step": "next-event"}); val _ = rpc.close(&mut conn); return 1103; },
+									core.Result::Ok(ev) => {
+										match ev {
+											rpc.RpcEvent::Row(_) => { saw_row = true; },
+											rpc.RpcEvent::ResultSetEnd(_) => {},
+											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1104; },
+											rpc.RpcEvent::StatementEnd(_) => { break; }
+										}
+									}
+								}
+							}
+							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1105; }
+						}
+					}
+					match conn.rollback() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1106; }
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val logger = _make_logger();
+	val a = scenario_ping_no_args(&logger);
+	if a != 0 { return a; }
+	val b = scenario_call_with_args(&logger);
+	if b != 0 { return b; }
+	val _ = logger.flush(conc.Duration(millis = 50));
+	return 0;
+}

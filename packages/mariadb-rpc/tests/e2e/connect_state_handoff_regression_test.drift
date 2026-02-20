@@ -1,0 +1,47 @@
+module mariadb.rpc.tests.e2e.connect_state_handoff_regression_test
+
+import std.core as core;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn main() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 10; },
+		core.Result::Ok(c) => {
+			var cfg = move c;
+			match rpc.connect(move cfg) {
+				core.Result::Err(_) => { return 11; },
+				core.Result::Ok(v) => {
+					var conn = move v;
+					val st = wire.session_state(&conn.wire_session);
+					if not st.reusable { return 21; }
+					if st.autocommit_enabled { return 22; }
+					if st.in_transaction { return 23; }
+					return 0;
+				}
+			}
+		}
+	}
+}

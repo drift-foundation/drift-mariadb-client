@@ -388,7 +388,76 @@ Notes:
 2. Transaction semantics in MVP (explicitly out or minimal support).
 3. Connection lifecycle/pooling shape (single connection first vs pool-first).
 
+## Compiler defect ledger (must clear before major RPC progress)
+
+1. `CORE_BUG` - zero-param alias forward nominal resolution
+- Symptom: type alias/exported nominal mismatch (`have X, expected X`) and downstream overload failures.
+- Status: fixed upstream (confirmed by local compile rerun).
+
+2. `CORE_BUG` - variant match binder deref typing (`&Variant` payloads)
+- Symptom: payload binder deref produced let-binding type mismatch in simple primitive payload patterns.
+- Status: fixed upstream (confirmed by local compile rerun).
+
+3. `CORE_BUG` - intrinsic arg validation with `UNKNOWN` call-signature slots
+- Symptom: `Array.push` cross-module rejected typed values with `expected UNKNOWN`.
+- Status: fixed upstream (confirmed by local compile rerun).
+
+4. `CORE_BUG` - checker internal `CallInfo param layout mismatch` on call/method call
+- Symptom: internal checker crash in `packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift` on regular close/call paths.
+- Repro command:
+  - `tools/drift_test_runner.sh compile --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift --target-word-bits 64`
+- Status: resolved upstream; local repro now exits `0` with current toolchain.
+
+5. `CORE_BUG` - suspected state corruption across `rpc.connect` return/bind path
+- Symptom (prior run): state inside `rpc.connect` before `Ok(move conn)` was `reusable=true autocommit=false`, but caller-side state after `Ok(c)` bind appeared reverted.
+- Pinned regression:
+  - `packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift`
+  - `just rpc-live-connect-state-regression`
+- Stage-isolation regression:
+  - `packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift`
+  - `just rpc-live-connect-state-stage`
+  - `121` => direct scenario post-bind `reusable` flipped false (`120 + 1`).
+- Minimal pre-vs-post probe regression:
+  - `packages/mariadb-rpc/tests/e2e/connect_state_handoff_probe_regression_test.drift`
+  - `just rpc-live-connect-state-probe`
+  - code bands:
+    - `131..133`: pre-return state drift inside connect path (checked before return)
+    - `134..136`: probe payload field drift after `Result::Ok(...)` bind
+    - `14x`: post-bind live session drift in caller after `Ok(...)` bind
+    - `11x`: connect path error tags
+- Latest host signal:
+  - `exit 135` from `just rpc-live-connect-state-probe`
+  - Interpretation: pre-return checks passed in `connect_handoff_probe`, but returned probe field `pre_autocommit_enabled` flipped true after `Ok(...)` bind.
+  - Classification: `CORE_BUG` in Result/aggregate payload handoff-bind lowering (not protocol state mutation itself).
+- Paired probe evidence (single run):
+  - inside `rpc.connect` before return: `reusable=true autocommit=false in_tx=false`
+  - caller post-bind before first call: `reusable=false autocommit=true in_tx=false`
+- Non-network repro attempts (currently pass, do not reproduce):
+  - `packages/mariadb-rpc/tests/unit/connect_state_handoff_nonnetwork_shape_test.drift`
+  - `packages/mariadb-rpc/tests/unit/connect_state_handoff_nonnetwork_crossmodule_test.drift`
+  - `packages/mariadb-rpc/tests/unit/connect_state_handoff_nonnetwork_noncopypayload_test.drift`
+- Required probe (same run):
+  - pre-return state check in connect path
+  - post-bind state check immediately after `Ok(...)` bind
+- Status: resolved upstream; host verification now green:
+  - `just rpc-live-connect-state-probe` -> `0`
+  - `just rpc-live-connect-state-stage` -> `0`
+  - `just rpc-live-connect-state-regression` -> `0`
+
+6. `CORE_BUG` - unsafe `core.Copy` acceptance on non-Copy field structs
+- Symptom (reported): compiler accepts `implement core.Copy` for structs containing `String`.
+- Risk: UAF-class ownership corruption, can contaminate unrelated investigations.
+- Local repro:
+  - `/tmp/repro_copy_string_forbidden.drift`:
+    - `struct BadCopy { v: String }`
+    - `implement core.Copy for BadCopy {}`
+  - command:
+    - `DRIFTC=/home/sl/src/drift-lang/bin/driftc $DRIFTC --target-word-bits 64 /tmp/repro_copy_string_forbidden.drift -o /tmp/repro_copy_string_forbidden.bin`
+  - actual now:
+    - `<source>:9:1: error: core.Copy impl target must be structurally Copy in MVP`
+- Status: resolved upstream.
+
 ## Status
 
-- Planned and pinned at architecture level.
-- Implementation not started.
+- Architecture pinned.
+- RPC implementation started, but major progress is gated on open compiler defects in the ledger above.

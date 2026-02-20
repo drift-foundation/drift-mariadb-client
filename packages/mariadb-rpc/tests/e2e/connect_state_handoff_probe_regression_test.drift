@@ -1,0 +1,61 @@
+module mariadb.rpc.tests.e2e.connect_state_handoff_probe_regression_test
+
+import std.core as core;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _connect_err_code(e: &rpc.RpcError) nothrow -> Int {
+	if e.tag == "rpc-wire-connect-failed" { return 111; }
+	if e.tag == "rpc-wire-query-failed" { return 112; }
+	if e.tag == "rpc-server-error" { return 113; }
+	if e.tag == "rpc-wire-set-autocommit-failed" { return 114; }
+	if e.tag == "rpc-probe-pre-reusable-false" { return 131; }
+	if e.tag == "rpc-probe-pre-autocommit-true" { return 132; }
+	if e.tag == "rpc-probe-pre-in-transaction-true" { return 133; }
+	return 119;
+}
+
+fn main() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 100; },
+		core.Result::Ok(c) => {
+			var cfg = move c;
+			match rpc.connect_handoff_probe(move cfg) {
+				core.Result::Err(e) => { return _connect_err_code(&e); },
+				core.Result::Ok(p) => {
+					var probe = move p;
+					if not probe.pre_reusable { return 134; }
+					if probe.pre_autocommit_enabled { return 135; }
+					if probe.pre_in_transaction { return 136; }
+					val post = wire.session_state(&probe.conn.wire_session);
+					if not post.reusable { return 141; }
+					if post.autocommit_enabled { return 142; }
+					if post.in_transaction { return 143; }
+					return 0;
+				}
+			}
+		}
+	}
+}

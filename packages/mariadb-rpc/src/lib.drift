@@ -9,6 +9,7 @@ export {
 	RpcConnectionConfig,
 	RpcConnectionConfigBuilder,
 	RpcConnection,
+	RpcConnectHandoffProbe,
 	RpcStatement,
 	RpcRow,
 	RpcEvent,
@@ -29,6 +30,7 @@ export {
 	arg_string,
 	arg_bytes,
 	connect,
+	connect_handoff_probe,
 	close,
 	next_event,
 	skip_result,
@@ -74,6 +76,13 @@ pub struct RpcConnectionConfigBuilder {
 pub struct RpcConnection {
 	pub wire_session: wire.WireSession,
 	pub strict_reuse: Bool
+}
+
+pub struct RpcConnectHandoffProbe {
+	pub conn: RpcConnection,
+	pub pre_reusable: Bool,
+	pub pre_autocommit_enabled: Bool,
+	pub pre_in_transaction: Bool
 }
 
 pub struct RpcStatement {
@@ -351,7 +360,11 @@ fn _exec_expect_ok(conn: &mut RpcConnection, sql: &String) nothrow -> core.Resul
 }
 
 pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection, RpcError> {
-	val opts = wire.WireConnectOptions(host = config.host, port = config.port, username = config.user, password = config.password, database = config.database, character_set = DEFAULT_WIRE_CHARSET, client_capabilities = DEFAULT_CLIENT_CAPS, connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
+	val host = _dup_string(&config.host);
+	val user = _dup_string(&config.user);
+	val password = _dup_string(&config.password);
+	val database = _dup_string(&config.database);
+	val opts = wire.WireConnectOptions(host = host, port = config.port, username = user, password = password, database = database, character_set = DEFAULT_WIRE_CHARSET, client_capabilities = DEFAULT_CLIENT_CAPS, connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
 	match wire.connect(&opts) {
 		core.Result::Ok(v) => {
 			var session = move v;
@@ -366,6 +379,51 @@ pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection
 			}
 			match wire.set_autocommit(&mut conn.wire_session, config.autocommit) {
 				core.Result::Ok(_) => { return core.Result::Ok(move conn); },
+				core.Result::Err(e) => {
+					val _ = wire.close(&mut conn.wire_session);
+					return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));
+				}
+			}
+		},
+		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(&e.tag))); }
+	}
+}
+
+pub fn connect_handoff_probe(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnectHandoffProbe, RpcError> {
+	val host = _dup_string(&config.host);
+	val user = _dup_string(&config.user);
+	val password = _dup_string(&config.password);
+	val database = _dup_string(&config.database);
+	val opts = wire.WireConnectOptions(host = host, port = config.port, username = user, password = password, database = database, character_set = DEFAULT_WIRE_CHARSET, client_capabilities = DEFAULT_CLIENT_CAPS, connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
+	match wire.connect(&opts) {
+		core.Result::Ok(v) => {
+			var session = move v;
+			var conn = RpcConnection(wire_session = move session, strict_reuse = config.strict_reuse);
+			val set_names_sql = "SET NAMES " + config.charset + " COLLATE " + config.collation;
+			match _exec_expect_ok(&mut conn, &set_names_sql) {
+				core.Result::Ok(_) => {},
+				core.Result::Err(e) => {
+					val _ = wire.close(&mut conn.wire_session);
+					return core.Result::Err(e);
+				}
+			}
+			match wire.set_autocommit(&mut conn.wire_session, config.autocommit) {
+				core.Result::Ok(_) => {
+					val pre = wire.session_state(&conn.wire_session);
+					if not pre.reusable {
+						val _ = wire.close(&mut conn.wire_session);
+						return core.Result::Err(_rpc_error("rpc-probe-pre-reusable-false", ""));
+					}
+					if pre.autocommit_enabled {
+						val _ = wire.close(&mut conn.wire_session);
+						return core.Result::Err(_rpc_error("rpc-probe-pre-autocommit-true", ""));
+					}
+					if pre.in_transaction {
+						val _ = wire.close(&mut conn.wire_session);
+						return core.Result::Err(_rpc_error("rpc-probe-pre-in-transaction-true", ""));
+					}
+					return core.Result::Ok(RpcConnectHandoffProbe(conn = move conn, pre_reusable = pre.reusable, pre_autocommit_enabled = pre.autocommit_enabled, pre_in_transaction = pre.in_transaction));
+				},
 				core.Result::Err(e) => {
 					val _ = wire.close(&mut conn.wire_session);
 					return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));

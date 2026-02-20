@@ -1,0 +1,38 @@
+module mariadb.rpc.tests.unit.connect_state_handoff_nonnetwork_noncopypayload_test
+
+import std.core as core;
+import mariadb.rpc.internal.repro_state_handoff_noncopypayload as repro;
+
+fn _connect_like() nothrow -> core.Result<repro.ReproConnection, Int> {
+	var conn = repro.new_connection();
+	match repro.stage_one(&mut conn) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(code) => { return core.Result::Err(code); }
+	}
+	match repro.stage_two(&mut conn) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(code) => { return core.Result::Err(code); }
+	}
+	val pre = repro.snapshot(&conn);
+	if not pre.reusable { return core.Result::Err(101); }
+	if pre.autocommit_enabled { return core.Result::Err(102); }
+	if pre.in_transaction { return core.Result::Err(103); }
+	if conn.label != "noncopy-payload" { return core.Result::Err(104); }
+	return core.Result::Ok(move conn);
+}
+
+fn main() nothrow -> Int {
+	match _connect_like() {
+		core.Result::Err(code) => { return code; },
+		core.Result::Ok(v) => {
+			var conn = move v;
+			val post = repro.snapshot(&conn);
+			if not post.reusable { return 201; }
+			if post.autocommit_enabled { return 202; }
+			if post.in_transaction { return 203; }
+			if not conn.strict_reuse { return 204; }
+			if conn.label != "noncopy-payload" { return 205; }
+			return 0;
+		}
+	}
+}

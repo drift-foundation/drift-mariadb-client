@@ -51,6 +51,35 @@ wire-live-tx:
 wire-live-api:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift --target-word-bits 64
 
+rpc-live:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift --target-word-bits 64
+
+rpc-check:
+	@tools/drift_test_runner.sh run-all --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-root packages/mariadb-rpc/tests/unit --target-word-bits 64
+
+rpc-live-connect-state-regression:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift --target-word-bits 64
+
+rpc-live-connect-state-stage:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift --target-word-bits 64
+
+rpc-live-connect-state-probe:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_probe_regression_test.drift --target-word-bits 64
+
+# Full test sweep: fastest/local first, then live DB integration.
+test:
+	@just wire-check
+	@just rpc-check
+	@just wire-smoke
+	@just wire-live
+	@just wire-live-api
+	@just wire-live-tx
+	@just wire-live-load
+	@just rpc-live-connect-state-probe
+	@just rpc-live-connect-state-stage
+	@just rpc-live-connect-state-regression
+	@just rpc-live
+
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:
 # just wire-capture handshake_mdb114a 34115 34114

@@ -1,0 +1,48 @@
+module mariadb.rpc.internal.repro_state_handoff_noncopypayload
+
+import std.core as core;
+
+export {
+	ReproState,
+	ReproConnection,
+	new_connection,
+	stage_one,
+	stage_two,
+	snapshot
+};
+
+pub struct ReproState {
+	pub reusable: Bool,
+	pub autocommit_enabled: Bool,
+	pub in_transaction: Bool
+}
+
+pub struct ReproConnection {
+	pub state: ReproState,
+	pub strict_reuse: Bool,
+	pub label: String
+}
+
+pub fn new_connection() nothrow -> ReproConnection {
+	return ReproConnection(
+		state = ReproState(reusable = false, autocommit_enabled = true, in_transaction = false),
+		strict_reuse = true,
+		label = "noncopy-payload"
+	);
+}
+
+pub fn stage_one(conn: &mut ReproConnection) nothrow -> core.Result<Void, Int> {
+	conn.state.reusable = true;
+	conn.state.in_transaction = false;
+	return core.Result::Ok(core.void_value());
+}
+
+pub fn stage_two(conn: &mut ReproConnection) nothrow -> core.Result<Void, Int> {
+	conn.state.autocommit_enabled = false;
+	conn.state.in_transaction = false;
+	return core.Result::Ok(core.void_value());
+}
+
+pub fn snapshot(conn: &ReproConnection) nothrow -> ReproState {
+	return conn.state;
+}

@@ -1,0 +1,51 @@
+module mariadb.rpc.internal.repro_state_handoff
+
+import std.core as core;
+
+export {
+	ReproState,
+	ReproSession,
+	ReproConnection,
+	new_connection,
+	stage_one,
+	stage_two,
+	snapshot
+};
+
+pub struct ReproState {
+	pub reusable: Bool,
+	pub autocommit_enabled: Bool,
+	pub in_transaction: Bool
+}
+
+pub struct ReproSession {
+	pub state: ReproState
+}
+
+pub struct ReproConnection {
+	pub session: ReproSession,
+	pub strict_reuse: Bool
+}
+
+pub fn new_connection() nothrow -> ReproConnection {
+	return ReproConnection(
+		session = ReproSession(state = ReproState(reusable = false, autocommit_enabled = true, in_transaction = false)),
+		strict_reuse = true
+	);
+}
+
+pub fn stage_one(conn: &mut ReproConnection) nothrow -> core.Result<Void, Int> {
+	conn.session.state.reusable = true;
+	conn.session.state.in_transaction = false;
+	return core.Result::Ok(core.void_value());
+}
+
+pub fn stage_two(conn: &mut ReproConnection) nothrow -> core.Result<Void, Int> {
+	conn.session.state.autocommit_enabled = false;
+	conn.session.state.in_transaction = false;
+	return core.Result::Ok(core.void_value());
+}
+
+pub fn snapshot(conn: &ReproConnection) nothrow -> ReproState {
+	return conn.session.state;
+}

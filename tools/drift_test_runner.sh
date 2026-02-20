@@ -10,7 +10,9 @@ MODE="${1:-}"
 [[ -n "${MODE}" ]] || usage
 shift || true
 
-SRC_ROOT="packages/mariadb-wire-proto/src"
+SRC_ROOTS=()
+SRC_ROOTS+=("packages/mariadb-wire-proto/src")
+SRC_ROOTS_OVERRIDDEN=0
 TEST_ROOT="packages/mariadb-wire-proto/tests/unit"
 TEST_FILE=""
 CHECK_FILE=""
@@ -19,7 +21,11 @@ TARGET_WORD_BITS="64"
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--src-root)
-			SRC_ROOT="${2:-}"
+			if [[ "${SRC_ROOTS_OVERRIDDEN}" == "0" ]]; then
+				SRC_ROOTS=()
+				SRC_ROOTS_OVERRIDDEN=1
+			fi
+			SRC_ROOTS+=("${2:-}")
 			shift 2
 			;;
 		--test-root)
@@ -70,9 +76,17 @@ set_asan_defaults_for_run() {
 }
 
 collect_src_files() {
-	mapfile -t SRC_FILES < <(find "${SRC_ROOT}" -type f -name "*.drift" | sort)
+	SRC_FILES=()
+	local root
+	for root in "${SRC_ROOTS[@]}"; do
+		if [[ -d "${root}" ]]; then
+			while IFS= read -r f; do
+				SRC_FILES+=("${f}")
+			done < <(find "${root}" -type f -name "*.drift" | sort)
+		fi
+	done
 	if [[ "${#SRC_FILES[@]}" -eq 0 ]]; then
-		echo "error: no source files found under ${SRC_ROOT}" >&2
+		echo "error: no source files found under src roots: ${SRC_ROOTS[*]}" >&2
 		exit 2
 	fi
 }
