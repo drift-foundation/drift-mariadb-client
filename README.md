@@ -68,6 +68,27 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `just wire-compile-check-unit <test-file>`
   - Compile-only check for a specific unit test entrypoint.
 
+### Full Test Sweep
+
+- `just test`
+  - Runs the full suite from local/unit checks to live DB e2e checks.
+  - Current order:
+    - `wire-check`
+    - `rpc-check`
+    - `wire-smoke`
+    - `wire-live`
+    - `wire-live-api`
+    - `wire-live-tx`
+    - `wire-live-load`
+    - `rpc-live-connect-state-stage`
+    - `rpc-live-connect-state-regression`
+    - `rpc-live`
+
+Preconditions for `just test`:
+- `DRIFTC` is set.
+- Local MariaDB instance is running (default expected target is `mdb114-a` on `127.0.0.1:34114`).
+- Fixture schema/procedures are loaded (`tests/fixtures/appdb_schema.sql`).
+
 ### Wire Capture Proxy (Fixture Generation)
 
 - `just wire-capture <scenario> <listen_port> <target_port> [target_host]`

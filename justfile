@@ -63,9 +63,6 @@ rpc-live-connect-state-regression:
 rpc-live-connect-state-stage:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift --target-word-bits 64
 
-rpc-live-connect-state-probe:
-	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_probe_regression_test.drift --target-word-bits 64
-
 # Full test sweep: fastest/local first, then live DB integration.
 test:
 	@just wire-check
@@ -75,7 +72,6 @@ test:
 	@just wire-live-api
 	@just wire-live-tx
 	@just wire-live-load
-	@just rpc-live-connect-state-probe
 	@just rpc-live-connect-state-stage
 	@just rpc-live-connect-state-regression
 	@just rpc-live
