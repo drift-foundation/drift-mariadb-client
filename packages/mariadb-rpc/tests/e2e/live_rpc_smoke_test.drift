@@ -146,12 +146,122 @@ fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
 	}
 }
 
+fn scenario_multi_resultset_selective_skip(logger: &log.Logger) nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "multi-rs-skip", "step": "build-config"}); return 1200; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "multi-rs-skip", "step": "connect"}); return 1201; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					match conn.call(&"sp_multi_rs") {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1202; },
+						core.Result::Ok(s) => {
+							var stmt = move s;
+							match stmt.skip_result() {
+								core.Result::Ok(_) => {},
+								core.Result::Err(_) => { val _ = logger.error("rpc-skip-result-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(&mut conn); return 1203; }
+							}
+							var saw_row = false;
+							while true {
+								match stmt.next_event() {
+									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "multi-rs-skip", "step": "next-event"}); val _ = rpc.close(&mut conn); return 1204; },
+									core.Result::Ok(ev) => {
+										match ev {
+											rpc.RpcEvent::Row(_) => { saw_row = true; break; },
+											rpc.RpcEvent::ResultSetEnd(_) => {},
+											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1205; },
+											rpc.RpcEvent::StatementEnd(_) => { break; }
+										}
+									}
+								}
+							}
+							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1206; }
+							match stmt.skip_remaining() {
+								core.Result::Ok(_) => {},
+								core.Result::Err(_) => { val _ = logger.error("rpc-skip-remaining-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(&mut conn); return 1207; }
+							}
+						}
+					}
+					match conn.rollback() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1208; }
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn _consume_one_row_then_skip_remaining(conn: &mut rpc.RpcConnection, logger: &log.Logger) nothrow -> Int {
+	match conn.call(&"sp_multi_rs") {
+		core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "partial-consume-reset", "proc": "sp_multi_rs"}); return 1302; },
+		core.Result::Ok(s) => {
+			var stmt = move s;
+			var saw_row = false;
+			while true {
+				match stmt.next_event() {
+					core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "partial-consume-reset", "step": "next-event"}); return 1303; },
+					core.Result::Ok(ev) => {
+						match ev {
+							rpc.RpcEvent::Row(_) => { saw_row = true; break; },
+							rpc.RpcEvent::ResultSetEnd(_) => {},
+							rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "partial-consume-reset", "proc": "sp_multi_rs"}); return 1304; },
+							rpc.RpcEvent::StatementEnd(_) => { break; }
+						}
+					}
+				}
+			}
+			if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "partial-consume-reset", "proc": "sp_multi_rs"}); return 1305; }
+			match stmt.skip_remaining() {
+				core.Result::Ok(_) => {},
+				core.Result::Err(_) => { val _ = logger.error("rpc-skip-remaining-failed", {"scenario": "partial-consume-reset"}); return 1310; }
+			}
+			return 0;
+		}
+	}
+}
+
+fn scenario_partial_consume_then_reset(logger: &log.Logger) nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "partial-consume-reset", "step": "build-config"}); return 1300; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "partial-consume-reset", "step": "connect"}); return 1301; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					val consume_rc = _consume_one_row_then_skip_remaining(&mut conn, logger);
+					if consume_rc != 0 { val _ = rpc.close(&mut conn); return consume_rc; }
+					match conn.reset_for_pool_reuse() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1306; }
+					}
+					val st = wire.session_state(&conn.wire_session);
+					if not st.reusable { val _ = rpc.close(&mut conn); return 1307; }
+					if not st.autocommit_enabled { val _ = rpc.close(&mut conn); return 1308; }
+					if st.in_transaction { val _ = rpc.close(&mut conn); return 1309; }
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
 fn main() nothrow -> Int {
 	val logger = _make_logger();
 	val a = scenario_ping_no_args(&logger);
 	if a != 0 { return a; }
 	val b = scenario_call_with_args(&logger);
 	if b != 0 { return b; }
+	val c = scenario_multi_resultset_selective_skip(&logger);
+	if c != 0 { return c; }
+	val d = scenario_partial_consume_then_reset(&logger);
+	if d != 0 { return d; }
 	val _ = logger.flush(conc.Duration(millis = 50));
 	return 0;
 }

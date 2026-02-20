@@ -238,3 +238,26 @@
 - Updated pending error event extraction to non-Copy-safe ownership path:
   - `packages/mariadb-wire-proto/src/lib.drift` now uses `mem.replace(...)` to extract `statement.pending_err` before returning `StatementEvent::StatementErr(...)`.
 - This avoids illegal projected-place moves and copy violations under MVP ownership rules.
+
+### RPC streaming/pool-safety slice (event-stream model hardening)
+- Expanded live RPC e2e coverage in `packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift`:
+  - `scenario_multi_resultset_selective_skip`
+    - validates selective multi-resultset consumption using:
+      - `stmt.skip_result()` (skip first resultset)
+      - `stmt.next_event()` (consume second resultset rows)
+      - `stmt.skip_remaining()` (drain terminal remainder).
+  - `scenario_partial_consume_then_reset`
+    - validates partial consume + explicit drain + pool reset path:
+      - consume a subset of rows
+      - `skip_remaining()`
+      - `reset_for_pool_reuse()`
+      - verify session state normalized for reuse (`reusable=true`, `autocommit=true`, `in_tx=false`).
+- Updated `docs/effective-mariadb-rpc.md` from placeholder to concrete guidance:
+  - streaming-first statement model
+  - single-active-statement rule
+  - explicit drain semantics
+  - pool reset lifecycle contract and error layering notes.
+
+### Validation
+- `just rpc-check` passed.
+- `just rpc-live` (outside sandbox) passed with structured `std.log` JSON events emitted on stderr.
