@@ -212,3 +212,29 @@
   - `just rpc-live-connect-state-stage` -> `0`
   - `just rpc-live-connect-state-regression` -> `0`
   - summary: `probe=0 stage=0 regression=0`
+
+## 2026-02-20
+
+### Test workflow and docs
+- Added top-level full-suite recipe:
+  - `just test`
+  - runs unit/compile-first checks through live DB e2e in a fixed order.
+- Added `rpc-check` recipe for `packages/mariadb-rpc/tests/unit`.
+- Updated `README.md` with:
+  - `just test` section
+  - execution order
+  - required preconditions (`DRIFTC`, live local DB, fixture schema loaded).
+
+### RPC API cleanup (probe-only surface removal)
+- Removed temporary probe-only public API from `mariadb.rpc`:
+  - removed `RpcConnectHandoffProbe`
+  - removed `connect_handoff_probe(...)`
+  - removed probe recipe from `justfile`.
+- Kept connect-state regressions that validate behavior via existing public API paths.
+
+### Ownership fix for non-Copy wire error payload
+- Enforced structural-Copy policy in wire types:
+  - removed invalid `core.Copy` impl for `ErrPacket` (contains `String` fields).
+- Updated pending error event extraction to non-Copy-safe ownership path:
+  - `packages/mariadb-wire-proto/src/lib.drift` now uses `mem.replace(...)` to extract `statement.pending_err` before returning `StatementEvent::StatementErr(...)`.
+- This avoids illegal projected-place moves and copy violations under MVP ownership rules.
