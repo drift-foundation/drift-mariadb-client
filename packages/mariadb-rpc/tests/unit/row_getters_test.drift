@@ -1,0 +1,81 @@
+module mariadb.rpc.tests.unit.row_getters_test
+
+import std.core as core;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+fn _row_one_text(v: String) nothrow -> rpc.RpcRow {
+	var cells: Array<wire.ResultSetCell> = [];
+	cells.push(wire.ResultSetCell::Text(move v));
+	return rpc.RpcRow(values = move cells);
+}
+
+fn _row_one_null() nothrow -> rpc.RpcRow {
+	var cells: Array<wire.ResultSetCell> = [];
+	cells.push(wire.ResultSetCell::Null());
+	return rpc.RpcRow(values = move cells);
+}
+
+fn _expect_tag(err: &rpc.RpcError, expected: String) nothrow -> Bool {
+	return err.tag == expected;
+}
+
+fn main() nothrow -> Int {
+	var ri = _row_one_text("123");
+	match ri.get_int(0) {
+		core.Result::Err(_) => { return 1; },
+		core.Result::Ok(v) => { if v != 123 { return 2; } }
+	}
+	match ri.get_uint(0) {
+		core.Result::Err(_) => { return 3; },
+		core.Result::Ok(v) => { if v != cast<Uint>(123) { return 4; } }
+	}
+	var rf = _row_one_text("3.5");
+	match rf.get_float(0) {
+		core.Result::Err(_) => { return 5; },
+		core.Result::Ok(v) => { if v != 3.5 { return 6; } }
+	}
+	match ri.get_string(0) {
+		core.Result::Err(_) => { return 7; },
+		core.Result::Ok(v) => { if v != "123" { return 8; } }
+	}
+	match ri.is_null(0) {
+		core.Result::Err(_) => { return 9; },
+		core.Result::Ok(v) => { if v { return 10; } }
+	}
+
+	var rn = _row_one_null();
+	match rn.is_null(0) {
+		core.Result::Err(_) => { return 11; },
+		core.Result::Ok(v) => { if not v { return 12; } }
+	}
+	match rn.get_string(0) {
+		core.Result::Ok(_) => { return 13; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-null") { return 14; } }
+	}
+
+	match ri.get_int(1) {
+		core.Result::Ok(_) => { return 15; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-index-out-of-bounds") { return 16; } }
+	}
+	match ri.get_int(-1) {
+		core.Result::Ok(_) => { return 17; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-index-out-of-bounds") { return 18; } }
+	}
+
+	var rp = _row_one_text("abc");
+	match rp.get_int(0) {
+		core.Result::Ok(_) => { return 19; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-int-failed") { return 20; } }
+	}
+	match rp.get_uint(0) {
+		core.Result::Ok(_) => { return 21; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-uint-failed") { return 22; } }
+	}
+	match rp.get_float(0) {
+		core.Result::Ok(_) => { return 23; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-float-failed") { return 24; } }
+	}
+
+	return 0;
+}

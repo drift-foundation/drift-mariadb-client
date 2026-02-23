@@ -118,12 +118,19 @@ fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
 						core.Result::Ok(s) => {
 							var stmt = move s;
 							var saw_row = false;
+							var saw_sum = false;
 							while true {
 								match stmt.next_event() {
 									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "call-with-args", "step": "next-event"}); val _ = rpc.close(&mut conn); return 1103; },
 									core.Result::Ok(ev) => {
 										match ev {
-											rpc.RpcEvent::Row(_) => { saw_row = true; },
+											rpc.RpcEvent::Row(row) => {
+												saw_row = true;
+												match row.get_int(0) {
+													core.Result::Err(_) => { val _ = logger.error("rpc-row-get-int-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1107; },
+													core.Result::Ok(v) => { if v == 3 { saw_sum = true; } }
+												}
+											},
 											rpc.RpcEvent::ResultSetEnd(_) => {},
 											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1104; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
@@ -132,6 +139,7 @@ fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
 								}
 							}
 							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1105; }
+							if not saw_sum { val _ = logger.error("rpc-unexpected-sum", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1108; }
 						}
 					}
 					match conn.rollback() {

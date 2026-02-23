@@ -47,6 +47,71 @@ Two packages in one repository:
 - We expect real package-development pressure to surface integration gaps in `driftc` and/or stdlib.
 - When such issues are found, record minimal repros and treat them as first-class integration outcomes while continuing delivery of a useful MariaDB client.
 
+## Onboarding Overview (Klaudia)
+
+This file is the primary source of truth for roadmap + current status.
+
+1. Daily workflow
+- Read this file top-to-bottom before coding.
+- Implement against current `drift-lang` `main` behavior.
+- Run tests after each meaningful change (unit first, then live/e2e).
+- Record significant status in `history.md`.
+
+2. Local prerequisites
+- `DRIFTC` set, for example:
+  - `export DRIFTC="/home/sl/src/drift-lang/bin/driftc"`
+- Local MariaDB dev instance up (default expected target is `mdb114-a` on `127.0.0.1:34114`):
+  - `just db-create mdb114-a`
+  - `just db-up mdb114-a`
+- Schema/procedures loaded:
+  - `mariadb --ssl=OFF -h 127.0.0.1 -P 34114 -u root -prootpw < tests/fixtures/appdb_schema.sql`
+
+3. Test commands we use
+- Full default suite:
+  - `just` (default recipe = `test`)
+- Focused suites:
+  - `just wire-check`
+  - `just rpc-check`
+  - `just wire-live`
+  - `just wire-live-tx`
+  - `just rpc-live`
+- Instrumented runs:
+  - `DRIFT_ASAN=1 just <recipe>`
+  - `DRIFT_MEMCHECK=1 just <recipe>`
+
+4. Wire fixture capture/replay workflow
+- Capture one client session through MITM proxy:
+  - `just wire-capture <scenario> <listen_port> <target_port>`
+- Packetize a captured run:
+  - `just wire-fixture-extract <scenario> <run_id>`
+- Captured artifacts:
+  - raw stream/chunks: `tests/fixtures/scenarios/bin/<scenario>/<run_id>/`
+  - packetized replay: `tests/fixtures/packetized/<scenario>/<run_id>/`
+  - SQL transcript: `scenario.sql` (written in both locations).
+
+5. Process rules for compiler/runtime defects
+- Treat any internal compiler error, MIR invariant failure, or memory-safety fault as `CORE_BUG`.
+- Do not mask with library-level semantic rewrites.
+- Required sequence:
+  - pin minimal failing repro first
+  - confirm failure
+  - fix at root (toolchain/runtime)
+  - confirm repro passes
+  - then continue feature work.
+
+## Next Steps (Current Execution Order)
+
+1. Keep `test` green on every branch update from toolchain `main`.
+2. Complete Phase 2 contract freeze:
+- finalize public `mariadb-rpc` API signatures and stable error-tag contract in this document.
+3. Expand RPC typed-row API coverage (index-first), then optional name-based access.
+4. Continue live/e2e hardening:
+- transaction edge cases
+- multi-resultset streaming paths
+- pool-reset safety invariants.
+5. Keep fixture corpus current when behavior changes:
+- capture -> packetize -> add deterministic replay tests.
+
 ## Proposed phases
 
 ### Phase 0: Contract pinning

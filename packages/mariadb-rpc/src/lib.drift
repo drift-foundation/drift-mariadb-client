@@ -3,6 +3,7 @@ module mariadb.rpc
 import std.core as core;
 import std.format as format;
 import std.io as io;
+import std.parse as parse;
 import mariadb.wire.proto as wire;
 
 export {
@@ -350,6 +351,32 @@ fn _exec_expect_ok(conn: &mut RpcConnection, sql: &String) nothrow -> core.Resul
 	}
 }
 
+fn _row_oob(idx: Int) nothrow -> RpcError {
+	return _rpc_error("rpc-row-index-out-of-bounds", format.format_int(idx));
+}
+
+fn _row_null(idx: Int) nothrow -> RpcError {
+	return _rpc_error("rpc-row-null", format.format_int(idx));
+}
+
+fn _row_parse_err(tag: String, idx: Int, offset: Int) nothrow -> RpcError {
+	return _rpc_error(tag, "index=" + format.format_int(idx) + ",offset=" + format.format_int(offset));
+}
+
+fn _row_cell_ref(row: &RpcRow, idx: Int) nothrow -> core.Result<&wire.ResultSetCell, RpcError> {
+	if idx < 0 or idx >= row.values.len {
+		return core.Result::Err(_row_oob(idx));
+	}
+	var i = 0;
+	while i < row.values.len {
+		if i == idx {
+			return core.Result::Ok(&row.values[i]);
+		}
+		i = i + 1;
+	}
+	return core.Result::Err(_row_oob(idx));
+}
+
 pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection, RpcError> {
 	val host = _dup_string(&config.host);
 	val user = _dup_string(&config.user);
@@ -430,6 +457,63 @@ implement RpcConnection {
 		match wire.close(&mut self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-close-failed", _dup_string(&e.tag))); }
+		}
+	}
+}
+
+implement RpcRow {
+	pub fn is_null(self: &RpcRow, idx: Int) nothrow -> core.Result<Bool, RpcError> {
+		match _row_cell_ref(self, idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(cell) => { return core.Result::Ok(wire.resultset_cell_is_null(cell)); }
+		}
+	}
+
+	pub fn get_string(self: &RpcRow, idx: Int) nothrow -> core.Result<String, RpcError> {
+		match _row_cell_ref(self, idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(cell) => {
+				match wire.resultset_cell_text(cell) {
+					Optional::None => { return core.Result::Err(_row_null(idx)); },
+					Optional::Some(v) => { return core.Result::Ok(_dup_string(v)); }
+				}
+			}
+		}
+	}
+
+	pub fn get_int(self: &RpcRow, idx: Int) nothrow -> core.Result<Int, RpcError> {
+		match self.get_string(idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(s) => {
+				match parse.parse_int(s) {
+					core.Result::Ok(v) => { return core.Result::Ok(v); },
+					core.Result::Err(e) => { return core.Result::Err(_row_parse_err("rpc-row-parse-int-failed", idx, e.offset)); }
+				}
+			}
+		}
+	}
+
+	pub fn get_uint(self: &RpcRow, idx: Int) nothrow -> core.Result<Uint, RpcError> {
+		match self.get_string(idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(s) => {
+				match parse.parse_uint(s) {
+					core.Result::Ok(v) => { return core.Result::Ok(v); },
+					core.Result::Err(e) => { return core.Result::Err(_row_parse_err("rpc-row-parse-uint-failed", idx, e.offset)); }
+				}
+			}
+		}
+	}
+
+	pub fn get_float(self: &RpcRow, idx: Int) nothrow -> core.Result<Float, RpcError> {
+		match self.get_string(idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(s) => {
+				match parse.parse_float(s) {
+					core.Result::Ok(v) => { return core.Result::Ok(v); },
+					core.Result::Err(e) => { return core.Result::Err(_row_parse_err("rpc-row-parse-float-failed", idx, e.offset)); }
+				}
+			}
 		}
 	}
 }

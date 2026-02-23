@@ -39,7 +39,9 @@ export {
 	set_autocommit,
 	commit,
 	rollback,
-	reset_for_pool_reuse
+	reset_for_pool_reuse,
+	resultset_cell_is_null,
+	resultset_cell_text
 };
 
 pub type OkPacket = types.OkPacket;
@@ -428,6 +430,20 @@ pub fn session_state(session: &WireSession) nothrow -> WireSessionState {
 
 pub fn session_is_reusable(session: &WireSession) nothrow -> Bool {
 	return session.state.reusable and not session.is_closed and not session.active_statement;
+}
+
+pub fn resultset_cell_is_null(cell: &ResultSetCell) nothrow -> Bool {
+	match cell {
+		ResultSetCell::Null => { return true; },
+		ResultSetCell::Text(_) => { return false; }
+	}
+}
+
+pub fn resultset_cell_text(cell: &ResultSetCell) nothrow -> Optional<&String> {
+	match cell {
+		ResultSetCell::Null => { return Optional::None(); },
+		ResultSetCell::Text(v) => { return Optional::Some(v); }
+	}
 }
 
 pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<Statement, PacketDecodeError> {

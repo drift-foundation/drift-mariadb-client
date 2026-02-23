@@ -1,3 +1,16 @@
+# Default recipe: run full suite from local/unit checks to live DB integration.
+test:
+	@just wire-check
+	@just rpc-check
+	@just wire-smoke
+	@just wire-live
+	@just wire-live-api
+	@just wire-live-tx
+	@just wire-live-load
+	@just rpc-live-connect-state-stage
+	@just rpc-live-connect-state-regression
+	@just rpc-live
+
 # Local MariaDB dev instances (isolated under tmp_db_instances/<instance>/runtime and tmp_db_instances/<instance>/config).
 db-create INSTANCE HOST_PORT="" IMAGE="mariadb:11.4":
 	tools/db_instance.sh create "{{INSTANCE}}" "{{HOST_PORT}}" "{{IMAGE}}"
@@ -62,19 +75,6 @@ rpc-live-connect-state-regression:
 
 rpc-live-connect-state-stage:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift --target-word-bits 64
-
-# Full test sweep: fastest/local first, then live DB integration.
-test:
-	@just wire-check
-	@just rpc-check
-	@just wire-smoke
-	@just wire-live
-	@just wire-live-api
-	@just wire-live-tx
-	@just wire-live-load
-	@just rpc-live-connect-state-stage
-	@just rpc-live-connect-state-regression
-	@just rpc-live
 
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:
