@@ -112,6 +112,8 @@ pub struct WireSession {
 	pub active_statement: Bool,
 	pub connection_id: Uint,
 	pub expected_seq_id: Byte,
+	pub server_capabilities: Uint,
+	pub reset_connection_supported: Bool,
 	pub state: WireSessionState
 }
 

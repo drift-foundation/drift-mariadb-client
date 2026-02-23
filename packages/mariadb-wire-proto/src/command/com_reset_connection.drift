@@ -1,0 +1,17 @@
+module mariadb.wire.proto.command.com_reset_connection
+
+import std.core as core;
+import mariadb.wire.proto.errors as errors;
+
+export {
+	COM_RESET_CONNECTION_COMMAND_ID,
+	encode_com_reset_connection_payload
+};
+
+pub const COM_RESET_CONNECTION_COMMAND_ID: Byte = 31;
+
+pub fn encode_com_reset_connection_payload() nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	out.push(COM_RESET_CONNECTION_COMMAND_ID);
+	return move out;
+}

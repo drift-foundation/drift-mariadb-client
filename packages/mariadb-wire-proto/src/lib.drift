@@ -15,6 +15,7 @@ import mariadb.wire.proto.handshake.auth as handshake_auth;
 import mariadb.wire.proto.command.com_query as command_com_query;
 import mariadb.wire.proto.command.com_quit as command_com_quit;
 import mariadb.wire.proto.command.com_ping as command_com_ping;
+import mariadb.wire.proto.command.com_reset_connection as command_com_reset;
 import mariadb.wire.proto.decode.resultset as decode_resultset;
 import mariadb.wire.proto.decode.ok_packet as ok_packet_decode;
 import mariadb.wire.proto.decode.err_packet as err_packet_decode;
@@ -43,6 +44,7 @@ export {
 	commit,
 	rollback,
 	ping,
+	reset_connection,
 	reset_for_pool_reuse,
 	statement_column_defs,
 	statement_column_count,
@@ -559,7 +561,7 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				},
 				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), state = move state));
+			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), server_capabilities = hello.capabilities, reset_connection_supported = true, state = move state));
 		},
 		core.Result::Err(_) => { return core.Result::Err(_error("connect-failed", 0)); }
 	}
@@ -853,12 +855,81 @@ pub fn ping(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecode
 	return core.Result::Ok(core.void_value());
 }
 
+pub fn reset_connection(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
+	if session.is_closed {
+		return core.Result::Err(_error("session-closed", 0));
+	}
+	if not session.state.reusable {
+		return core.Result::Err(_error("session-not-reusable", 0));
+	}
+	if session.active_statement {
+		return core.Result::Err(_error("active-statement-present", 0));
+	}
+	val payload = command_com_reset.encode_com_reset_connection_payload();
+	_session_reset_seq(session);
+	match _session_write_packet(session, &payload) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
+	}
+	var resp: Array<Byte> = [];
+	match _session_read_packet(session) {
+		core.Result::Ok(v) => { resp = move v; },
+		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
+	}
+	if resp.len < 1 {
+		_mark_dead(session);
+		return core.Result::Err(_error("reset-connection-empty-response", 0));
+	}
+	if resp[0] == cast<Byte>(0) {
+		match ok_packet_decode.decode_ok_packet(&resp) {
+			core.Result::Ok(ok) => { _apply_status(session, ok.status_flags, ok.warnings); },
+			core.Result::Err(_) => {}
+		}
+		return core.Result::Ok(core.void_value());
+	}
+	if resp[0] == cast<Byte>(255) {
+		match err_packet_decode.decode_err_packet(&resp) {
+			core.Result::Ok(err_pkt) => {
+				if err_pkt.error_code == cast<Uint>(1047) {
+					return core.Result::Err(_error("reset-connection-unsupported", 0));
+				}
+				return core.Result::Err(_error_with_server("reset-connection-server-err", 0, &err_pkt));
+			},
+			core.Result::Err(_) => {
+				return core.Result::Err(_error("reset-connection-server-err", 0));
+			}
+		}
+	}
+	_mark_dead(session);
+	return core.Result::Err(_error("reset-connection-unexpected-response", 0));
+}
+
 pub fn reset_for_pool_reuse(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
 	}
 	if session.active_statement {
 		return core.Result::Err(_error("active-statement-present", 0));
+	}
+	if session.reset_connection_supported {
+		match reset_connection(session) {
+			core.Result::Ok(_) => {
+				if not session.state.reusable {
+					return core.Result::Err(_error("session-not-reusable", 0));
+				}
+				return core.Result::Ok(core.void_value());
+			},
+			core.Result::Err(e) => {
+				if session.is_closed or not session.state.reusable {
+					return core.Result::Err(_error("session-not-reusable", 0));
+				}
+				if e.tag == "reset-connection-unsupported" {
+					session.reset_connection_supported = false;
+				} else {
+					return core.Result::Err(e);
+				}
+			}
+		}
 	}
 	if session.state.in_transaction {
 		match rollback(session) {

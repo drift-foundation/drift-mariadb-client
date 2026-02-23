@@ -299,3 +299,47 @@
 
 ### Validation
 - `just test` passed (wire-check, rpc-check, and live/e2e recipes green in host workflow).
+
+### Round 8 (#9, #9b): COM_RESET_CONNECTION for pool reset
+
+Created `src/command/com_reset_connection.drift` (same pattern as com_ping/com_quit).
+
+Added `reset_connection()` to `lib.drift`:
+- Same guard pattern as `ping()` (closed/reusable/active_statement checks)
+- Sends COM_RESET_CONNECTION (byte 31), reads response
+- OK (0x00): applies status flags, returns Ok
+- ERR (0xFF) with error code 1047 (`ER_UNKNOWN_COM_ERROR`): returns `"reset-connection-unsupported"` (server doesn't support command)
+- ERR (0xFF) with other error codes: returns `"reset-connection-server-err"` with full server error details
+- ERR decode failure: returns generic `"reset-connection-server-err"` (defensive)
+- Other: marks session dead, returns `"reset-connection-unexpected-response"`
+
+Added `server_capabilities: Uint` and `reset_connection_supported: Bool` to `WireSession`:
+- `server_capabilities` stored from `hello.capabilities` during connect
+- `reset_connection_supported` initialized `true`, set `false` only on `"reset-connection-unsupported"` response
+
+Updated `reset_for_pool_reuse()`:
+- Primary path: if `reset_connection_supported`, try `reset_connection()`. On success, early return (OK proves liveness, no ping needed).
+- On unsupported: set `reset_connection_supported = false`, fall through to legacy path.
+- On real server error: propagate directly to caller.
+- On fatal failure (session dead): bail out immediately.
+- Legacy fallback: ROLLBACK + SET autocommit=1 + ping (unchanged from before).
+
+Key design decisions:
+- ERR response from `reset_connection` does NOT mark session dead. An ERR packet is a valid protocol response; the stream remains synchronized.
+- Only error code 1047 triggers the "unsupported" classification and disables future reset attempts. Real server errors are surfaced, not masked.
+- Capability-bit pre-gate: won't-fix — no standard capability bit exists for COM_RESET_CONNECTION; reactive probe-and-disable is the standard approach.
+- Explicit unsupported-fallback regression test: deferred until replay/mock harness exists.
+
+### Validation
+- `just test` — all pass (wire-check 14/14, rpc-check 4/4, all live/e2e green).
+
+### Tracking and execution-order updates
+- Marked `#9.x` as closed in todo/progress tracking with explicit resolution notes:
+  - capability-bit pre-gate for `COM_RESET_CONNECTION`: won't-fix
+  - explicit unsupported-fallback regression in full flow: deferred until replay/mock harness
+- Set next execution order to start with protocol state-machine foundation, then close:
+  - `#11` capability flags validation/normalization
+  - `#19` WireConnectOptions design-layer cleanup
+  - `#13` max payload size cap
+  - `#14` timeout clamp policy/documentation
+  - `#20` hex fixture policy
