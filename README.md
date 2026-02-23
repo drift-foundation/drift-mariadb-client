@@ -193,7 +193,7 @@ packages/
 examples/
 tests/
 docs/
-work-progress.md
+TODO.md
 AGENTS.md
 ```
 

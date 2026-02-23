@@ -9,6 +9,7 @@ export {
 	HandshakeResponse41,
 	OkPacket,
 	ErrPacket,
+	ColumnDef,
 	ResultSetCell,
 	ResultSetDecoded,
 	WireConnectOptions,
@@ -60,6 +61,20 @@ pub struct ErrPacket {
 	pub message: String
 }
 
+pub struct ColumnDef {
+	pub catalog: String,
+	pub schema: String,
+	pub table: String,
+	pub org_table: String,
+	pub name: String,
+	pub org_name: String,
+	pub character_set: Uint,
+	pub column_length: Uint,
+	pub column_type: Byte,
+	pub flags: Uint,
+	pub decimals: Byte
+}
+
 pub variant ResultSetCell {
 	Null,
 	Text(value: String)
@@ -96,7 +111,7 @@ pub struct WireSession {
 	pub is_closed: Bool,
 	pub active_statement: Bool,
 	pub connection_id: Uint,
-	pub next_sequence_id: Byte,
+	pub expected_seq_id: Byte,
 	pub state: WireSessionState
 }
 
@@ -105,8 +120,8 @@ pub struct Statement {
 	pub mode: Int,
 	pub column_count: Int,
 	pub column_defs_remaining: Int,
+	pub column_defs: Array<ColumnDef>,
 	pub awaiting_coldef_terminator: Bool,
-	pub emit_resultset_end_pending: Bool,
 	pub pending_ok: OkPacket,
 	pub pending_err: ErrPacket,
 	pub consumed_terminal: Bool

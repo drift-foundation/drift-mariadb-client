@@ -13,6 +13,7 @@ export {
 	RESULTSET_NULL_HEADER,
 	RESULTSET_EOF_TERMINATOR_HEADER,
 	discriminate_first_response,
+	decode_text_row,
 	decode_text_resultset_packets
 };
 
@@ -33,7 +34,7 @@ pub const RESULTSET_METADATA_FOLLOWS_TRUE: Byte = 1;
 type ResultSetCell = types.ResultSetCell;
 
 fn _error(tag: String, offset: Int) nothrow -> errors.PacketDecodeError {
-	return errors.PacketDecodeError(tag = tag, offset = offset);
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
 }
 
 pub fn discriminate_first_response(payload: &Array<Byte>) nothrow -> core.Result<FirstResponseRoute, errors.PacketDecodeError> {
@@ -57,7 +58,7 @@ fn _is_eof_terminator_packet(payload: &Array<Byte>) nothrow -> Bool {
 	return payload.len > 0 and payload[0] == RESULTSET_EOF_TERMINATOR_HEADER and payload.len < 9;
 }
 
-fn _decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core.Result<Array<ResultSetCell>, errors.PacketDecodeError> {
+pub fn decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core.Result<Array<ResultSetCell>, errors.PacketDecodeError> {
 	var row: Array<ResultSetCell> = [];
 	var idx = 0;
 	var col = 0;
@@ -136,7 +137,7 @@ pub fn decode_text_resultset_packets(packets: &Array<Array<Byte>>) nothrow -> co
 		if _is_eof_terminator_packet(payload) {
 			return core.Result::Ok(types.ResultSetDecoded(column_count = col_count_dec.value, rows = move rows));
 		}
-		match _decode_text_row(payload, column_count) {
+		match decode_text_row(payload, column_count) {
 			core.Result::Ok(row) => { rows.push(move row); },
 			core.Result::Err(e) => { return core.Result::Err(e); }
 		}

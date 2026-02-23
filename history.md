@@ -103,7 +103,7 @@
   - resume package work once compiler-side fix confirmed
 
 ### Progress tracking
-- Updated `work-progress.md` checklist items as completed for:
+- Updated `progress.md` checklist items as completed for:
   - COM_QUERY encode + first response discriminator
   - OK packet decode
   - ERR packet decode
@@ -175,7 +175,7 @@
 - `DRIFT_MEMCHECK=1 just wire-live-tx` passed (0 errors/leaks; expected virtual-thread stack-switch warnings from valgrind).
 
 ### Progress tracking updates
-- Updated `work-progress.md` (Phase 1.5) to mark live tx gate complete:
+- Updated `progress.md` (Phase 1.5) to mark live tx gate complete:
   - added dedicated live tx e2e file reference
   - marked normal + ASAN + memcheck validation complete
 
@@ -261,3 +261,41 @@
 ### Validation
 - `just rpc-check` passed.
 - `just rpc-live` (outside sandbox) passed with structured `std.log` JSON events emitted on stderr.
+
+## 2026-02-23
+
+### Wire proto cleanup rounds completed (`packages/mariadb-wire-proto`)
+- Round 1 (#4, #6): server error detail propagation.
+  - `PacketDecodeError` now carries `server_error_code` and `server_message`.
+  - Tx command error path (`_query_expect_ok`) now preserves decoded `ErrPacket` details.
+  - Auth reject path now decodes ERR packets and surfaces server message/code.
+- Round 2 (#3, #7): clean shutdown path.
+  - Added `src/command/com_quit.drift`.
+  - `close()` now sends `COM_QUIT` best-effort before socket close.
+- Round 3 (#2, #2b): sequence tracking cleanup and validation.
+  - Removed dead `next_sequence_id`.
+  - Added `expected_seq_id` and session-aware packet I/O:
+    - `_session_read_packet()` validates incoming sequence IDs.
+    - `_session_write_packet()` stamps/advances sequence IDs.
+    - `_session_reset_seq()` resets command boundary sequencing.
+- Round 4 (#12): column metadata surfaced in streaming API.
+  - Added `ColumnDef` and `Statement.column_defs`.
+  - Added `_decode_column_def()` and accessors:
+    - `statement_column_defs(&Statement)`
+    - `statement_column_count(&Statement)`
+- Round 5 (#15, #16, #8): pool reuse hardening and liveness checks.
+  - Added `state.reusable` guards to `set_autocommit` / `commit` / `rollback`.
+  - Added `COM_PING` support (`src/command/com_ping.drift`, `ping()`).
+  - `reset_for_pool_reuse()` now performs ping before declaring reusable.
+- Round 6 (#22, #23): column-def decode hardening.
+  - Column-def decode failures now propagate and mark session dead.
+  - Added 0x0C fixed-length marker validation.
+  - Corrected bad-marker error offset to report byte position (`fixed_start`).
+- Round 7 (#1, #17): lenenc bounds correction + decode dedup.
+  - Fixed off-by-one bounds checks in lenenc decode (`2/3/8` byte variants).
+  - Consolidated duplicated row decode logic:
+    - canonical `decode_resultset.decode_text_row(...)`
+    - removed duplicate helper from `lib.drift`.
+
+### Validation
+- `just test` passed (wire-check, rpc-check, and live/e2e recipes green in host workflow).

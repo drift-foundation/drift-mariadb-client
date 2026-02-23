@@ -1,0 +1,17 @@
+module mariadb.wire.proto.command.com_quit
+
+import std.core as core;
+import mariadb.wire.proto.errors as errors;
+
+export {
+	COM_QUIT_COMMAND_ID,
+	encode_com_quit_payload
+};
+
+pub const COM_QUIT_COMMAND_ID: Byte = 1;
+
+pub fn encode_com_quit_payload() nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	out.push(COM_QUIT_COMMAND_ID);
+	return move out;
+}

@@ -128,7 +128,7 @@ All fixture directories (`tests/fixtures/handshake/`, `tests/fixtures/packet/`, 
 
 ### 21. Phase 1 checklist items 2-3 still marked unchecked
 
-The implementation exists and tests pass, but the checklist in `work-progress.md` shows `[ ]` on packet header, lenenc, and handshake items. Either the checklist is stale or there are missing sub-items.
+The implementation exists and tests pass, but the checklist in `progress.md` shows `[ ]` on packet header, lenenc, and handshake items. Either the checklist is stale or there are missing sub-items.
 
 ## Summary Priority
 
@@ -146,3 +146,59 @@ The implementation exists and tests pass, but the checklist in `work-progress.md
 | Low | #5 dead field | Cleanup |
 | Low | #7-9 COM_PING/RESET | Protocol gap |
 | Low | #17-18 duplication | Code quality |
+
+## Next Immediate Steps
+
+1. Finish #2 sequence-id work as a real protocol item (not cleanup only):
+- Add response sequence-id tracking/validation in `_read_packet_payload`.
+- Add minimal failing regression first (bad sequence on second packet), then implement fix.
+- Keep existing behavior for client-side send sequence (`seq=0` commands, `seq=1` handshake response) unchanged unless regression proves otherwise.
+
+2. Implement #10 auth switch handling:
+- Add `AuthSwitchRequest (0xFE)` branch during connect/auth response handling.
+- Support at least `mysql_native_password` switch flow in MVP.
+- Add deterministic fixture-based test for auth-switch happy path and unsupported-plugin failure.
+
+3. Start #12 column metadata surfacing:
+- Parse and store column definition packets in streaming statement state.
+- Expose metadata to callers (minimum: name + type + flags) without breaking existing row streaming API.
+- Add one replay test and one live e2e assertion that validates metadata count/name availability.
+
+4. Address #16 via #8 dependency planning:
+- Define minimal `COM_PING` command support.
+- Use it in `reset_for_pool_reuse` liveness verification after rollback/autocommit normalization.
+- Add a test that simulates dead connection path and verifies deterministic non-reusable outcome.
+
+5. Keep hygiene in sync while touching these areas:
+- Update `work/proto-cleanup/progress.md` checklist and verification block per round.
+- Update stale Phase 1/1.5 checkboxes in `progress.md` where implementation is already landed.
+
+## Review Addendum (latest pass)
+
+### 22. Wrong offset reported for bad column-def fixed-length marker
+
+**File:** `packages/mariadb-wire-proto/src/lib.drift` (`_decode_column_def`)
+
+Status: **resolved**.
+
+The `"coldef-bad-fixed-length-marker"` error now reports the payload index (`fixed_start`) rather than marker byte value.
+
+### 23. Column-def decode does not reject trailing bytes
+
+**File:** `packages/mariadb-wire-proto/src/lib.drift` (`_decode_column_def`)
+
+Column-def parsing validates minimum fixed block length, but accepts extra trailing bytes without error. For strict packet validation, require exact payload consumption and return a deterministic trailing-bytes decode error when `fixed_start + 12 != payload.len`.
+
+Status: **open** (policy decision required).
+
+Decision/options:
+- strict reject: safest correctness posture, fail statement/session on trailing bytes.
+- tolerate: better forward-compatibility with server/proxy extensions.
+
+### 24. Progress log text is stale vs current behavior
+
+**File:** `work/proto-cleanup/progress.md:111`
+
+Status: **resolved**.
+
+Progress notes now reflect that column-def decode errors propagate and mark session dead.

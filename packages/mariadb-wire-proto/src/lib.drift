@@ -13,6 +13,8 @@ import mariadb.wire.proto.packet.lenenc as packet_lenenc;
 import mariadb.wire.proto.handshake.hello as handshake_hello;
 import mariadb.wire.proto.handshake.auth as handshake_auth;
 import mariadb.wire.proto.command.com_query as command_com_query;
+import mariadb.wire.proto.command.com_quit as command_com_quit;
+import mariadb.wire.proto.command.com_ping as command_com_ping;
 import mariadb.wire.proto.decode.resultset as decode_resultset;
 import mariadb.wire.proto.decode.ok_packet as ok_packet_decode;
 import mariadb.wire.proto.decode.err_packet as err_packet_decode;
@@ -20,6 +22,7 @@ import mariadb.wire.proto.decode.err_packet as err_packet_decode;
 export {
 	OkPacket,
 	ErrPacket,
+	ColumnDef,
 	ResultSetCell,
 	ResultSetDecoded,
 	WireConnectOptions,
@@ -39,13 +42,17 @@ export {
 	set_autocommit,
 	commit,
 	rollback,
+	ping,
 	reset_for_pool_reuse,
+	statement_column_defs,
+	statement_column_count,
 	resultset_cell_is_null,
 	resultset_cell_text
 };
 
 pub type OkPacket = types.OkPacket;
 pub type ErrPacket = types.ErrPacket;
+pub type ColumnDef = types.ColumnDef;
 pub type ResultSetCell = types.ResultSetCell;
 pub type ResultSetDecoded = types.ResultSetDecoded;
 pub type WireConnectOptions = types.WireConnectOptions;
@@ -63,9 +70,26 @@ const MODE_DONE: Int = 5;
 const SERVER_STATUS_IN_TRANS: Uint = 1;
 const SERVER_STATUS_AUTOCOMMIT: Uint = 2;
 const SERVER_STATUS_MORE_RESULTS_EXISTS: Uint = 8;
+const AUTH_SWITCH_HEADER: Byte = 254;
+const AUTH_PLUGIN_MYSQL_NATIVE_PASSWORD: String = "mysql_native_password";
 
 fn _error(tag: String, offset: Int) nothrow -> PacketDecodeError {
-	return errors.PacketDecodeError(tag = tag, offset = offset);
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
+}
+
+fn _error_with_server(tag: String, offset: Int, err: &ErrPacket) nothrow -> PacketDecodeError {
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = err.error_code, server_message = _dup_string(&err.message));
+}
+
+fn _dup_string(s: &String) nothrow -> String {
+	val n = s.byte_length();
+	var b = io.buffer(n);
+	var i = 0;
+	while i < n {
+		io.buffer_write(&mut b, i, core.string_byte_at(s, i));
+		i = i + 1;
+	}
+	return core.string_from_utf8_bytes(io.buffer_ptr(&b), n);
 }
 
 fn _duration_ms(ms: Int) nothrow -> conc.Duration {
@@ -124,6 +148,69 @@ fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothro
 	return move out;
 }
 
+fn _find_nul(input: &Array<Byte>, start: Int) nothrow -> Int {
+	var i = start;
+	while i < input.len {
+		if input[i] == cast<Byte>(0) {
+			return i;
+		}
+		i = i + 1;
+	}
+	return -1;
+}
+
+fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: &String, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	if payload.len < 2 {
+		return core.Result::Err(_error("auth-switch-truncated", 0));
+	}
+	val plugin_end = _find_nul(payload, 1);
+	if plugin_end < 0 {
+		return core.Result::Err(_error("auth-switch-missing-plugin-nul", 1));
+	}
+	var plugin_bytes: Array<Byte> = [];
+	var pi = 1;
+	while pi < plugin_end {
+		plugin_bytes.push(payload[pi]);
+		pi = pi + 1;
+	}
+	val plugin_name = _dup_string_from_bytes(&plugin_bytes);
+	var scramble: Array<Byte> = [];
+	var si = plugin_end + 1;
+	while si < payload.len {
+		scramble.push(payload[si]);
+		si = si + 1;
+	}
+	if scramble.len > 0 and scramble[scramble.len - 1] == cast<Byte>(0) {
+		var trimmed: Array<Byte> = [];
+		var ti = 0;
+		while ti < scramble.len - 1 {
+			trimmed.push(scramble[ti]);
+			ti = ti + 1;
+		}
+		scramble = move trimmed;
+	}
+	if plugin_name != AUTH_PLUGIN_MYSQL_NATIVE_PASSWORD {
+		return core.Result::Err(_error("auth-switch-unsupported-plugin", 0));
+	}
+	var token = _sha1_native_password_token(password, &scramble);
+	match _write_packet(stream, &token, cast<Byte>(3), timeout_ms) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	return _read_packet_payload(stream, timeout_ms);
+}
+
+fn _dup_string_from_bytes(bytes: &Array<Byte>) nothrow -> String {
+	val n = bytes.len;
+	var b = io.buffer(n);
+	var i = 0;
+	while i < n {
+		io.buffer_write(&mut b, i, bytes[i]);
+		i = i + 1;
+	}
+	return core.string_from_utf8_bytes(io.buffer_ptr(&b), n);
+}
+
 fn _read_exact(stream: &net.TcpStream, n: Int, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
 	var out: Array<Byte> = [];
 	while out.len < n {
@@ -167,19 +254,50 @@ fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>, timeout_ms: Int) noth
 	return core.Result::Ok(core.void_value());
 }
 
-fn _read_packet_payload(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+fn _read_packet_raw(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Result<types.PacketHeader, PacketDecodeError> {
 	var hdr_bytes: Array<Byte> = [];
 	match _read_exact(stream, 4, timeout_ms) {
 		core.Result::Ok(v) => { hdr_bytes = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
 	match packet_header.decode_packet_header(&hdr_bytes) {
-		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Ok(v) => { return core.Result::Ok(move v); },
 		core.Result::Err(_) => { return core.Result::Err(_error("wire-header-decode-failed", 0)); }
+	}
+}
+
+fn _read_packet_payload(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
+	match _read_packet_raw(stream, timeout_ms) {
+		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
 	if hdr.payload_len < 0 { return core.Result::Err(_error("wire-header-negative-len", 0)); }
 	return _read_exact(stream, hdr.payload_len, timeout_ms);
+}
+
+fn _session_read_packet(session: &mut WireSession) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
+	match _read_packet_raw(&session.stream, session.io_timeout_ms) {
+		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	if hdr.payload_len < 0 { return core.Result::Err(_error("wire-header-negative-len", 0)); }
+	if hdr.sequence_id != session.expected_seq_id {
+		return core.Result::Err(_error("wire-sequence-mismatch", cast<Int>(hdr.sequence_id)));
+	}
+	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
+	return _read_exact(&session.stream, hdr.payload_len, session.io_timeout_ms);
+}
+
+fn _session_write_packet(session: &mut WireSession, payload: &Array<Byte>) nothrow -> core.Result<Void, PacketDecodeError> {
+	val seq = session.expected_seq_id;
+	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
+	return _write_packet(&session.stream, payload, seq, session.io_timeout_ms);
+}
+
+fn _session_reset_seq(session: &mut WireSession) nothrow -> Void {
+	session.expected_seq_id = cast<Byte>(0);
 }
 
 fn _write_packet(stream: &net.TcpStream, payload: &Array<Byte>, seq: Byte, timeout_ms: Int) nothrow -> core.Result<Void, PacketDecodeError> {
@@ -238,33 +356,55 @@ fn _decode_column_count(payload: &Array<Byte>) nothrow -> core.Result<Int, Packe
 	return core.Result::Ok(cast<Int>(col_count_dec.value));
 }
 
-fn _decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core.Result<Array<ResultSetCell>, PacketDecodeError> {
-	var row: Array<ResultSetCell> = [];
-	var idx = 0;
-	var col = 0;
-	while col < column_count {
-		if idx >= payload.len {
-			return core.Result::Err(_error(errors.TAG_RESULTSET_ROW_TRUNCATED, idx));
-		}
-		if payload[idx] == decode_resultset.RESULTSET_NULL_HEADER {
-			row.push(ResultSetCell::Null());
-			idx = idx + 1;
-			col = col + 1;
-			continue;
-		}
-		match packet_lenenc.decode_lenenc_string_at(payload, idx) {
-			core.Result::Ok(v) => {
-				row.push(ResultSetCell::Text(v.value));
-				idx = v.next_offset;
-				col = col + 1;
-			},
-			core.Result::Err(e) => { return core.Result::Err(e); }
-		}
+fn _u32le_at(payload: &Array<Byte>, offset: Int) nothrow -> Uint {
+	return cast<Uint>(payload[offset]) + cast<Uint>(payload[offset + 1]) * cast<Uint>(256) + cast<Uint>(payload[offset + 2]) * cast<Uint>(65536) + cast<Uint>(payload[offset + 3]) * cast<Uint>(16777216);
+}
+
+fn _decode_column_def(payload: &Array<Byte>) nothrow -> core.Result<ColumnDef, PacketDecodeError> {
+	var catalog = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, 0) {
+		core.Result::Ok(v) => { catalog = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	if idx != payload.len {
-		return core.Result::Err(_error(errors.TAG_RESULTSET_ROW_TRAILING_BYTES, idx));
+	var schema = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, catalog.next_offset) {
+		core.Result::Ok(v) => { schema = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	return core.Result::Ok(move row);
+	var table = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, schema.next_offset) {
+		core.Result::Ok(v) => { table = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	var org_table = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, table.next_offset) {
+		core.Result::Ok(v) => { org_table = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	var name = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, org_table.next_offset) {
+		core.Result::Ok(v) => { name = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	var org_name = packet_lenenc.LenEncStringDecoded(value = "", next_offset = 0);
+	match packet_lenenc.decode_lenenc_string_at(payload, name.next_offset) {
+		core.Result::Ok(v) => { org_name = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	val fixed_start = org_name.next_offset;
+	if fixed_start + 12 > payload.len {
+		return core.Result::Err(_error("coldef-truncated-fixed-fields", fixed_start));
+	}
+	if payload[fixed_start] != cast<Byte>(12) {
+		return core.Result::Err(_error("coldef-bad-fixed-length-marker", fixed_start));
+	}
+	val fixed_off = fixed_start + 1;
+	val charset = _u16le_at(payload, fixed_off);
+	val col_len = _u32le_at(payload, fixed_off + 2);
+	val col_type = payload[fixed_off + 6];
+	val flags = _u16le_at(payload, fixed_off + 7);
+	val decimals = payload[fixed_off + 9];
+	return core.Result::Ok(types.ColumnDef(catalog = catalog.value, schema = schema.value, table = table.value, org_table = org_table.value, name = name.value, org_name = org_name.value, character_set = charset, column_length = col_len, column_type = col_type, flags = flags, decimals = decimals));
 }
 
 fn _set_statement_terminal(statement: &mut Statement) nothrow -> Void {
@@ -302,6 +442,8 @@ fn _init_statement_from_first(statement: &mut Statement, first: &Array<Byte>) no
 						core.Result::Ok(cc) => {
 							statement.column_count = cc;
 							statement.column_defs_remaining = cc;
+							var fresh_coldefs: Array<ColumnDef> = [];
+							statement.column_defs = move fresh_coldefs;
 							statement.awaiting_coldef_terminator = true;
 							statement.mode = MODE_RESULTSET;
 							return core.Result::Ok(core.void_value());
@@ -326,7 +468,7 @@ fn _query_expect_ok(session: &mut WireSession, sql: String, offset_base: Int) no
 						match ev {
 							StatementEvent::Row(_) => { return core.Result::Err(_error("unexpected-row-in-tx-command", offset_base)); },
 							StatementEvent::ResultSetEnd => { return core.Result::Err(_error("unexpected-resultset-in-tx-command", offset_base + 1)); },
-							StatementEvent::StatementErr(_) => { return core.Result::Err(_error("tx-command-server-err", offset_base + 2)); },
+							StatementEvent::StatementErr(server_err) => { return core.Result::Err(_error_with_server("tx-command-server-err", offset_base + 2, &server_err)); },
 							StatementEvent::StatementEnd(v) => { return core.Result::Ok(v); }
 						}
 					}
@@ -384,6 +526,12 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				core.Result::Ok(v) => { auth_first = move v; },
 				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
+			if auth_first.len > 0 and auth_first[0] == AUTH_SWITCH_HEADER {
+				match _handle_auth_switch(&stream, &auth_first, &opts.password, opts.io_timeout_ms) {
+					core.Result::Ok(v) => { auth_first = move v; },
+					core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				}
+			}
 			var state = types.WireSessionState(autocommit_enabled = true, in_transaction = false, reusable = true, last_status_flags = cast<Uint>(0), last_warnings = cast<Uint>(0));
 			match decode_resultset.discriminate_first_response(&auth_first) {
 				core.Result::Ok(route) => {
@@ -399,13 +547,19 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 								core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 							}
 						},
-						decode_resultset.FirstResponseRoute::ErrPacket => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("auth-rejected", 0)); },
+						decode_resultset.FirstResponseRoute::ErrPacket => {
+							val _ = stream.close(_duration_ms(opts.io_timeout_ms));
+							match err_packet_decode.decode_err_packet(&auth_first) {
+								core.Result::Ok(err_pkt) => { return core.Result::Err(_error_with_server("auth-rejected", 0, &err_pkt)); },
+								core.Result::Err(_) => { return core.Result::Err(_error("auth-rejected", 0)); }
+							}
+						},
 						decode_resultset.FirstResponseRoute::ResultSet => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("auth-invalid-response", 0)); }
 					}
 				},
 				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, next_sequence_id = cast<Byte>(0), state = move state));
+			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), state = move state));
 		},
 		core.Result::Err(_) => { return core.Result::Err(_error("connect-failed", 0)); }
 	}
@@ -418,6 +572,9 @@ pub fn close(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecod
 	session.active_statement = false;
 	session.is_closed = true;
 	session.state.reusable = false;
+	_session_reset_seq(session);
+	val quit_payload = command_com_quit.encode_com_quit_payload();
+	val _ = _session_write_packet(session, &quit_payload);
 	match session.stream.close(_duration_ms(session.io_timeout_ms)) {
 		core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 		core.Result::Err(_) => { return core.Result::Err(_error("close-failed", 0)); }
@@ -446,6 +603,14 @@ pub fn resultset_cell_text(cell: &ResultSetCell) nothrow -> Optional<&String> {
 	}
 }
 
+pub fn statement_column_defs(statement: &Statement) nothrow -> &Array<ColumnDef> {
+	return &statement.column_defs;
+}
+
+pub fn statement_column_count(statement: &Statement) nothrow -> Int {
+	return statement.column_count;
+}
+
 pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<Statement, PacketDecodeError> {
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
@@ -461,17 +626,19 @@ pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<Sta
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	match _write_packet(&session.stream, &payload, cast<Byte>(0), session.io_timeout_ms) {
+	_session_reset_seq(session);
+	match _session_write_packet(session, &payload) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
 	}
 	var first: Array<Byte> = [];
-	match _read_packet_payload(&session.stream, session.io_timeout_ms) {
+	match _session_read_packet(session) {
 		core.Result::Ok(v) => { first = move v; },
 		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
 	}
 	session.active_statement = true;
-	var st = types.Statement(session = session, mode = MODE_DONE, column_count = 0, column_defs_remaining = 0, awaiting_coldef_terminator = false, emit_resultset_end_pending = false, pending_ok = _mk_empty_ok(), pending_err = _mk_empty_err(), consumed_terminal = false);
+	var empty_coldefs: Array<ColumnDef> = [];
+	var st = types.Statement(session = session, mode = MODE_DONE, column_count = 0, column_defs_remaining = 0, column_defs = move empty_coldefs, awaiting_coldef_terminator = false, pending_ok = _mk_empty_ok(), pending_err = _mk_empty_err(), consumed_terminal = false);
 	match _init_statement_from_first(&mut st, &first) {
 		core.Result::Ok(_) => { return core.Result::Ok(move st); },
 		core.Result::Err(e) => {
@@ -503,7 +670,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 		}
 		if statement.mode == MODE_NEED_NEXT_FIRST {
 			var first: Array<Byte> = [];
-			match _read_packet_payload(&statement.session.stream, statement.session.io_timeout_ms) {
+			match _session_read_packet(statement.session) {
 				core.Result::Ok(v) => { first = move v; },
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
@@ -518,15 +685,21 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			return core.Result::Err(_error("statement-invalid-mode", statement.mode));
 		}
 		if statement.column_defs_remaining > 0 {
-			match _read_packet_payload(&statement.session.stream, statement.session.io_timeout_ms) {
-				core.Result::Ok(_) => { statement.column_defs_remaining = statement.column_defs_remaining - 1; },
+			match _session_read_packet(statement.session) {
+				core.Result::Ok(coldef_payload) => {
+					match _decode_column_def(&coldef_payload) {
+						core.Result::Ok(cd) => { statement.column_defs.push(move cd); },
+						core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
+					}
+					statement.column_defs_remaining = statement.column_defs_remaining - 1;
+				},
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
 			continue;
 		}
 		if statement.awaiting_coldef_terminator {
 			var p: Array<Byte> = [];
-			match _read_packet_payload(&statement.session.stream, statement.session.io_timeout_ms) {
+			match _session_read_packet(statement.session) {
 				core.Result::Ok(v) => { p = move v; },
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
@@ -538,7 +711,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			continue;
 		}
 		var payload: Array<Byte> = [];
-		match _read_packet_payload(&statement.session.stream, statement.session.io_timeout_ms) {
+		match _session_read_packet(statement.session) {
 			core.Result::Ok(v) => { payload = move v; },
 			core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 		}
@@ -558,7 +731,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			}
 			return core.Result::Ok(StatementEvent::ResultSetEnd());
 		}
-		match _decode_text_row(&payload, statement.column_count) {
+		match decode_resultset.decode_text_row(&payload, statement.column_count) {
 			core.Result::Ok(row) => { return core.Result::Ok(StatementEvent::Row(move row)); },
 			core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 		}
@@ -610,6 +783,9 @@ pub fn set_autocommit(session: &mut WireSession, enabled: Bool) nothrow -> core.
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
 	}
+	if not session.state.reusable {
+		return core.Result::Err(_error("session-not-reusable", 0));
+	}
 	if session.active_statement {
 		return core.Result::Err(_error("active-statement-present", 0));
 	}
@@ -623,6 +799,9 @@ pub fn commit(session: &mut WireSession) nothrow -> core.Result<OkPacket, Packet
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
 	}
+	if not session.state.reusable {
+		return core.Result::Err(_error("session-not-reusable", 0));
+	}
 	if session.active_statement {
 		return core.Result::Err(_error("active-statement-present", 0));
 	}
@@ -633,10 +812,45 @@ pub fn rollback(session: &mut WireSession) nothrow -> core.Result<OkPacket, Pack
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
 	}
+	if not session.state.reusable {
+		return core.Result::Err(_error("session-not-reusable", 0));
+	}
 	if session.active_statement {
 		return core.Result::Err(_error("active-statement-present", 0));
 	}
 	return _query_expect_ok(session, "ROLLBACK", 6000);
+}
+
+pub fn ping(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
+	if session.is_closed {
+		return core.Result::Err(_error("session-closed", 0));
+	}
+	if not session.state.reusable {
+		return core.Result::Err(_error("session-not-reusable", 0));
+	}
+	if session.active_statement {
+		return core.Result::Err(_error("active-statement-present", 0));
+	}
+	val payload = command_com_ping.encode_com_ping_payload();
+	_session_reset_seq(session);
+	match _session_write_packet(session, &payload) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
+	}
+	var resp: Array<Byte> = [];
+	match _session_read_packet(session) {
+		core.Result::Ok(v) => { resp = move v; },
+		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
+	}
+	if resp.len < 1 or resp[0] != cast<Byte>(0) {
+		_mark_dead(session);
+		return core.Result::Err(_error("ping-unexpected-response", 0));
+	}
+	match ok_packet_decode.decode_ok_packet(&resp) {
+		core.Result::Ok(ok) => { _apply_status(session, ok.status_flags, ok.warnings); },
+		core.Result::Err(_) => {}
+	}
+	return core.Result::Ok(core.void_value());
 }
 
 pub fn reset_for_pool_reuse(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
@@ -657,6 +871,10 @@ pub fn reset_for_pool_reuse(session: &mut WireSession) nothrow -> core.Result<Vo
 			core.Result::Ok(_) => {},
 			core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
 		}
+	}
+	match ping(session) {
+		core.Result::Ok(_) => {},
+		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
 	}
 	if not session.state.reusable {
 		return core.Result::Err(_error("session-not-reusable", 0));

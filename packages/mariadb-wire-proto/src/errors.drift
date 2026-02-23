@@ -26,7 +26,9 @@ export {
 
 pub struct PacketDecodeError {
 	pub tag: String,
-	pub offset: Int
+	pub offset: Int,
+	pub server_error_code: Uint,
+	pub server_message: String
 }
 
 pub const TAG_HANDSHAKE_AUTH_NUL_IN_PREFIX: String = "handshake-auth-nul-in-";

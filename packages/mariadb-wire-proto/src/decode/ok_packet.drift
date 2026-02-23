@@ -13,7 +13,7 @@ export {
 pub const OK_PACKET_HEADER: Byte = 0;
 
 fn _error(tag: String, offset: Int) nothrow -> errors.PacketDecodeError {
-	return errors.PacketDecodeError(tag = tag, offset = offset);
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
 }
 
 fn _read_u16le(input: &Array<Byte>, offset: Int) nothrow -> Uint {

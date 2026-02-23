@@ -71,7 +71,7 @@ Then continue with root-cause fix by default; ask before any temporary workaroun
 If user explicitly requests a temporary workaround:
 
 - Keep it minimal and localized.
-- Add a `work-progress.md` (or `TODO.md`) note referencing regression test and bug label.
+- Add a `progress.md` (or `TODO.md`) note referencing regression test and bug label.
 - Do not mark complete until root-cause fix is landed or explicitly deferred.
 
 ### Completion criteria
