@@ -2,9 +2,9 @@
 
 ## Next step
 
-### 20. Hex fixture file policy
+### Deferred: 20. Hex fixture file policy
 
-Decide canonical fixture policy (hex-inline vs fixture files) and align tests/fixtures consistently.
+Deferred for current phase. Live DB integration tests against local dev instances are the active acceptance gate; fixture-policy standardization will be revisited later.
 
 ## Recently closed
 
@@ -46,4 +46,8 @@ None currently open in this section.
 
 ### 20. Hex fixture file policy
 
-Fixture directories are still mostly `.gitkeep` while tests embed hex inline; decide canonical policy and align fixtures/tests.
+Status: **deferred**.
+
+Reason:
+- Current coverage focus is live/protocol behavior against controlled local MariaDB instances.
+- Packetized artifacts are available for future replay-harness work, but not yet the active test source.

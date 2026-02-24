@@ -6,7 +6,7 @@
 2. ~~**#19** WireConnectOptions design-layer cleanup.~~ Done.
 3. ~~**#13** Max payload size cap on read.~~ Done.
 4. ~~**#14** `_duration_ms` clamp documentation/policy.~~ Done.
-5. **#20** Hex fixture file policy.
+5. **#20** Hex fixture file policy. **Deferred (current phase).**
 
 State-machine foundation slice is complete; #11 and #19 build on that baseline.
 
@@ -174,6 +174,12 @@ The todo suggests "configurable max packet guard." Analysis: the 3-byte header i
 3. **Contract documented at API boundary:** Comment on `WireConnectOptions` in `types.drift` documents that timeout fields must be > 0 and that <= 0 values are clamped to 1ms.
 
 No behavior change, no new tests needed.
+
+## #20 Hex fixture file policy — deferred
+
+**Decision:** Defer for current phase.
+
+**Rationale:** Live integration tests against controlled local MariaDB dev instances are currently the primary acceptance gate. Packetized fixture artifacts are retained for future replay-harness adoption, but fixture-policy standardization is postponed until that harness becomes an active test path.
 
 ## Completed rounds
 
