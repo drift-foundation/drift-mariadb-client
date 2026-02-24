@@ -85,6 +85,8 @@ pub struct ResultSetDecoded {
 	pub rows: Array<Array<ResultSetCell>>
 }
 
+// Timeout fields (connect_timeout_ms, io_timeout_ms) are in milliseconds.
+// Must be > 0; values <= 0 are clamped to 1ms as a safety floor.
 pub struct WireConnectOptions {
 	pub host: String,
 	pub port: Int,

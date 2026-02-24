@@ -4,8 +4,8 @@
 
 1. ~~**#11** Capability flags validation/normalization.~~ Done.
 2. ~~**#19** WireConnectOptions design-layer cleanup.~~ Done.
-3. **#13** Max payload size cap on read.
-4. **#14** `_duration_ms` clamp documentation/policy.
+3. ~~**#13** Max payload size cap on read.~~ Done.
+4. ~~**#14** `_duration_ms` clamp documentation/policy.~~ Done.
 5. **#20** Hex fixture file policy.
 
 State-machine foundation slice is complete; #11 and #19 build on that baseline.
@@ -158,6 +158,22 @@ The todo suggests "configurable max packet guard." Analysis: the 3-byte header i
 2. **No struct changes.** No new fields in `WireConnectOptions` or `WireSession`.
 
 3. **No new tests.** This guard cannot be triggered by the protocol's own 3-byte encoding — it's a defensive assertion. Unit-testing it would require mocking the header decoder to return an out-of-range value, which the current test harness doesn't support. The existing live tests exercise the read paths and confirm they work.
+
+## #14 Timeout semantics — closure
+
+**Decision:** Clamp-only, doc-only. No sentinel semantics, no behavior change.
+
+**Policy:** Timeout fields (`connect_timeout_ms`, `io_timeout_ms`) must be > 0. Values <= 0 are clamped to 1ms as a defense-in-depth safety floor. The RPC layer already validates > 0 at config build time; this clamp only affects direct wire-proto callers.
+
+**Changes made:**
+
+1. **Deduplicated `_duration_ms`:** Removed identical copy from `lib.drift`. Promoted to `pub fn duration_ms` in `transport.drift` with export. `lib.drift` now calls `transport.duration_ms()`. Single source of truth for the conversion.
+
+2. **Contract documented at `duration_ms`:** Comment on `transport.duration_ms` explains the <= 0 → 1ms clamp.
+
+3. **Contract documented at API boundary:** Comment on `WireConnectOptions` in `types.drift` documents that timeout fields must be > 0 and that <= 0 values are clamped to 1ms.
+
+No behavior change, no new tests needed.
 
 ## Completed rounds
 

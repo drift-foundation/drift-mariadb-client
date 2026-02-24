@@ -425,3 +425,25 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
 
 - Updated `work/proto-cleanup/progress.md` with #11/#19 closure details and #13 completion notes.
 - Updated `work/proto-cleanup/todo.md` to remove closed #11/#19/#13 items and set next active item to #14 timeout semantics policy/documentation.
+
+### Test runner transition: parallel runner is now default
+
+- `just test` now runs the parallel-compile/serial-run flow previously under `test-par`.
+- All test recipes now use `tools/drift_test_parallel_runner.sh`.
+- Removed legacy runner `tools/drift_test_runner.sh`.
+- Confirmed execution model:
+  - recipe-level flow stays serial in `just test`
+  - compile fan-out is parallel only inside `run-all`
+  - `run-one` recipes remain compile+run serial.
+
+### #14 timeout policy closure and duration helper dedup
+
+- Closed timeout-semantics item with clamp-only policy (no sentinel semantics).
+- Deduplicated timeout conversion helper:
+  - removed duplicate `_duration_ms` from `packages/mariadb-wire-proto/src/lib.drift`
+  - promoted `packages/mariadb-wire-proto/src/transport.drift` helper to exported `duration_ms(...)`
+  - updated wire-proto call sites to use `transport.duration_ms(...)`
+- Documented timeout contract:
+  - `WireConnectOptions` timeout fields must be `> 0`
+  - values `<= 0` are clamped to `1ms` as defense-in-depth for direct wire-proto callers
+  - RPC layer remains strict (`> 0` validation in config builder).

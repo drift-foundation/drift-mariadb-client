@@ -98,13 +98,6 @@ fn _dup_string(s: &String) nothrow -> String {
 	return core.string_from_utf8_bytes(io.buffer_ptr(&b), n);
 }
 
-fn _duration_ms(ms: Int) nothrow -> conc.Duration {
-	if ms <= 0 {
-		return conc.Duration(millis = 1);
-	}
-	return conc.Duration(millis = ms);
-}
-
 fn _mk_empty_ok() nothrow -> OkPacket {
 	return types.OkPacket(affected_rows = cast<Uint>(0), last_insert_id = cast<Uint>(0), status_flags = cast<Uint>(0), warnings = cast<Uint>(0));
 }
@@ -239,7 +232,7 @@ fn _apply_status(session: &mut WireSession, status: Uint, warnings: Uint) nothro
 fn _mark_dead(session: &mut WireSession) nothrow -> Void {
 	session.state.reusable = false;
 	session.is_closed = true;
-	val _ = session.stream.close(_duration_ms(session.io_timeout_ms));
+	val _ = session.stream.close(transport.duration_ms(session.io_timeout_ms));
 }
 
 fn _require_ready(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
@@ -436,45 +429,45 @@ implement core.Destructible for Statement {
 
 pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, PacketDecodeError> {
 	val addr = net.socket_addr(opts.host, opts.port);
-	match net.connect(&addr, _duration_ms(opts.connect_timeout_ms)) {
+	match net.connect(&addr, transport.duration_ms(opts.connect_timeout_ms)) {
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var hello_payload: Array<Byte> = [];
 			match transport.read_packet_payload(&stream, opts.io_timeout_ms) {
 				core.Result::Ok(v) => { hello_payload = move v; },
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var empty_auth_data: Array<Byte> = [];
 			var hello = types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "");
 			match handshake_hello.decode_handshake_hello(&hello_payload) {
 				core.Result::Ok(v) => { hello = move v; },
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var caps = cast<Uint>(0);
 			match capabilities.normalize_capabilities(opts.client_capabilities, hello.capabilities, opts.database.byte_length() > 0) {
 				core.Result::Ok(v) => { caps = v; },
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var token = _sha1_native_password_token(&opts.password, &hello.auth_plugin_data);
 			val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = opts.character_set, username = opts.username, auth_response = move token, database = opts.database, auth_plugin_name = hello.auth_plugin_name);
 			var auth_payload: Array<Byte> = [];
 			match handshake_auth.encode_handshake_response41(&req) {
 				core.Result::Ok(v) => { auth_payload = move v; },
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			match transport.write_packet(&stream, &auth_payload, cast<Byte>(1), opts.io_timeout_ms) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var auth_first: Array<Byte> = [];
 			match transport.read_packet_payload(&stream, opts.io_timeout_ms) {
 				core.Result::Ok(v) => { auth_first = move v; },
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			if auth_first.len > 0 and auth_first[0] == AUTH_SWITCH_HEADER {
 				match _handle_auth_switch(&stream, &auth_first, &opts.password, opts.io_timeout_ms) {
 					core.Result::Ok(v) => { auth_first = move v; },
-					core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+					core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 				}
 			}
 			var state = types.WireSessionState(autocommit_enabled = true, in_transaction = false, reusable = true, last_status_flags = cast<Uint>(0), last_warnings = cast<Uint>(0));
@@ -489,20 +482,20 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 									state.autocommit_enabled = (ok.status_flags & SERVER_STATUS_AUTOCOMMIT) != cast<Uint>(0);
 									state.in_transaction = (ok.status_flags & SERVER_STATUS_IN_TRANS) != cast<Uint>(0);
 								},
-								core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+								core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 							}
 						},
 						decode_resultset.FirstResponseRoute::ErrPacket => {
-							val _ = stream.close(_duration_ms(opts.io_timeout_ms));
+							val _ = stream.close(transport.duration_ms(opts.io_timeout_ms));
 							match err_packet_decode.decode_err_packet(&auth_first) {
 								core.Result::Ok(err_pkt) => { return core.Result::Err(_error_with_server("auth-rejected", 0, &err_pkt)); },
 								core.Result::Err(_) => { return core.Result::Err(_error("auth-rejected", 0)); }
 							}
 						},
-						decode_resultset.FirstResponseRoute::ResultSet => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("auth-invalid-response", 0)); }
+						decode_resultset.FirstResponseRoute::ResultSet => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("auth-invalid-response", 0)); }
 					}
 				},
-				core.Result::Err(e) => { val _ = stream.close(_duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
+				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), server_capabilities = hello.capabilities, reset_connection_supported = true, state = move state));
 		},
@@ -520,7 +513,7 @@ pub fn close(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecod
 	transport.session_reset_seq(session);
 	val quit_payload = command_com_quit.encode_com_quit_payload();
 	val _ = transport.session_write_packet(session, &quit_payload);
-	match session.stream.close(_duration_ms(session.io_timeout_ms)) {
+	match session.stream.close(transport.duration_ms(session.io_timeout_ms)) {
 		core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 		core.Result::Err(_) => { return core.Result::Err(_error("close-failed", 0)); }
 	}

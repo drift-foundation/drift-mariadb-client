@@ -2,9 +2,9 @@
 
 ## Next step
 
-### 14. Timeout semantics documentation/policy
+### 20. Hex fixture file policy
 
-Finalize and document timeout policy (`_duration_ms` behavior and intended caller contract), then align README/progress references.
+Decide canonical fixture policy (hex-inline vs fixture files) and align tests/fixtures consistently.
 
 ## Recently closed
 
@@ -33,18 +33,14 @@ Completed outcomes:
 - capability normalization/validation completed (#11)
 - WireConnectOptions boundary cleanup completed (#19)
 - read-side max payload guard completed (#13)
+- timeout semantics policy + `_duration_ms` dedup completed (#14)
 
 ## Protocol/API gaps
 
 None currently open in this section.
 
 ## Robustness
-
-### 14. Timeout semantics documentation/policy
-
-**File:** `packages/mariadb-wire-proto/src/lib.drift` (`_duration_ms`)
-
-`<=0` currently clamps to `1ms`; document explicitly or introduce clear sentinel semantics.
+None currently open in this section.
 
 ## Process
 

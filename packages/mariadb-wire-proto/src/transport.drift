@@ -9,6 +9,7 @@ import mariadb.wire.proto.errors as errors;
 import mariadb.wire.proto.packet.header as packet_header;
 
 export {
+	duration_ms,
 	read_packet_payload,
 	session_read_packet,
 	session_write_packet,
@@ -23,7 +24,9 @@ fn _error(tag: String, offset: Int) nothrow -> PacketDecodeError {
 	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
 }
 
-fn _duration_ms(ms: Int) nothrow -> conc.Duration {
+// Converts milliseconds to Duration. Values <= 0 are clamped to 1ms as a
+// defense-in-depth guard against zero/negative causing infinite blocks.
+pub fn duration_ms(ms: Int) nothrow -> conc.Duration {
 	if ms <= 0 {
 		return conc.Duration(millis = 1);
 	}
@@ -43,7 +46,7 @@ fn _read_exact(stream: &net.TcpStream, n: Int, timeout_ms: Int) nothrow -> core.
 	while out.len < n {
 		val rem = n - out.len;
 			var buf = io.buffer(rem);
-			match stream.read(&mut buf, _duration_ms(timeout_ms)) {
+			match stream.read(&mut buf, duration_ms(timeout_ms)) {
 				core.Result::Ok(nread) => {
 					val got = nread;
 					if got <= 0 { return core.Result::Err(_error("wire-read-eof", out.len)); }
@@ -70,7 +73,7 @@ fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>, timeout_ms: Int) noth
 			io.buffer_write(&mut chunk, i, bytes[off + i]);
 			i = i + 1;
 		}
-		match stream.write(&chunk, _duration_ms(timeout_ms)) {
+		match stream.write(&chunk, duration_ms(timeout_ms)) {
 			core.Result::Ok(w) => {
 				if w <= 0 { return core.Result::Err(_error("wire-write-failed", off)); }
 				off = off + w;
