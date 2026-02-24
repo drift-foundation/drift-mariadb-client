@@ -108,6 +108,9 @@ rpc-check:
 rpc-check-par:
 	@tools/drift_test_parallel_runner.sh run-all --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-root packages/mariadb-rpc/tests/unit --target-word-bits 64
 
+rpc-check-config:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/unit/rpc_config_validation_test.drift --target-word-bits 64
+
 rpc-live-connect-state-regression:
 	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift --target-word-bits 64
 

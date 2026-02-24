@@ -56,7 +56,7 @@ fn _drain_expect_statement_end(stmt: &mut rpc.RpcStatement, base: Int) nothrow -
 			core.Result::Ok(ev) => {
 				match ev {
 					rpc.RpcEvent::Row(_) => {},
-					rpc.RpcEvent::ResultSetEnd(_) => {},
+					rpc.RpcEvent::ResultSetEnd => {},
 					rpc.RpcEvent::ServerErr(_) => { return base + 1; },
 					rpc.RpcEvent::StatementEnd(_) => { return 0; }
 				}
@@ -131,7 +131,7 @@ fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
 													core.Result::Ok(v) => { if v == 3 { saw_sum = true; } }
 												}
 											},
-											rpc.RpcEvent::ResultSetEnd(_) => {},
+											rpc.RpcEvent::ResultSetEnd => {},
 											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1104; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
 										}
@@ -178,7 +178,7 @@ fn scenario_multi_resultset_selective_skip(logger: &log.Logger) nothrow -> Int {
 									core.Result::Ok(ev) => {
 										match ev {
 											rpc.RpcEvent::Row(_) => { saw_row = true; break; },
-											rpc.RpcEvent::ResultSetEnd(_) => {},
+											rpc.RpcEvent::ResultSetEnd => {},
 											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1205; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
 										}
@@ -216,7 +216,7 @@ fn _consume_one_row_then_skip_remaining(conn: &mut rpc.RpcConnection, logger: &l
 					core.Result::Ok(ev) => {
 						match ev {
 							rpc.RpcEvent::Row(_) => { saw_row = true; break; },
-							rpc.RpcEvent::ResultSetEnd(_) => {},
+							rpc.RpcEvent::ResultSetEnd => {},
 							rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "partial-consume-reset", "proc": "sp_multi_rs"}); return 1304; },
 							rpc.RpcEvent::StatementEnd(_) => { break; }
 						}
@@ -260,6 +260,29 @@ fn scenario_partial_consume_then_reset(logger: &log.Logger) nothrow -> Int {
 	}
 }
 
+fn scenario_invalid_proc_name(logger: &log.Logger) nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "invalid-proc-name", "step": "build-config"}); return 1400; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "invalid-proc-name", "step": "connect"}); return 1401; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					match conn.call(&"bad;name") {
+						core.Result::Ok(_) => { val _ = logger.error("rpc-call-should-have-failed", {"scenario": "invalid-proc-name", "proc": "bad;name"}); val _ = rpc.close(&mut conn); return 1402; },
+						core.Result::Err(e) => {
+							if e.tag != "rpc-invalid-proc-name" { val _ = logger.error("rpc-wrong-error-tag", {"scenario": "invalid-proc-name", "got": e.tag}); val _ = rpc.close(&mut conn); return 1403; }
+						}
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
 fn main() nothrow -> Int {
 	val logger = _make_logger();
 	val a = scenario_ping_no_args(&logger);
@@ -270,6 +293,8 @@ fn main() nothrow -> Int {
 	if c != 0 { return c; }
 	val d = scenario_partial_consume_then_reset(&logger);
 	if d != 0 { return d; }
+	val e = scenario_invalid_proc_name(&logger);
+	if e != 0 { return e; }
 	val _ = logger.flush(conc.Duration(millis = 50));
 	return 0;
 }

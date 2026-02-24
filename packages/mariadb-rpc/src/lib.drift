@@ -15,10 +15,8 @@ export {
 	RpcEvent,
 	RpcArg,
 	RpcServerError,
-	RpcResultSetSummary,
 	RpcStatementSummary,
 	RpcConfigError,
-	RpcArgError,
 	RpcError,
 	new_connection_config_builder,
 	build_connection_config,
@@ -40,6 +38,9 @@ export {
 	reset_for_pool_reuse
 };
 
+// write_timeout_ms: reserved. Wire layer uses one io_timeout_ms for reads and
+// writes; RPC maps read_timeout_ms to wire io_timeout_ms. write_timeout_ms is
+// validated but not consumed until wire supports separate write timeout.
 pub struct RpcConnectionConfig {
 	pub host: String,
 	pub port: Int,
@@ -91,13 +92,6 @@ pub struct RpcServerError {
 	pub message: String
 }
 
-pub struct RpcResultSetSummary {
-	pub done: Bool
-}
-
-implement core.Copy for RpcResultSetSummary {
-}
-
 pub struct RpcStatementSummary {
 	pub affected_rows: Uint,
 	pub last_insert_id: Uint,
@@ -110,7 +104,7 @@ implement core.Copy for RpcStatementSummary {
 
 pub variant RpcEvent {
 	Row(value: RpcRow),
-	ResultSetEnd(value: RpcResultSetSummary),
+	ResultSetEnd,
 	StatementEnd(value: RpcStatementSummary),
 	ServerErr(value: RpcServerError)
 }
@@ -130,11 +124,6 @@ pub struct RpcConfigError {
 	pub message: String
 }
 
-pub struct RpcArgError {
-	pub tag: String,
-	pub message: String
-}
-
 pub struct RpcError {
 	pub tag: String,
 	pub message: String
@@ -143,12 +132,6 @@ pub struct RpcError {
 implement core.Diagnostic for RpcConfigError {
 	pub fn to_diag(self: &RpcConfigError) nothrow -> DiagnosticValue {
 		return DiagnosticValue::String(self.tag + ":" + self.field);
-	}
-}
-
-implement core.Diagnostic for RpcArgError {
-	pub fn to_diag(self: &RpcArgError) nothrow -> DiagnosticValue {
-		return DiagnosticValue::String(self.tag);
 	}
 }
 
@@ -523,7 +506,7 @@ implement RpcStatement {
 			core.Result::Ok(v) => {
 				match v {
 					wire.StatementEvent::Row(v2) => { var row = move v2; return core.Result::Ok(RpcEvent::Row(RpcRow(values = move row))); },
-					wire.StatementEvent::ResultSetEnd => { return core.Result::Ok(RpcEvent::ResultSetEnd(RpcResultSetSummary(done = true))); },
+					wire.StatementEvent::ResultSetEnd => { return core.Result::Ok(RpcEvent::ResultSetEnd()); },
 					wire.StatementEvent::StatementEnd(v2) => { return core.Result::Ok(RpcEvent::StatementEnd(RpcStatementSummary(affected_rows = v2.affected_rows, last_insert_id = v2.last_insert_id, status_flags = v2.status_flags, warnings = v2.warnings))); },
 					wire.StatementEvent::StatementErr(v2) => { return core.Result::Ok(RpcEvent::ServerErr(RpcServerError(error_code = v2.error_code, sql_state = v2.sql_state, message = v2.message))); }
 				}

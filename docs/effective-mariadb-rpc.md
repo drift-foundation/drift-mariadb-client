@@ -56,9 +56,63 @@ Status: living guide. Update as API stabilizes.
 
 ## Error model
 
-- Transport/protocol failures are outer `RpcError`.
-- Server SQL error packets are surfaced as `RpcEvent::ServerErr`.
-- Handle both layers explicitly.
+Two distinct error channels:
+
+- **`RpcError`** (returned as `Result::Err`) — transport or protocol failure. The connection may be dead after this.
+- **`RpcEvent::ServerErr`** (surfaced through the event stream) — server-level SQL error. The connection remains usable; only the statement is terminal.
+
+Handle both layers explicitly.
+
+### Config-time errors (`RpcConfigError`)
+
+| Tag | Field | When |
+|---|---|---|
+| `rpc-config-missing-required` | `user` or `password` | Required field not set via builder |
+| `rpc-config-invalid-port` | `port` | Port not in 1..65535 |
+| `rpc-config-invalid-timeout` | `connect_timeout_ms`, `read_timeout_ms`, `write_timeout_ms` | Timeout <= 0 |
+
+### Runtime errors (`RpcError`)
+
+Connection lifecycle:
+
+| Tag | Source | When |
+|---|---|---|
+| `rpc-wire-connect-failed` | `connect()` | Wire layer TCP connect or handshake failed |
+| `rpc-wire-query-failed` | `connect()`, `conn.call()` | Wire layer query execution failed |
+| `rpc-server-error` | `connect()` (SET NAMES) | Server returned ERR during post-connect setup |
+| `rpc-wire-set-autocommit-failed` | `connect()`, `conn.set_autocommit()` | Wire layer set_autocommit failed |
+| `rpc-wire-commit-failed` | `conn.commit()` | Wire layer commit failed |
+| `rpc-wire-rollback-failed` | `conn.rollback()` | Wire layer rollback failed |
+| `rpc-wire-reset-failed` | `conn.reset_for_pool_reuse()` | Wire layer reset failed |
+| `rpc-wire-close-failed` | `conn.close()` | Wire layer close failed |
+
+Statement operations:
+
+| Tag | Source | When |
+|---|---|---|
+| `rpc-invalid-proc-name` | `conn.call()` | Proc name empty or has non-identifier characters |
+| `rpc-wire-next-event-failed` | `stmt.next_event()` | Wire layer next_event failed |
+| `rpc-wire-skip-result-failed` | `stmt.skip_result()` | Wire layer skip_result failed |
+| `rpc-wire-skip-remaining-failed` | `stmt.skip_remaining()` | Wire layer skip_remaining failed |
+
+Row getters:
+
+| Tag | Source | When |
+|---|---|---|
+| `rpc-row-index-out-of-bounds` | `row.is_null/get_*()` | Index < 0 or >= column count |
+| `rpc-row-null` | `row.get_string()` | Cell is NULL (use `is_null` first) |
+| `rpc-row-parse-int-failed` | `row.get_int()` | String-to-Int parse failed |
+| `rpc-row-parse-uint-failed` | `row.get_uint()` | String-to-Uint parse failed |
+| `rpc-row-parse-float-failed` | `row.get_float()` | String-to-Float parse failed |
+
+### Error tag naming convention
+
+All tags follow `rpc-{category}-{detail}`:
+- `rpc-config-*` — configuration validation
+- `rpc-wire-*` — wire layer passthrough (transport/protocol)
+- `rpc-server-error` — server ERR during internal operations
+- `rpc-invalid-*` — input validation
+- `rpc-row-*` — row accessor errors
 
 ## Recommended usage pattern
 

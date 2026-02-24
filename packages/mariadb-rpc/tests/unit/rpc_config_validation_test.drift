@@ -1,0 +1,143 @@
+module mariadb.rpc.tests.unit.rpc_config_validation_test
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+fn _valid_builder() nothrow -> rpc.RpcConnectionConfigBuilder {
+	var b = rpc.new_connection_config_builder();
+	b.with_user("testuser");
+	b.with_password("testpw");
+	b.with_port(3306);
+	b.with_connect_timeout_ms(1000);
+	b.with_read_timeout_ms(1000);
+	b.with_write_timeout_ms(1000);
+	return move b;
+}
+
+fn scenario_missing_user() nothrow -> Int {
+	var b = rpc.new_connection_config_builder();
+	b.with_password("testpw");
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 101; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-missing-required" { return 102; }
+			if e.field != "user" { return 103; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_missing_password() nothrow -> Int {
+	var b = rpc.new_connection_config_builder();
+	b.with_user("testuser");
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 201; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-missing-required" { return 202; }
+			if e.field != "password" { return 203; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_invalid_port_zero() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_port(0);
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 301; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-invalid-port" { return 302; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_invalid_port_too_large() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_port(70000);
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 401; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-invalid-port" { return 402; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_invalid_connect_timeout() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_connect_timeout_ms(0);
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 501; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-invalid-timeout" { return 502; }
+			if e.field != "connect_timeout_ms" { return 503; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_invalid_read_timeout() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_read_timeout_ms(-1);
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 601; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-invalid-timeout" { return 602; }
+			if e.field != "read_timeout_ms" { return 603; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_invalid_write_timeout() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_write_timeout_ms(0);
+	match rpc.build_connection_config(move b) {
+		core.Result::Ok(_) => { return 701; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-config-invalid-timeout" { return 702; }
+			if e.field != "write_timeout_ms" { return 703; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_valid_config() nothrow -> Int {
+	var b = _valid_builder();
+	b.with_host("10.0.0.1");
+	b.with_database("mydb");
+	match rpc.build_connection_config(move b) {
+		core.Result::Err(_) => { return 801; },
+		core.Result::Ok(cfg) => {
+			if cfg.host != "10.0.0.1" { return 802; }
+			if cfg.port != 3306 { return 803; }
+			if cfg.user != "testuser" { return 804; }
+			if cfg.database != "mydb" { return 805; }
+			if cfg.connect_timeout_ms != 1000 { return 806; }
+			if cfg.read_timeout_ms != 1000 { return 807; }
+			if cfg.write_timeout_ms != 1000 { return 808; }
+			return 0;
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_missing_user();
+	if a != 0 { return a; }
+	val b = scenario_missing_password();
+	if b != 0 { return b; }
+	val c = scenario_invalid_port_zero();
+	if c != 0 { return c; }
+	val d = scenario_invalid_port_too_large();
+	if d != 0 { return d; }
+	val e = scenario_invalid_connect_timeout();
+	if e != 0 { return e; }
+	val f = scenario_invalid_read_timeout();
+	if f != 0 { return f; }
+	val g = scenario_invalid_write_timeout();
+	if g != 0 { return g; }
+	val h = scenario_valid_config();
+	if h != 0 { return h; }
+	return 0;
+}
