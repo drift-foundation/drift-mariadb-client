@@ -1,5 +1,11 @@
 # Wire Protocol Review: Open Items Only
 
+## Next step
+
+### 14. Timeout semantics documentation/policy
+
+Finalize and document timeout policy (`_duration_ms` behavior and intended caller contract), then align README/progress references.
+
 ## Recently closed
 
 ### 9.x COM_RESET_CONNECTION follow-through
@@ -15,47 +21,24 @@ Resolution notes:
 - Proactive capability-bit gate: **won't-fix** (no reliable capability bit for COM_RESET_CONNECTION; probe-and-disable is intended behavior).
 - Explicit unsupported-fallback regression in full reset flow: **deferred** until replay/mock harness exists (expected to align with state-machine slice).
 
-## Architecture decision (next major slice)
+### State-machine foundation slice
 
-### Protocol state-machine foundation (**immediate next item**)
+Status: **closed**.
 
-Why:
-- We want explicit protocol lifecycle rules before adding more behavior.
-- Remaining open work is transition/guard heavy and should not grow via ad-hoc branching.
+Completed outcomes:
+- transition-regression live e2e coverage added (`tests/e2e/live_session_state_test.drift`)
+- guard and command preamble centralization in `lib.drift` (`_require_ready`, `_begin_command`, `_command_send_recv`)
+- packet transport extraction to `src/transport.drift` with `lib.drift` calling through
+- guard diagnostics normalized (`query` active statement tag aligned to `"active-statement-present"`)
+- capability normalization/validation completed (#11)
+- WireConnectOptions boundary cleanup completed (#19)
+- read-side max payload guard completed (#13)
 
-Target outcomes:
-- Deterministic session/statement transitions.
-- Centralized invariants and recovery policy.
-- Cleaner extension path for future protocol features.
-- Lower regression risk.
+## Protocol/API gaps
 
-Design direction:
-- Make transition rules first-class internals (not scattered conditionals).
-- Keep transport framing/parsing separate from transition logic.
-- Keep public API stable while internals migrate.
-- Drive rollout via regression-first transition tests.
-
-Execution ordering:
-1. Build state-machine foundation first.
-2. Then close `#11`, `#19`, `#13`, `#14`, and `#20` on top of that foundation.
-
-## Protocol/API gaps (to be completed after state-machine foundation)
-
-### 11. Capability flags management
-
-`WireConnectOptions` still accepts raw capability bitmasks without validation/normalization against features the client requires.
-
-### 19. WireConnectOptions low-level exposure
-
-`WireConnectOptions` still exposes low-level `client_capabilities` and `character_set` directly instead of a higher-level caller model.
+None currently open in this section.
 
 ## Robustness
-
-### 13. Max payload size enforcement
-
-**File:** `packages/mariadb-wire-proto/src/lib.drift` (`_read_packet_payload`)
-
-No read-side payload cap yet; add configurable max packet guard.
 
 ### 14. Timeout semantics documentation/policy
 

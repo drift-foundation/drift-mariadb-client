@@ -163,8 +163,6 @@ const DEFAULT_PORT: Int = 3306;
 const DEFAULT_TIMEOUT_MS: Int = 3000;
 const DEFAULT_CHARSET: String = "utf8mb4";
 const DEFAULT_COLLATION: String = "utf8mb4_unicode_ci";
-const DEFAULT_WIRE_CHARSET: Byte = 45;
-const DEFAULT_CLIENT_CAPS: Uint = 11510412;
 
 fn _rpc_error(tag: String, message: String) nothrow -> RpcError {
 	return RpcError(tag = tag, message = message);
@@ -382,7 +380,7 @@ pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection
 	val user = _dup_string(&config.user);
 	val password = _dup_string(&config.password);
 	val database = _dup_string(&config.database);
-	val opts = wire.WireConnectOptions(host = host, port = config.port, username = user, password = password, database = database, character_set = DEFAULT_WIRE_CHARSET, client_capabilities = DEFAULT_CLIENT_CAPS, connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
+	val opts = wire.WireConnectOptions(host = host, port = config.port, username = user, password = password, database = database, character_set = wire.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
 	match wire.connect(&opts) {
 		core.Result::Ok(v) => {
 			var session = move v;

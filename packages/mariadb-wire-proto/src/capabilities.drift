@@ -1,0 +1,54 @@
+module mariadb.wire.proto.capabilities
+
+import std.core as core;
+import mariadb.wire.proto.errors as errors;
+import mariadb.wire.proto.protocol.constants as protocol;
+
+export {
+	normalize_capabilities
+};
+
+pub type PacketDecodeError = errors.PacketDecodeError;
+
+fn _error(tag: String, offset: Int) nothrow -> PacketDecodeError {
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
+}
+
+// Required flags: protocol structure dependencies that all decode/encode paths assume.
+// CLIENT_PROTOCOL_41 (512) + CLIENT_TRANSACTIONS (8192) + CLIENT_SECURE_CONNECTION (32768)
+// + CLIENT_PLUGIN_AUTH (524288) + CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA (2097152) = 2662912.
+const REQUIRED_CAPS: Uint = 2662912;
+
+fn _clear_flag(caps: Uint, flag: Uint) nothrow -> Uint {
+	if (caps & flag) != cast<Uint>(0) {
+		return caps ^ flag;
+	}
+	return caps;
+}
+
+fn _strip_unsupported(caps: Uint) nothrow -> Uint {
+	var out = caps;
+	out = _clear_flag(out, protocol.CLIENT_LOCAL_FILES);
+	out = _clear_flag(out, protocol.CLIENT_PS_MULTI_RESULTS);
+	out = _clear_flag(out, protocol.CLIENT_SESSION_TRACK);
+	return out;
+}
+
+pub fn normalize_capabilities(requested: Uint, server: Uint, has_database: Bool) nothrow -> core.Result<Uint, PacketDecodeError> {
+	// Force required flags + default-on MULTI_RESULTS, strip unsupported.
+	var effective = _strip_unsupported(requested | REQUIRED_CAPS | protocol.CLIENT_MULTI_RESULTS);
+	if has_database {
+		effective = effective | protocol.CLIENT_CONNECT_WITH_DB;
+	}
+	// Intersect with server capabilities.
+	val final_caps = effective & server;
+	// Verify server supports all required flags.
+	if (final_caps & REQUIRED_CAPS) != REQUIRED_CAPS {
+		return core.Result::Err(_error("server-missing-required-capability", 0));
+	}
+	// Verify server supports CLIENT_CONNECT_WITH_DB when database is requested.
+	if has_database and (final_caps & protocol.CLIENT_CONNECT_WITH_DB) == cast<Uint>(0) {
+		return core.Result::Err(_error("server-missing-connect-with-db", 0));
+	}
+	return core.Result::Ok(final_caps);
+}

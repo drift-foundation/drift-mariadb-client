@@ -1,0 +1,154 @@
+module mariadb.wire.proto.tests.unit.capability_normalization_test
+
+import std.core as core;
+import mariadb.wire.proto.capabilities as caps;
+import mariadb.wire.proto.protocol.constants as protocol;
+
+// Server caps that include all defined flags (required + optional + unsupported).
+const ALL_SERVER_CAPS: Uint = 11510412;
+
+// Required flags forced in: caller passes 0, result has all required flags set.
+fn scenario_required_flags_forced() nothrow -> Int {
+	val server = ALL_SERVER_CAPS;
+	match caps.normalize_capabilities(cast<Uint>(0), server, false) {
+		core.Result::Err(_) => { return 100; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_PROTOCOL_41) == cast<Uint>(0) { return 101; }
+			if (v & protocol.CLIENT_TRANSACTIONS) == cast<Uint>(0) { return 102; }
+			if (v & protocol.CLIENT_SECURE_CONNECTION) == cast<Uint>(0) { return 103; }
+			if (v & protocol.CLIENT_PLUGIN_AUTH) == cast<Uint>(0) { return 104; }
+			if (v & protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) == cast<Uint>(0) { return 105; }
+			return 0;
+		}
+	}
+}
+
+// Database flag conditional: with database, CLIENT_CONNECT_WITH_DB present; without, absent.
+fn scenario_database_flag_conditional() nothrow -> Int {
+	val server = ALL_SERVER_CAPS;
+	match caps.normalize_capabilities(cast<Uint>(0), server, true) {
+		core.Result::Err(_) => { return 200; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_CONNECT_WITH_DB) == cast<Uint>(0) { return 201; }
+		}
+	}
+	match caps.normalize_capabilities(cast<Uint>(0), server, false) {
+		core.Result::Err(_) => { return 210; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_CONNECT_WITH_DB) != cast<Uint>(0) { return 211; }
+		}
+	}
+	return 0;
+}
+
+// MULTI_RESULTS default-on: caller passes 0, result includes CLIENT_MULTI_RESULTS.
+fn scenario_multi_results_default_on() nothrow -> Int {
+	val server = ALL_SERVER_CAPS;
+	match caps.normalize_capabilities(cast<Uint>(0), server, false) {
+		core.Result::Err(_) => { return 300; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_MULTI_RESULTS) == cast<Uint>(0) { return 301; }
+			return 0;
+		}
+	}
+}
+
+// Server intersection: caller requests a flag, server doesn't advertise it, result omits it.
+fn scenario_server_intersection() nothrow -> Int {
+	// Server supports required flags but NOT CLIENT_MULTI_STATEMENTS.
+	// Required = 2662912, add CLIENT_MULTI_RESULTS (131072) = 2793984.
+	val server_no_multi_stmt = cast<Uint>(2793984);
+	val requested = protocol.CLIENT_MULTI_STATEMENTS;
+	match caps.normalize_capabilities(requested, server_no_multi_stmt, false) {
+		core.Result::Err(_) => { return 400; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_MULTI_STATEMENTS) != cast<Uint>(0) { return 401; }
+			return 0;
+		}
+	}
+}
+
+// Server missing required cap: server lacks CLIENT_PROTOCOL_41 -> error.
+fn scenario_server_missing_required() nothrow -> Int {
+	// Server has everything except CLIENT_PROTOCOL_41 (512).
+	// ALL_SERVER_CAPS = 11510412. Remove 512 via XOR (512 is set in ALL_SERVER_CAPS).
+	val server_no_proto41 = ALL_SERVER_CAPS ^ protocol.CLIENT_PROTOCOL_41;
+	match caps.normalize_capabilities(cast<Uint>(0), server_no_proto41, false) {
+		core.Result::Ok(_) => { return 500; },
+		core.Result::Err(e) => {
+			if e.tag != "server-missing-required-capability" { return 501; }
+			return 0;
+		}
+	}
+}
+
+// Unsupported flags stripped: caller requests unsupported flags, server also supports them,
+// result still omits them. Server must include unsupported flags so the test proves
+// active stripping, not accidental intersection removal.
+fn scenario_unsupported_stripped() nothrow -> Int {
+	// Server supports everything including all unsupported flags.
+	val server = ALL_SERVER_CAPS | protocol.CLIENT_LOCAL_FILES | protocol.CLIENT_PS_MULTI_RESULTS | protocol.CLIENT_SESSION_TRACK;
+	// Caller explicitly requests all unsupported flags.
+	val requested = protocol.CLIENT_LOCAL_FILES | protocol.CLIENT_PS_MULTI_RESULTS | protocol.CLIENT_SESSION_TRACK;
+	match caps.normalize_capabilities(requested, server, false) {
+		core.Result::Err(_) => { return 600; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_LOCAL_FILES) != cast<Uint>(0) { return 601; }
+			if (v & protocol.CLIENT_PS_MULTI_RESULTS) != cast<Uint>(0) { return 602; }
+			if (v & protocol.CLIENT_SESSION_TRACK) != cast<Uint>(0) { return 603; }
+			return 0;
+		}
+	}
+}
+
+// Pass-through flags preserved: caller requests CLIENT_MULTI_STATEMENTS, server supports it.
+fn scenario_passthrough_preserved() nothrow -> Int {
+	val server = ALL_SERVER_CAPS;
+	val requested = protocol.CLIENT_MULTI_STATEMENTS;
+	match caps.normalize_capabilities(requested, server, false) {
+		core.Result::Err(_) => { return 700; },
+		core.Result::Ok(v) => {
+			if (v & protocol.CLIENT_MULTI_STATEMENTS) == cast<Uint>(0) { return 701; }
+			return 0;
+		}
+	}
+}
+
+// Server missing CLIENT_CONNECT_WITH_DB when database is requested -> error.
+fn scenario_server_missing_connect_with_db() nothrow -> Int {
+	// Server has required flags but NOT CLIENT_CONNECT_WITH_DB.
+	// REQUIRED (2662912) + CLIENT_MULTI_RESULTS (131072) = 2793984.
+	val server_no_db = cast<Uint>(2793984);
+	match caps.normalize_capabilities(cast<Uint>(0), server_no_db, true) {
+		core.Result::Ok(_) => { return 800; },
+		core.Result::Err(e) => {
+			if e.tag != "server-missing-connect-with-db" { return 801; }
+		}
+	}
+	// Same server, no database -> should succeed.
+	match caps.normalize_capabilities(cast<Uint>(0), server_no_db, false) {
+		core.Result::Err(_) => { return 810; },
+		core.Result::Ok(_) => {}
+	}
+	return 0;
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_required_flags_forced();
+	if a != 0 { return a; }
+	val b = scenario_database_flag_conditional();
+	if b != 0 { return b; }
+	val c = scenario_multi_results_default_on();
+	if c != 0 { return c; }
+	val d = scenario_server_intersection();
+	if d != 0 { return d; }
+	val e = scenario_server_missing_required();
+	if e != 0 { return e; }
+	val f = scenario_unsupported_stripped();
+	if f != 0 { return f; }
+	val g = scenario_passthrough_preserved();
+	if g != 0 { return g; }
+	val h = scenario_server_missing_connect_with_db();
+	if h != 0 { return h; }
+	return 0;
+}

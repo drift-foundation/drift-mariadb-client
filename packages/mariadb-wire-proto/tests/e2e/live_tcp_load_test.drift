@@ -13,6 +13,7 @@ import mariadb.wire.proto.handshake.auth as auth;
 import mariadb.wire.proto.command.com_query as com_query;
 import mariadb.wire.proto.decode.ok_packet as ok_packet;
 import mariadb.wire.proto.decode.resultset as resultset;
+import mariadb.wire.proto.protocol.constants as protocol;
 
 type VtInt = conc.VirtualThread<Int>;
 
@@ -21,9 +22,7 @@ const LIVE_PORT: Int = 34114;
 const LIVE_USER: String = "root";
 const LIVE_PASSWORD: String = "rootpw";
 const LIVE_DB: String = "appdb";
-const LIVE_CHARSET: Byte = 45;
 const LIVE_TIMEOUT_MS: Int = 3000;
-const LIVE_CLIENT_CAPS_INT: Int = 11510412;
 const WORKERS: Int = 32;
 const QUERIES_PER_WORKER: Int = 100;
 
@@ -172,7 +171,8 @@ fn _empty_hello() nothrow -> types.HandshakeHello {
 
 fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Result<Void, Int> {
 	val token = _sha1_native_password_token(&LIVE_PASSWORD, &h.auth_plugin_data);
-	val req = types.HandshakeResponse41(capabilities = cast<Uint>(LIVE_CLIENT_CAPS_INT), max_packet_size = cast<Uint>(16777216), character_set = LIVE_CHARSET, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name);
+	val caps = protocol.CLIENT_PROTOCOL_41 | protocol.CLIENT_TRANSACTIONS | protocol.CLIENT_SECURE_CONNECTION | protocol.CLIENT_PLUGIN_AUTH | protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | protocol.CLIENT_MULTI_RESULTS | protocol.CLIENT_CONNECT_WITH_DB;
+	val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = protocol.UTF8MB4_CHARSET_ID, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name);
 	var auth_payload: Array<Byte> = [];
 	match auth.encode_handshake_response41(&req) {
 		core.Result::Ok(v) => { auth_payload = move v; },

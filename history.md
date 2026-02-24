@@ -343,3 +343,85 @@ Key design decisions:
   - `#13` max payload size cap
   - `#14` timeout clamp policy/documentation
   - `#20` hex fixture policy
+
+### State-machine audit (pre-design report)
+
+Audit of `lib.drift` to map implicit states, transitions, and guard patterns before designing the state-machine foundation.
+
+Session-level states (implicit, derived from WireSession fields):
+- **Connecting**: before `connect()` returns — no `WireSession` exists yet.
+- **Ready**: `is_closed=false`, `reusable=true`, `active_statement=false`.
+- **Busy** (statement active): `active_statement=true`.
+- **Not-reusable**: `reusable=false`, `is_closed=false`.
+- **Dead/Closed**: `is_closed=true` (implies `reusable=false`).
+
+Statement-level states (already explicit via MODE_* constants): MODE_RESULTSET (3), MODE_PENDING_OK (1), MODE_PENDING_ERR (2), MODE_NEED_NEXT_FIRST (4), MODE_DONE (5).
+
+Guard pattern (repeated 6 times in `query`, `set_autocommit`, `commit`, `rollback`, `ping`, `reset_connection`): 3-check preamble (is_closed → "session-closed", !reusable → "session-not-reusable", active_statement → "active-statement-present"). `reset_for_pool_reuse` skips reusable check; `close` only checks is_closed.
+
+Failure semantics (two categories): transport/protocol failure → `_mark_dead` → permanently dead; server-level ERR → session alive, stream synchronized.
+
+Key observations:
+1. Guard pattern was the main centralization candidate (6 copies → `_require_ready`).
+2. Statement mode was already a well-structured state machine.
+3. Session state is implicit but simple (4 states from 3 booleans).
+4. `reset_for_pool_reuse` is the most complex transition (multi-step with fallback).
+5. `_mark_dead` is the catch-all terminal transition.
+
+### State-machine foundation implementation
+
+Three phases, each independently verifiable via `just test`. No public API changes.
+
+Phase 1 (transition regression tests): pinned guard and transition behavior in `tests/e2e/live_session_state_test.drift` covering closed/not-reusable/active-statement guards, Busy→Ready, drop auto-drain, and reset-for-reuse.
+
+Phase 2 (guard/command centralization): extracted `_require_ready`, `_begin_command`, `_command_send_recv` in `lib.drift`. Normalized query()'s error tag from "statement-already-active" to "active-statement-present" (intentional diagnostics change).
+
+Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.drift` calls through via import.
+
+### State-machine foundation slice completed
+- Added dedicated live transition regression coverage:
+  - `packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift`
+  - scenarios cover closed/not-reusable/active-statement guards, Busy->Ready transition, drop auto-drain, and reset-for-reuse normalization.
+- Centralized session guard/command patterns in `packages/mariadb-wire-proto/src/lib.drift`:
+  - `_require_ready(...)`
+  - `_begin_command(...)`
+  - `_command_send_recv(...)`
+- Normalized active-statement guard diagnostics so `query()` aligns with other guarded commands:
+  - now uses `"active-statement-present"` instead of `"statement-already-active"`.
+- Extracted packet transport operations into:
+  - `packages/mariadb-wire-proto/src/transport.drift`
+  - `lib.drift` now routes packet read/write/sequence helpers via transport module.
+- Added live recipe integration:
+  - `just wire-live-state`
+  - included in top-level `just test` flow.
+
+### Validation
+- `just wire-check` passed for the state-machine batch.
+
+## 2026-02-24
+
+### Wire protocol cleanup closures (#11, #19, #13)
+
+- Implemented capability normalization in new module:
+  - `packages/mariadb-wire-proto/src/capabilities.drift`
+  - `normalize_capabilities(requested, server, has_database)` now:
+    - forces required protocol flags
+    - enables `CLIENT_MULTI_RESULTS` by default
+    - strips unsupported flags (`LOCAL_FILES`, `PS_MULTI_RESULTS`, `SESSION_TRACK`)
+    - intersects against server-advertised capabilities
+    - returns deterministic errors for missing required server support
+- Wired normalization into connect path:
+  - `packages/mariadb-wire-proto/src/lib.drift` now normalizes `opts.client_capabilities` before handshake response encode.
+- Added protocol constants and charset naming cleanup:
+  - `packages/mariadb-wire-proto/src/protocol/constants.drift`
+  - `DEFAULT_CHARSET_ID` export in wire proto and adoption across live tests/RPC connect paths.
+- Added capability regression coverage:
+  - `packages/mariadb-wire-proto/tests/unit/capability_normalization_test.drift`
+- Added explicit max-payload defensive guard in transport read paths:
+  - `packages/mariadb-wire-proto/src/transport.drift`
+  - returns `wire-payload-too-large` when payload exceeds header max.
+
+### Tracking/docs synchronization
+
+- Updated `work/proto-cleanup/progress.md` with #11/#19 closure details and #13 completion notes.
+- Updated `work/proto-cleanup/todo.md` to remove closed #11/#19/#13 items and set next active item to #14 timeout semantics policy/documentation.

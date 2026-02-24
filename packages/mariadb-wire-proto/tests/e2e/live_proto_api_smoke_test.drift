@@ -8,12 +8,10 @@ const LIVE_PORT: Int = 34114;
 const LIVE_USER: String = "root";
 const LIVE_PASSWORD: String = "rootpw";
 const LIVE_DB: String = "appdb";
-const LIVE_CHARSET: Byte = 45;
 const LIVE_TIMEOUT_MS: Int = 3000;
-const LIVE_CLIENT_CAPS: Uint = 11510412;
 
 fn _opts() nothrow -> proto.WireConnectOptions {
-	return proto.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = LIVE_CHARSET, client_capabilities = LIVE_CLIENT_CAPS, connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
+	return proto.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = proto.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
 }
 
 fn _drain_expect_statement_end(statement: &mut proto.Statement, err_base: Int) nothrow -> Int {

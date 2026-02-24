@@ -37,7 +37,7 @@ fn _make_logger() nothrow -> log.Logger {
 
 fn _probe_wire_connect(logger: &log.Logger) nothrow -> Int {
 	val _ = logger.info("probe-wire-connect-start", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"});
-	val opts = wire.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = cast<Byte>(45), client_capabilities = cast<Uint>(11510412), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
+	val opts = wire.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = wire.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
 	match wire.connect(&opts) {
 		core.Result::Err(_) => { val _ = logger.error("probe-wire-connect-failed", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"}); return 1; },
 		core.Result::Ok(s) => {

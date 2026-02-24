@@ -1,15 +1,33 @@
 # Default recipe: run full suite from local/unit checks to live DB integration.
 test:
 	@just wire-check
+	@just wire-check-caps
 	@just rpc-check
 	@just wire-smoke
 	@just wire-live
 	@just wire-live-api
+	@just wire-live-state
 	@just wire-live-tx
 	@just wire-live-load
 	@just rpc-live-connect-state-stage
 	@just rpc-live-connect-state-regression
 	@just rpc-live
+
+# Experimental parallel-compile + serial-run suite (uses tools/drift_test_parallel_runner.sh).
+# Keeps existing default test flow untouched.
+test-par:
+	@just wire-check-par
+	@just wire-check-caps-par
+	@just rpc-check-par
+	@just wire-smoke-par
+	@just wire-live-par
+	@just wire-live-api-par
+	@just wire-live-state-par
+	@just wire-live-tx-par
+	@just wire-live-load-par
+	@just rpc-live-connect-state-stage-par
+	@just rpc-live-connect-state-regression-par
+	@just rpc-live-par
 
 # Local MariaDB dev instances (isolated under tmp_db_instances/<instance>/runtime and tmp_db_instances/<instance>/config).
 db-create INSTANCE HOST_PORT="" IMAGE="mariadb:11.4":
@@ -46,35 +64,77 @@ wire-compile-check-unit FILE:
 wire-check:
 	@tools/drift_test_runner.sh run-all --src-root packages/mariadb-wire-proto/src --test-root packages/mariadb-wire-proto/tests/unit --target-word-bits 64
 
+wire-check-par:
+	@tools/drift_test_parallel_runner.sh run-all --src-root packages/mariadb-wire-proto/src --test-root packages/mariadb-wire-proto/tests/unit --target-word-bits 64
+
 wire-check-unit FILE:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file "{{FILE}}" --target-word-bits 64
+
+wire-check-caps:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/unit/capability_normalization_test.drift --target-word-bits 64
+
+wire-check-caps-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/unit/capability_normalization_test.drift --target-word-bits 64
 
 wire-smoke:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift --target-word-bits 64
 
+wire-smoke-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift --target-word-bits 64
+
 wire-live:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift --target-word-bits 64
+
+wire-live-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift --target-word-bits 64
 
 wire-live-load:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift --target-word-bits 64
 
+wire-live-load-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift --target-word-bits 64
+
 wire-live-tx:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift --target-word-bits 64
+
+wire-live-tx-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift --target-word-bits 64
 
 wire-live-api:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift --target-word-bits 64
 
+wire-live-api-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift --target-word-bits 64
+
+wire-live-state:
+	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift --target-word-bits 64
+
+wire-live-state-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift --target-word-bits 64
+
 rpc-live:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift --target-word-bits 64
+
+rpc-live-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift --target-word-bits 64
 
 rpc-check:
 	@tools/drift_test_runner.sh run-all --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-root packages/mariadb-rpc/tests/unit --target-word-bits 64
 
+rpc-check-par:
+	@tools/drift_test_parallel_runner.sh run-all --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-root packages/mariadb-rpc/tests/unit --target-word-bits 64
+
 rpc-live-connect-state-regression:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift --target-word-bits 64
 
+rpc-live-connect-state-regression-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift --target-word-bits 64
+
 rpc-live-connect-state-stage:
 	@tools/drift_test_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift --target-word-bits 64
+
+rpc-live-connect-state-stage-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift --target-word-bits 64
 
 # Capture raw wire bytes through a local TCP MITM proxy.
 # Example:

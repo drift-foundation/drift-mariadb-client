@@ -1,0 +1,142 @@
+module mariadb.wire.proto.transport
+
+import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import mariadb.wire.proto.types as types;
+import mariadb.wire.proto.errors as errors;
+import mariadb.wire.proto.packet.header as packet_header;
+
+export {
+	read_packet_payload,
+	session_read_packet,
+	session_write_packet,
+	session_reset_seq,
+	write_packet
+};
+
+pub type PacketDecodeError = errors.PacketDecodeError;
+pub type WireSession = types.WireSession;
+
+fn _error(tag: String, offset: Int) nothrow -> PacketDecodeError {
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
+}
+
+fn _duration_ms(ms: Int) nothrow -> conc.Duration {
+	if ms <= 0 {
+		return conc.Duration(millis = 1);
+	}
+	return conc.Duration(millis = ms);
+}
+
+fn _append_bytes(dst: &mut Array<Byte>, src: &Array<Byte>) nothrow -> Void {
+	var i = 0;
+	while i < src.len {
+		dst.push(src[i]);
+		i = i + 1;
+	}
+}
+
+fn _read_exact(stream: &net.TcpStream, n: Int, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	var out: Array<Byte> = [];
+	while out.len < n {
+		val rem = n - out.len;
+			var buf = io.buffer(rem);
+			match stream.read(&mut buf, _duration_ms(timeout_ms)) {
+				core.Result::Ok(nread) => {
+					val got = nread;
+					if got <= 0 { return core.Result::Err(_error("wire-read-eof", out.len)); }
+					var i = 0;
+					while i < got {
+						val b: Byte = io.buffer_read(&mut buf, i);
+						out.push(b);
+						i = i + 1;
+				}
+			},
+			core.Result::Err(_) => { return core.Result::Err(_error("wire-read-failed", out.len)); }
+		}
+	}
+	return core.Result::Ok(move out);
+}
+
+fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>, timeout_ms: Int) nothrow -> core.Result<Void, PacketDecodeError> {
+	var off = 0;
+	while off < bytes.len {
+		val rem = bytes.len - off;
+		var chunk = io.buffer(rem);
+		var i = 0;
+		while i < rem {
+			io.buffer_write(&mut chunk, i, bytes[off + i]);
+			i = i + 1;
+		}
+		match stream.write(&chunk, _duration_ms(timeout_ms)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return core.Result::Err(_error("wire-write-failed", off)); }
+				off = off + w;
+			},
+			core.Result::Err(_) => { return core.Result::Err(_error("wire-write-failed", off)); }
+		}
+	}
+	return core.Result::Ok(core.void_value());
+}
+
+fn _read_packet_raw(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Result<types.PacketHeader, PacketDecodeError> {
+	var hdr_bytes: Array<Byte> = [];
+	match _read_exact(stream, 4, timeout_ms) {
+		core.Result::Ok(v) => { hdr_bytes = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	match packet_header.decode_packet_header(&hdr_bytes) {
+		core.Result::Ok(v) => { return core.Result::Ok(move v); },
+		core.Result::Err(_) => { return core.Result::Err(_error("wire-header-decode-failed", 0)); }
+	}
+}
+
+pub fn read_packet_payload(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
+	match _read_packet_raw(stream, timeout_ms) {
+		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	if hdr.payload_len < 0 { return core.Result::Err(_error("wire-header-negative-len", 0)); }
+	if hdr.payload_len > packet_header.MAX_PAYLOAD_LEN { return core.Result::Err(_error("wire-payload-too-large", hdr.payload_len)); }
+	return _read_exact(stream, hdr.payload_len, timeout_ms);
+}
+
+pub fn session_read_packet(session: &mut WireSession) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
+	match _read_packet_raw(&session.stream, session.io_timeout_ms) {
+		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	if hdr.payload_len < 0 { return core.Result::Err(_error("wire-header-negative-len", 0)); }
+	if hdr.payload_len > packet_header.MAX_PAYLOAD_LEN { return core.Result::Err(_error("wire-payload-too-large", hdr.payload_len)); }
+	if hdr.sequence_id != session.expected_seq_id {
+		return core.Result::Err(_error("wire-sequence-mismatch", cast<Int>(hdr.sequence_id)));
+	}
+	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
+	return _read_exact(&session.stream, hdr.payload_len, session.io_timeout_ms);
+}
+
+pub fn session_write_packet(session: &mut WireSession, payload: &Array<Byte>) nothrow -> core.Result<Void, PacketDecodeError> {
+	val seq = session.expected_seq_id;
+	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
+	return write_packet(&session.stream, payload, seq, session.io_timeout_ms);
+}
+
+pub fn session_reset_seq(session: &mut WireSession) nothrow -> Void {
+	session.expected_seq_id = cast<Byte>(0);
+}
+
+pub fn write_packet(stream: &net.TcpStream, payload: &Array<Byte>, seq: Byte, timeout_ms: Int) nothrow -> core.Result<Void, PacketDecodeError> {
+	var hdr: Array<Byte> = [];
+	match packet_header.encode_packet_header(payload.len, seq) {
+		core.Result::Ok(v) => { hdr = move v; },
+		core.Result::Err(e) => { return core.Result::Err(e); }
+	}
+	var packet: Array<Byte> = [];
+	_append_bytes(&mut packet, &hdr);
+	_append_bytes(&mut packet, payload);
+	return _write_all(stream, &packet, timeout_ms);
+}

@@ -1,0 +1,282 @@
+module mariadb.wire.proto.tests.e2e.live_session_state_test
+
+import std.core as core;
+import mariadb.wire.proto as proto;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 3000;
+
+fn _opts() nothrow -> proto.WireConnectOptions {
+	return proto.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = proto.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
+}
+
+// Guard: session-closed.
+// After close(), query() must return "session-closed".
+fn scenario_guard_session_closed() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1000; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			match proto.close(&mut conn) {
+				core.Result::Err(_) => { return 1001; },
+				core.Result::Ok(_) => {}
+			}
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Ok(_) => { return 1002; },
+				core.Result::Err(e) => {
+					if e.tag != "session-closed" { return 1003; }
+				}
+			}
+			// Also verify ping rejects on closed session.
+			match proto.ping(&mut conn) {
+				core.Result::Ok(_) => { return 1004; },
+				core.Result::Err(e) => {
+					if e.tag != "session-closed" { return 1005; }
+				}
+			}
+			return 0;
+		}
+	}
+}
+
+// Guard: active-statement-present.
+// While a statement is active, ping() must return "active-statement-present".
+fn scenario_guard_active_statement() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1100; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1101; },
+				core.Result::Ok(stmt) => {
+					var statement = move stmt;
+					// Session is now Busy — ping should be rejected.
+					match proto.ping(&mut conn) {
+						core.Result::Ok(_) => { val _ = proto.close(&mut conn); return 1102; },
+						core.Result::Err(e) => {
+							if e.tag != "active-statement-present" { val _ = proto.close(&mut conn); return 1103; }
+						}
+					}
+					// Also verify commit rejects.
+					match proto.commit(&mut conn) {
+						core.Result::Ok(_) => { val _ = proto.close(&mut conn); return 1104; },
+						core.Result::Err(e) => {
+							if e.tag != "active-statement-present" { val _ = proto.close(&mut conn); return 1105; }
+						}
+					}
+					// query() now uses normalized "active-statement-present" (same as other guarded functions).
+					match proto.query(&mut conn, &"SELECT 2") {
+						core.Result::Ok(_) => { val _ = proto.close(&mut conn); return 1106; },
+						core.Result::Err(e) => {
+							if e.tag != "active-statement-present" { val _ = proto.close(&mut conn); return 1107; }
+						}
+					}
+					// Consume the statement to release Busy state.
+					while true {
+						match proto.next_event(&mut statement) {
+							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1108; },
+							core.Result::Ok(ev) => {
+								match ev {
+									proto.StatementEvent::Row(_) => {},
+									proto.StatementEvent::ResultSetEnd => {},
+									proto.StatementEvent::StatementEnd(_) => { break; },
+									proto.StatementEvent::StatementErr(_) => { val _ = proto.close(&mut conn); return 1109; }
+								}
+							}
+						}
+					}
+				}
+			}
+			val _ = proto.close(&mut conn);
+			return 0;
+		}
+	}
+}
+
+// Guard: session-not-reusable.
+// Setting reusable=false directly, then query() must return "session-not-reusable".
+fn scenario_guard_not_reusable() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1200; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			// Deterministic: directly set reusable=false (field is pub).
+			conn.state.reusable = false;
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Ok(_) => { val _ = proto.close(&mut conn); return 1201; },
+				core.Result::Err(e) => {
+					if e.tag != "session-not-reusable" { val _ = proto.close(&mut conn); return 1202; }
+				}
+			}
+			match proto.ping(&mut conn) {
+				core.Result::Ok(_) => { val _ = proto.close(&mut conn); return 1203; },
+				core.Result::Err(e) => {
+					if e.tag != "session-not-reusable" { val _ = proto.close(&mut conn); return 1204; }
+				}
+			}
+			// close() should still succeed (it only checks is_closed, not reusable).
+			match proto.close(&mut conn) {
+				core.Result::Err(_) => { return 1205; },
+				core.Result::Ok(_) => {}
+			}
+			return 0;
+		}
+	}
+}
+
+// Busy → Ready transition.
+// After consuming a statement to StatementEnd, ping() should succeed.
+fn scenario_busy_to_ready() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1300; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			// Verify Ready before query.
+			if not proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1301; }
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1302; },
+				core.Result::Ok(stmt) => {
+					var statement = move stmt;
+					// Verify Busy: session_is_reusable should be false while statement active.
+					if proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1303; }
+					// Consume to completion.
+					while true {
+						match proto.next_event(&mut statement) {
+							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1304; },
+							core.Result::Ok(ev) => {
+								match ev {
+									proto.StatementEvent::Row(_) => {},
+									proto.StatementEvent::ResultSetEnd => {},
+									proto.StatementEvent::StatementEnd(_) => { break; },
+									proto.StatementEvent::StatementErr(_) => { val _ = proto.close(&mut conn); return 1305; }
+								}
+							}
+						}
+					}
+				}
+			}
+			// Verify Ready again.
+			if not proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1306; }
+			// ping() should succeed now.
+			match proto.ping(&mut conn) {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1307; },
+				core.Result::Ok(_) => {}
+			}
+			val _ = proto.close(&mut conn);
+			return 0;
+		}
+	}
+}
+
+// Drop auto-drain → Ready.
+// Dropping a statement without consuming should auto-drain via Destructible,
+// then ping() should succeed.
+fn scenario_drop_autodrain_to_ready() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1400; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1401; },
+				core.Result::Ok(stmt) => {
+					var statement = move stmt;
+					// Read one event to confirm statement is live, then let it drop.
+					match proto.next_event(&mut statement) {
+						core.Result::Ok(ev) => {
+							match ev {
+								proto.StatementEvent::Row(_) => {},
+								default => { val _ = proto.close(&mut conn); return 1402; }
+							}
+						},
+						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1403; }
+					}
+					// statement drops here (Destructible auto-drains).
+				}
+			}
+			// Session should be Ready after auto-drain.
+			if not proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1404; }
+			match proto.ping(&mut conn) {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1405; },
+				core.Result::Ok(_) => {}
+			}
+			val _ = proto.close(&mut conn);
+			return 0;
+		}
+	}
+}
+
+// reset_for_pool_reuse restores reusability.
+// Explicit session_is_reusable() assertions before and after.
+fn scenario_reset_reusability() nothrow -> Int {
+	var s = _opts();
+	match proto.connect(&s) {
+		core.Result::Err(_) => { return 1500; },
+		core.Result::Ok(session) => {
+			var conn = move session;
+			// Enter a transaction to make session state non-default.
+			match proto.set_autocommit(&mut conn, false) {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1501; },
+				core.Result::Ok(_) => {}
+			}
+			match proto.query(&mut conn, &"SELECT 1") {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1502; },
+				core.Result::Ok(stmt) => {
+					var statement = move stmt;
+					while true {
+						match proto.next_event(&mut statement) {
+							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1503; },
+							core.Result::Ok(ev) => {
+								match ev {
+									proto.StatementEvent::Row(_) => {},
+									proto.StatementEvent::ResultSetEnd => {},
+									proto.StatementEvent::StatementEnd(_) => { break; },
+									proto.StatementEvent::StatementErr(_) => { val _ = proto.close(&mut conn); return 1504; }
+								}
+							}
+						}
+					}
+				}
+			}
+			// Session is reusable but in non-default state (autocommit off).
+			if not proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1505; }
+			// reset_for_pool_reuse should restore to clean state.
+			match proto.reset_for_pool_reuse(&mut conn) {
+				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1506; },
+				core.Result::Ok(_) => {}
+			}
+			// Verify reusable after reset.
+			if not proto.session_is_reusable(&conn) { val _ = proto.close(&mut conn); return 1507; }
+			// Verify session state is normalized.
+			val st = proto.session_state(&conn);
+			if not st.autocommit_enabled { val _ = proto.close(&mut conn); return 1508; }
+			if st.in_transaction { val _ = proto.close(&mut conn); return 1509; }
+			val _ = proto.close(&mut conn);
+			return 0;
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_guard_session_closed();
+	if a != 0 { return a; }
+	val b = scenario_guard_active_statement();
+	if b != 0 { return b; }
+	val c = scenario_guard_not_reusable();
+	if c != 0 { return c; }
+	val d = scenario_busy_to_ready();
+	if d != 0 { return d; }
+	val e = scenario_drop_autodrain_to_ready();
+	if e != 0 { return e; }
+	val f = scenario_reset_reusability();
+	if f != 0 { return f; }
+	return 0;
+}
