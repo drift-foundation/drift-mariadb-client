@@ -10,30 +10,209 @@ Status: living guide. Update as API stabilizes.
 - Streaming statement/result consumption.
 - Pool-safe drain/reset semantics.
 
+## Architecture overview
+
+### Package structure
+
+```
+mariadb-wire-proto/src/
+  lib.drift              — Package facade. Session/statement lifecycle, pool reuse, auth.
+  types.drift            — All wire-level type definitions.
+  errors.drift           — PacketDecodeError + error tag constants.
+  transport.drift        — Packet-level I/O (read/write with framing and sequence tracking).
+  capabilities.drift     — Client capability flag negotiation.
+  protocol/
+    constants.drift      — Handshake field sizes, charset ID, CLIENT_* flag values.
+  packet/
+    header.drift         — 4-byte packet header encode/decode.
+    lenenc.drift         — Length-encoded integer/string/bytes codec.
+  handshake/
+    hello.drift          — Initial Handshake Packet decoder (protocol v10).
+    auth.drift           — HandshakeResponse41 encoder.
+  command/
+    com_query.drift      — COM_QUERY payload encoder.
+    com_ping.drift       — COM_PING payload encoder.
+    com_quit.drift       — COM_QUIT payload encoder.
+    com_reset_connection.drift — COM_RESET_CONNECTION payload encoder.
+  decode/
+    ok_packet.drift      — OK packet decoder (0x00 header).
+    err_packet.drift     — ERR packet decoder (0xFF header).
+    resultset.drift      — First-response routing + text-row decoder.
+```
+
+### Connection flow
+
+```
+Client                          Server
+  |--- TCP connect -------------->|
+  |<-- Initial Handshake Packet --|  (server version, capabilities, scramble)
+  |--- HandshakeResponse41 ------>|  (capabilities, auth token, database)
+  |<-- OK / ERR / AuthSwitch ----|  (auth result)
+  |                               |
+  |--- COM_QUERY (SQL) ---------->|  (query/call/set/commit)
+  |<-- OK / ERR / ResultSet ------|  (response stream)
+  |                               |
+  |--- COM_QUIT ----------------->|  (graceful close)
+```
+
 ## Core mental model
 
 - One TCP stream carries sequential packets for all statements on a session.
 - You cannot safely issue/interpret next command responses until current statement is fully drained.
 - Streaming is the default; no eager full-result aggregation in core API.
 
-## API design intent (pinned)
+## Session state machine
 
-- Session-level operations:
-  - `connect`, `close`
-  - `query`
-  - `set_autocommit`, `commit`, `rollback`
-  - `reset_for_pool_reuse`
-- Statement-level operations (planned):
-  - `next_event` (row/resultset boundary/statement terminal events)
-  - `skip_result`
-  - `skip_remaining`
+```
+                ┌──────────────────────────┐
+                │         Ready            │
+                │  (not closed, reusable,  │
+                │   no active statement)   │
+                └──────┬───────────────────┘
+                       │ query() / ping() / commit() / etc.
+                       ▼
+                ┌──────────────────────────┐
+                │          Busy            │
+                │  (active_statement=true)  │
+                │  Must drain before next  │
+                └──────┬───────────────────┘
+                       │ statement completes / skip_remaining
+                       ▼
+                ┌──────────────────────────┐
+                │         Ready            │
+                └──────────────────────────┘
 
-## Safe-default behavior (pinned)
+  On transport error at any point:
+                       │ _mark_dead()
+                       ▼
+                ┌──────────────────────────┐
+                │          Dead            │
+                │  (is_closed=true,        │
+                │   reusable=false)        │
+                │  All operations error.   │
+                └──────────────────────────┘
+```
 
-- `commit`/`rollback` auto-drain pending statement responses before issuing tx command.
-- If drain fails or times out:
-  - mark session non-reusable
-  - return deterministic error
+Guards: `_require_ready()` enforces the Ready state before any command. `_begin_command()` combines the ready check with sequence ID reset.
+
+## Statement event model
+
+Events from `next_event()` in order within one resultset:
+
+1. **`Row(cells)`** — one row of data. Repeat for all rows.
+2. **`ResultSetEnd`** — current resultset exhausted. If the server's `MORE_RESULTS_EXISTS` flag is set, another resultset follows (back to step 1). Otherwise, a terminal event follows.
+3. **`StatementEnd(ok)`** — terminal. Statement complete, session released.
+4. **`StatementErr(err)`** — terminal. Server SQL error, session released.
+
+Statement modes (internal):
+
+| Mode | Meaning |
+|---|---|
+| `MODE_RESULTSET (3)` | Reading column defs or data rows |
+| `MODE_NEED_NEXT_FIRST (4)` | Multi-result: waiting for next result's first packet |
+| `MODE_PENDING_OK (1)` | Next `next_event()` yields `StatementEnd` |
+| `MODE_PENDING_ERR (2)` | Next `next_event()` yields `StatementErr` |
+| `MODE_DONE (5)` | Terminal — no more events |
+
+### RAII drain
+
+When a `Statement` goes out of scope before reaching a terminal event, the `Destructible` impl calls `skip_remaining()` to drain all pending packets. If drain fails, the session is marked dead. This prevents protocol desync from leaked statements.
+
+## API surface
+
+### Session lifecycle
+
+| Function | Precondition | Effect |
+|---|---|---|
+| `connect(opts)` | — | TCP connect, handshake, auth. Returns `WireSession`. |
+| `close(session)` | Any state | Sends COM_QUIT, closes stream. Idempotent on closed sessions. |
+| `session_state(session)` | Any | Returns `WireSessionState` snapshot. |
+| `session_is_reusable(session)` | Any | `reusable && !closed && !active_statement`. |
+
+### Statement operations
+
+| Function | Precondition | Effect |
+|---|---|---|
+| `query(session, sql)` | Ready | Sends COM_QUERY, returns `Statement`. Sets `active_statement=true`. |
+| `next_event(stmt)` | Active | Returns next `StatementEvent`. On terminal, releases session. |
+| `skip_result(stmt)` | Active | Drains rows until `ResultSetEnd` or terminal. |
+| `skip_remaining(stmt)` | Active | Drains everything until terminal event. |
+
+### Transaction control
+
+| Function | Precondition | Effect |
+|---|---|---|
+| `set_autocommit(session, enabled)` | Ready | Executes `SET autocommit=0/1`. |
+| `commit(session)` | Ready | Executes `COMMIT`. |
+| `rollback(session)` | Ready | Executes `ROLLBACK`. |
+
+### Server management
+
+| Function | Precondition | Effect |
+|---|---|---|
+| `ping(session)` | Ready | Sends COM_PING, expects OK. |
+| `reset_connection(session)` | Ready | Sends COM_RESET_CONNECTION. |
+| `reset_for_pool_reuse(session)` | Not closed, no active stmt | Two-tier reset (see below). |
+
+## Capability negotiation
+
+`normalize_capabilities()` computes the effective capability bitmask:
+
+1. Force required flags: `PROTOCOL_41 | TRANSACTIONS | SECURE_CONNECTION | PLUGIN_AUTH | PLUGIN_AUTH_LENENC`.
+2. Enable `MULTI_RESULTS` (needed for stored procedure multi-resultsets).
+3. Strip unsupported: `LOCAL_FILES`, `PS_MULTI_RESULTS`, `SESSION_TRACK`.
+4. Set `CONNECT_WITH_DB` if a database is specified.
+5. Intersect with server capabilities.
+6. Verify all required flags survived intersection.
+
+## Authentication
+
+Only `mysql_native_password` is supported. Auth flow:
+
+1. Compute SHA1 token: `SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))`.
+2. Send in `HandshakeResponse41`.
+3. If server responds with auth switch request (0xFE), re-compute token with new scramble and re-send.
+
+## Pool reuse strategy
+
+`reset_for_pool_reuse()` uses a two-tier approach:
+
+1. **COM_RESET_CONNECTION** (preferred): single round-trip, server resets all session state. If server responds with error 1047 (unsupported), records this and falls through.
+2. **Manual fallback**: `ROLLBACK` (if in transaction) → `SET autocommit=1` (if off) → `PING` (liveness check). Any failure marks session dead.
+
+## Sequence ID tracking
+
+Every MariaDB packet carries a 1-byte sequence ID. Within a command exchange:
+- Client sends command packet with `seq=0`.
+- Server responds with `seq=1`, `seq=2`, etc.
+- `session_reset_seq()` resets to 0 at each new command boundary.
+- `session_read_packet()` validates expected sequence; mismatch is fatal (protocol desync).
+
+## Error tags
+
+All errors are `PacketDecodeError` with a string `tag` for programmatic matching:
+
+**Transport errors:**
+- `wire-read-eof`, `wire-read-failed` — TCP read failure
+- `wire-write-failed` — TCP write failure
+- `wire-header-decode-failed`, `wire-header-negative-len`, `wire-payload-too-large` — Framing errors
+- `wire-sequence-mismatch` — Sequence ID validation failure
+
+**Handshake errors:**
+- `handshake-truncated`, `handshake-invalid-protocol-version`, `handshake-missing-server-version-nul`
+- `auth-rejected`, `auth-switch-unsupported-plugin`, `auth-invalid-response`
+- `server-missing-required-capability`, `server-missing-connect-with-db`
+
+**Command errors:**
+- `session-closed`, `session-not-reusable`, `active-statement-present` — Guard failures
+- `connect-failed`, `close-failed`, `ping-unexpected-response`
+- `reset-connection-unsupported`, `reset-connection-server-err`
+- `statement-consumed`, `statement-invalid-mode`
+
+**Decode errors:**
+- `short-ok-packet`, `invalid-ok-header`, `short-err-packet`, `invalid-err-header`
+- `resultset-row-truncated`, `resultset-row-trailing-bytes`, `resultset-missing-terminator`
+- `lenenc-out-of-bounds`, `lenenc-truncated`, `lenenc-null`
 
 ## Performance and memory guidance
 
@@ -46,17 +225,3 @@ Status: living guide. Update as API stabilizes.
 - Large in-transaction resultsets can delay commit/rollback due to required drain.
 - This can extend lock/resource hold duration on server side.
 - Prefer small tx result payloads or explicit skip paths when possible.
-
-## Pooling guidance
-
-- Before returning a session to pool:
-  - ensure active statement is fully drained (or explicitly skipped)
-  - ensure transaction/autocommit state is normalized
-- On any drain/reset failure, discard session from pool.
-
-## TODO: examples to add
-
-- Statement event loop example.
-- Skip-unneeded-resultset example.
-- Commit after partially consumed statement (safe auto-drain).
-- Pool reset sequence example.

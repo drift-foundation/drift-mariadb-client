@@ -1,3 +1,13 @@
+// COM_RESET_CONNECTION command encoder.
+//
+// Builds a single-byte payload (0x1F) that resets the session state
+// on the server: rolls back transactions, resets autocommit, clears
+// prepared statements, etc. Preferred path for pool-reuse when the
+// server supports it (MariaDB 10.2+, MySQL 5.7+).
+//
+// Older servers respond with ERR code 1047 (unknown command), which
+// the caller handles by falling back to manual reset (ROLLBACK +
+// SET autocommit + PING).
 module mariadb.wire.proto.command.com_reset_connection
 
 import std.core as core;

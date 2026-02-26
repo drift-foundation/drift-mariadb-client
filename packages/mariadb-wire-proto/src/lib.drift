@@ -1,3 +1,38 @@
+// MariaDB wire protocol — package facade.
+//
+// This is the public entry point for the wire protocol layer. It re-exports
+// all public types and provides the complete session/statement API.
+//
+// Architecture overview:
+//
+//   WireSession — owns a TCP stream and tracks connection state (is_closed,
+//   active_statement, reusable, autocommit, in_transaction). All operations
+//   go through the session and enforce a state machine:
+//
+//     Ready (not closed, reusable, no active statement)
+//       → can issue commands (query, ping, commit, rollback, etc.)
+//     Busy (active_statement = true)
+//       → must drain/skip statement before next command
+//     Not-reusable (reusable = false)
+//       → can only be closed; not safe for pool return
+//     Dead (is_closed = true)
+//       → terminal; all operations return error
+//
+//   Statement — borrows &mut WireSession, walks a state machine to stream
+//   server response packets. Statement modes:
+//     MODE_PENDING_OK (1)  — next event will yield StatementEnd
+//     MODE_PENDING_ERR (2) — next event will yield StatementErr
+//     MODE_RESULTSET (3)   — reading column defs or data rows
+//     MODE_NEED_NEXT_FIRST (4) — multi-result: need next result's first packet
+//     MODE_DONE (5)        — terminal, no more events
+//
+//   On any transport error during statement processing, the session is
+//   marked dead (_mark_dead) to prevent use of a potentially desync'd
+//   connection.
+//
+//   Pool reuse: reset_for_pool_reuse() tries COM_RESET_CONNECTION first,
+//   then falls back to ROLLBACK + SET autocommit=1 + PING if the server
+//   doesn't support it.
 module mariadb.wire.proto
 
 import std.core as core;
@@ -68,14 +103,17 @@ pub type PacketDecodeError = errors.PacketDecodeError;
 // utf8mb4 general ci charset ID (mirrors protocol.constants.UTF8MB4_CHARSET_ID).
 pub const DEFAULT_CHARSET_ID: Byte = 45;
 
+// Statement mode constants — see module-level doc for state machine.
 const MODE_PENDING_OK: Int = 1;
 const MODE_PENDING_ERR: Int = 2;
 const MODE_RESULTSET: Int = 3;
 const MODE_NEED_NEXT_FIRST: Int = 4;
 const MODE_DONE: Int = 5;
+// SERVER_STATUS_* bit positions from OK/EOF status_flags field.
 const SERVER_STATUS_IN_TRANS: Uint = 1;
 const SERVER_STATUS_AUTOCOMMIT: Uint = 2;
 const SERVER_STATUS_MORE_RESULTS_EXISTS: Uint = 8;
+// Auth switch response header (0xFE) — server requests plugin change.
 const AUTH_SWITCH_HEADER: Byte = 254;
 const AUTH_PLUGIN_MYSQL_NATIVE_PASSWORD: String = "mysql_native_password";
 
@@ -125,6 +163,8 @@ fn _string_bytes(s: &String) nothrow -> Array<Byte> {
 	return move out;
 }
 
+// mysql_native_password auth: token = SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
+// The scramble is the server-provided auth_plugin_data (first 20 bytes).
 fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothrow -> Array<Byte> {
 	val pw = _string_bytes(password);
 	val stage1 = crypto.sha1(&pw);
@@ -158,6 +198,10 @@ fn _find_nul(input: &Array<Byte>, start: Int) nothrow -> Int {
 	return -1;
 }
 
+// Handles auth plugin switch request (0xFE header). The server may request
+// a different auth plugin than the one we proposed. We extract the plugin
+// name and new scramble, re-compute the token, and send it on seq=3.
+// Only mysql_native_password is supported; other plugins are rejected.
 fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: &String, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
 	if payload.len < 2 {
 		return core.Result::Err(_error("auth-switch-truncated", 0));
@@ -222,6 +266,8 @@ fn _status_has_more_results(status: Uint) nothrow -> Bool {
 	return (status & SERVER_STATUS_MORE_RESULTS_EXISTS) != cast<Uint>(0);
 }
 
+// Update session state from OK/EOF status_flags. Called after every
+// OK packet and EOF terminator to keep autocommit/in_transaction in sync.
 fn _apply_status(session: &mut WireSession, status: Uint, warnings: Uint) nothrow -> Void {
 	session.state.last_status_flags = status;
 	session.state.last_warnings = warnings;
@@ -229,12 +275,18 @@ fn _apply_status(session: &mut WireSession, status: Uint, warnings: Uint) nothro
 	session.state.in_transaction = (status & SERVER_STATUS_IN_TRANS) != cast<Uint>(0);
 }
 
+// Mark session as permanently unusable. Called on any transport error
+// during command/statement processing to prevent use of a desync'd
+// connection. Closes the TCP stream immediately.
 fn _mark_dead(session: &mut WireSession) nothrow -> Void {
 	session.state.reusable = false;
 	session.is_closed = true;
 	val _ = session.stream.close(transport.duration_ms(session.io_timeout_ms));
 }
 
+// Guard: ensures session is in Ready state before issuing a new command.
+// Rejects closed sessions, non-reusable sessions, and sessions with an
+// active statement (which must be drained first).
 fn _require_ready(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));
@@ -248,6 +300,8 @@ fn _require_ready(session: &mut WireSession) nothrow -> core.Result<Void, Packet
 	return core.Result::Ok(core.void_value());
 }
 
+// Prepare session for a new command: check Ready state and reset
+// sequence ID to 0 (each command starts a new sequence).
 fn _begin_command(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
 	match _require_ready(session) {
 		core.Result::Ok(_) => {},
@@ -257,6 +311,8 @@ fn _begin_command(session: &mut WireSession) nothrow -> core.Result<Void, Packet
 	return core.Result::Ok(core.void_value());
 }
 
+// Send a command packet and read one response packet. Marks session
+// dead on any transport failure. Used by simple commands (ping, reset).
 fn _command_send_recv(session: &mut WireSession, payload: &Array<Byte>) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
 	match transport.session_write_packet(session, payload) {
 		core.Result::Ok(_) => {},
@@ -346,6 +402,10 @@ fn _set_statement_terminal(statement: &mut Statement) nothrow -> Void {
 	statement.session.active_statement = false;
 }
 
+// Route the first response packet of a query/result to the correct
+// statement mode: OK → PENDING_OK, ERR → PENDING_ERR, otherwise
+// treat as resultset column-count and enter MODE_RESULTSET.
+// Also called in MODE_NEED_NEXT_FIRST for multi-result sequences.
 fn _init_statement_from_first(statement: &mut Statement, first: &Array<Byte>) nothrow -> core.Result<Void, PacketDecodeError> {
 	match decode_resultset.discriminate_first_response(first) {
 		core.Result::Ok(route) => {
@@ -390,6 +450,9 @@ fn _init_statement_from_first(statement: &mut Statement, first: &Array<Byte>) no
 	}
 }
 
+// Execute a SQL statement that must produce only a StatementEnd (OK).
+// Any Row, ResultSetEnd, or ServerErr is treated as an error.
+// Used for transaction commands (SET autocommit, COMMIT, ROLLBACK).
 fn _query_expect_ok(session: &mut WireSession, sql: String, offset_base: Int) nothrow -> core.Result<OkPacket, PacketDecodeError> {
 	match query(session, &sql) {
 		core.Result::Ok(stmt) => {
@@ -412,6 +475,9 @@ fn _query_expect_ok(session: &mut WireSession, sql: String, offset_base: Int) no
 	}
 }
 
+// RAII: when a Statement goes out of scope without being fully consumed,
+// auto-drain remaining packets via skip_remaining. If drain fails, mark
+// session dead to prevent desync'd reuse.
 implement core.Destructible for Statement {
 	pub fn destroy(var self: Statement) nothrow -> Void {
 		if self.consumed_terminal {
@@ -648,6 +714,10 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			core.Result::Ok(v) => { payload = move v; },
 			core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 		}
+		// EOF terminator marks end of one resultset's rows.
+		// Check MORE_RESULTS_EXISTS in status_flags to determine if
+		// another resultset follows (stored proc multi-result) or if
+		// this is the final resultset (emit synthetic OK via PENDING_OK).
 		if _is_eof_terminator(&payload) {
 			var warnings = cast<Uint>(0);
 			var status = cast<Uint>(0);
@@ -786,6 +856,8 @@ pub fn reset_connection(session: &mut WireSession) nothrow -> core.Result<Void, 
 	if resp[0] == cast<Byte>(255) {
 		match err_packet_decode.decode_err_packet(&resp) {
 			core.Result::Ok(err_pkt) => {
+				// Error 1047 = ER_UNKNOWN_COM_ERROR — server doesn't support
+				// COM_RESET_CONNECTION. Caller should fall back to manual reset.
 				if err_pkt.error_code == cast<Uint>(1047) {
 					return core.Result::Err(_error("reset-connection-unsupported", 0));
 				}
@@ -800,6 +872,11 @@ pub fn reset_connection(session: &mut WireSession) nothrow -> core.Result<Void, 
 	return core.Result::Err(_error("reset-connection-unexpected-response", 0));
 }
 
+// Reset session state for pool return. Two-tier strategy:
+//   1. Try COM_RESET_CONNECTION (single round-trip, resets server state).
+//   2. If unsupported (error 1047), fall back to manual reset:
+//      ROLLBACK (if in transaction) → SET autocommit=1 → PING.
+// On any failure during manual fallback, session is marked dead.
 pub fn reset_for_pool_reuse(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecodeError> {
 	if session.is_closed {
 		return core.Result::Err(_error("session-closed", 0));

@@ -1,3 +1,18 @@
+// Packet-level I/O transport for the MariaDB wire protocol.
+//
+// Provides low-level read/write primitives that frame MariaDB packets:
+// 4-byte header (3 bytes payload length LE + 1 byte sequence ID) followed
+// by the payload body.
+//
+// Two read/write modes:
+//   - Stateless (read_packet_payload, write_packet): used during pre-auth
+//     handshake when no session exists yet. No sequence ID validation.
+//   - Session-aware (session_read_packet, session_write_packet): validates
+//     and advances expected_seq_id on each packet. Sequence violations
+//     indicate desync and are fatal.
+//
+// session_reset_seq() resets the sequence counter to 0. Must be called
+// at each command boundary (before sending a new COM_* packet).
 module mariadb.wire.proto.transport
 
 import std.core as core;

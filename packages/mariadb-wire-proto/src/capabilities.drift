@@ -1,3 +1,14 @@
+// Client capability flag negotiation.
+//
+// normalize_capabilities() computes the effective capability bitmask for
+// a connection by:
+//   1. Forcing required flags (PROTOCOL_41, TRANSACTIONS, SECURE_CONNECTION,
+//      PLUGIN_AUTH, PLUGIN_AUTH_LENENC) that all decode/encode paths assume.
+//   2. Enabling CLIENT_MULTI_RESULTS by default (needed for stored procs).
+//   3. Stripping unsupported flags (LOCAL_FILES, PS_MULTI_RESULTS,
+//      SESSION_TRACK) to avoid features we don't implement.
+//   4. Intersecting with server-advertised capabilities.
+//   5. Verifying all required flags survived intersection.
 module mariadb.wire.proto.capabilities
 
 import std.core as core;

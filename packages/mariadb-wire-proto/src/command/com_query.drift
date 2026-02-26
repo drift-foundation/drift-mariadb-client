@@ -1,3 +1,8 @@
+// COM_QUERY command encoder.
+//
+// Builds the payload for a text protocol query: command byte (0x03)
+// followed by the raw SQL string bytes. The server processes this as
+// a text query and returns OK, ERR, or a resultset stream.
 module mariadb.wire.proto.command.com_query
 
 import std.core as core;

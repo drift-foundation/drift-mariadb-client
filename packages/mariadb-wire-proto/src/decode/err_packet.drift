@@ -1,3 +1,12 @@
+// ERR packet decoder.
+//
+// An ERR packet (header byte 0xFF) is the server's error response.
+// Layout: header(0xFF) + 2 bytes error_code (LE) + optional SQLSTATE
+//         marker '#' + 5-byte SQLSTATE + human-readable message.
+//
+// The optional SQLSTATE is present when CLIENT_PROTOCOL_41 is active
+// (always true for this library). ERR_SQLSTATE_MARKER (35 = '#')
+// distinguishes packets with vs without SQLSTATE.
 module mariadb.wire.proto.decode.err_packet
 
 import std.core as core;

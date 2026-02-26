@@ -1,3 +1,13 @@
+// Wire protocol error types and tag constants.
+//
+// PacketDecodeError is the unified error type for all wire protocol
+// operations — packet framing, handshake, command send/receive, and
+// resultset decoding. It carries a tag string for programmatic matching,
+// a byte offset into the relevant payload, and optional server error
+// fields (error_code, message) for ERR packet passthrough.
+//
+// Error tag constants (TAG_*) are used by decode modules to produce
+// consistent, matchable error identifiers.
 module mariadb.wire.proto.errors
 
 import std.core as core;

@@ -1,3 +1,18 @@
+// HandshakeResponse41 encoder.
+//
+// Builds the client's authentication response packet sent during
+// connection setup. The packet layout (per CLIENT_PROTOCOL_41):
+//   - 4 bytes: client capability flags (LE)
+//   - 4 bytes: max packet size (LE)
+//   - 1 byte:  character set
+//   - 23 bytes: reserved (zero-filled)
+//   - NUL-terminated username
+//   - lenenc-prefixed auth response (scrambled password token)
+//   - NUL-terminated database (if CLIENT_CONNECT_WITH_DB)
+//   - NUL-terminated auth plugin name
+//
+// NUL bytes within string fields (username, database, plugin name)
+// are rejected as protocol violations.
 module mariadb.wire.proto.handshake.auth
 
 import std.core as core;

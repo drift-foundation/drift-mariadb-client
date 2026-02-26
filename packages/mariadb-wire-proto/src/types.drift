@@ -1,3 +1,14 @@
+// Wire protocol data types.
+//
+// Defines all struct and variant types used across the wire protocol layer:
+// packet framing (PacketHeader), handshake negotiation (HandshakeHello,
+// HandshakeResponse41), server response decoding (OkPacket, ErrPacket),
+// resultset streaming (ColumnDef, ResultSetCell, ResultSetDecoded),
+// connection configuration (WireConnectOptions), and session/statement
+// state tracking (WireSession, WireSessionState, Statement, StatementEvent).
+//
+// This module is the single source of truth for all wire-level type
+// definitions. Other modules in the package import from here.
 module mariadb.wire.proto.types
 
 import std.net as net;
@@ -99,6 +110,9 @@ pub struct WireConnectOptions {
 	pub io_timeout_ms: Int
 }
 
+// Derived session state, updated from OK/EOF status_flags after each
+// server response. reusable starts true and goes false permanently on
+// any protocol-level error (never transitions back to true).
 pub struct WireSessionState {
 	pub autocommit_enabled: Bool,
 	pub in_transaction: Bool,
@@ -107,6 +121,10 @@ pub struct WireSessionState {
 	pub last_warnings: Uint
 }
 
+// A live wire protocol connection. Owns the TCP stream and all session
+// state. active_statement is true while a Statement borrows this session.
+// expected_seq_id tracks packet sequencing (reset at each command boundary).
+// reset_connection_supported starts true; set to false on error 1047.
 pub struct WireSession {
 	pub stream: net.TcpStream,
 	pub io_timeout_ms: Int,
@@ -119,6 +137,11 @@ pub struct WireSession {
 	pub state: WireSessionState
 }
 
+// An active statement that streams server response packets. Borrows &mut
+// WireSession exclusively (single active statement rule). mode tracks
+// the current state machine position (see MODE_* in lib.drift).
+// consumed_terminal is true once StatementEnd or StatementErr has been
+// yielded — after this, the session is released for new commands.
 pub struct Statement {
 	pub session: &mut WireSession,
 	pub mode: Int,
@@ -131,6 +154,11 @@ pub struct Statement {
 	pub consumed_terminal: Bool
 }
 
+// Events yielded by next_event() in order:
+//   Row(cells)       — one row of data in the current resultset
+//   ResultSetEnd     — current resultset exhausted (more may follow)
+//   StatementEnd(ok) — terminal: statement complete, session released
+//   StatementErr(err)— terminal: server SQL error, session released
 pub variant StatementEvent {
 	Row(value: Array<ResultSetCell>),
 	ResultSetEnd,

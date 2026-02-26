@@ -1,3 +1,12 @@
+// MariaDB packet header encode/decode.
+//
+// Every MariaDB packet is framed with a 4-byte header:
+//   bytes 0-2: payload length as 3-byte little-endian integer
+//   byte 3:    sequence ID (wraps at 256, tracks packet ordering)
+//
+// MAX_PAYLOAD_LEN (16,777,215 = 2^24 - 1) is the protocol maximum for
+// a single packet payload. Larger data requires packet splitting (not
+// implemented here — this library targets normal query/result sizes).
 module mariadb.wire.proto.packet.header
 
 import std.core as core;

@@ -1,3 +1,33 @@
+// MariaDB RPC — stored procedure call layer.
+//
+// Provides a high-level, streaming-first API for calling stored procedures
+// over the wire protocol. Hides all wire-level packet mechanics from
+// application code.
+//
+// Key design decisions:
+//
+//   Streaming-first: results are consumed incrementally via next_event().
+//   No buffer-all/query-all API exists. This keeps memory usage bounded
+//   and supports arbitrarily large resultsets.
+//
+//   Dual error model:
+//     - RpcError (Result::Err) — transport/protocol failure. Connection
+//       may be dead; do not reuse without checking.
+//     - RpcEvent::ServerErr — server SQL error (e.g., missing procedure,
+//       constraint violation). Connection is alive, only the statement
+//       is terminal. Handle through the event stream, not Result::Err.
+//
+//   Config validation: build_connection_config() validates all fields
+//   up front, returning RpcConfigError with tag + field for programmatic
+//   matching. No partial configs reach connect().
+//
+//   Proc name validation: _is_valid_proc_name() rejects names with
+//   non-identifier characters as a defense against SQL injection.
+//   Arguments are encoded via _encode_arg() with proper quoting/escaping.
+//
+//   Pool reuse: reset_for_pool_reuse() delegates to wire layer to
+//   normalize session state. connect() runs SET NAMES and sets
+//   autocommit after wire handshake.
 module mariadb.rpc
 
 import std.core as core;
@@ -162,6 +192,9 @@ fn _dup_string(s: &String) nothrow -> String {
 	return core.string_from_utf8_bytes(io.buffer_ptr(&b), n);
 }
 
+// SQL identifier character check: [0-9A-Za-z_]. Used by _is_valid_proc_name
+// to reject proc names with injection-risk characters (semicolons, quotes,
+// spaces, etc.). Only ASCII identifier chars are allowed.
 fn _is_ident_char(b: Byte) nothrow -> Bool {
 	val u = cast<Int>(b);
 	if u >= 48 and u <= 57 { return true; }
@@ -192,6 +225,8 @@ fn _one_byte_string(b: Byte) nothrow -> String {
 	return core.string_from_utf8_bytes(io.buffer_ptr(&one), 1);
 }
 
+// SQL string literal quoting: wraps in single quotes and doubles any
+// embedded single-quote bytes (standard SQL escaping).
 fn _sql_quote_string(s: &String) nothrow -> String {
 	var out = "'";
 	var i = 0;
@@ -216,6 +251,8 @@ fn _hex_digit_upper(v: Int) nothrow -> Byte {
 	return cast<Byte>(65 + (v - 10));
 }
 
+// Encode raw bytes as a SQL hex literal (0xABCD...) for safe binary
+// argument passing. No quoting needed — hex literals are injection-safe.
 fn _sql_hex_literal(bytes: &Array<Byte>) nothrow -> String {
 	var out = "0x";
 	var i = 0;
@@ -241,6 +278,8 @@ fn _encode_arg(arg: &RpcArg) nothrow -> core.Result<String, RpcError> {
 	}
 }
 
+// Build "CALL proc_name(arg1, arg2, ...)" SQL string. Validates proc
+// name first, then encodes each argument with type-appropriate escaping.
 fn _build_call_sql(proc_name: &String, args: &Array<RpcArg>) nothrow -> core.Result<String, RpcError> {
 	if not _is_valid_proc_name(proc_name) {
 		return core.Result::Err(_rpc_error("rpc-invalid-proc-name", _dup_string(proc_name)));
@@ -310,6 +349,9 @@ pub fn arg_float(v: Float) nothrow -> RpcArg { return RpcArg::Float(v); }
 pub fn arg_string(v: String) nothrow -> RpcArg { return RpcArg::String(move v); }
 pub fn arg_bytes(v: Array<Byte>) nothrow -> RpcArg { return RpcArg::Bytes(move v); }
 
+// Execute a SQL statement via wire.query and drain to StatementEnd.
+// Any ServerErr is mapped to rpc-server-error. Used for internal
+// commands (SET NAMES) that must succeed cleanly.
 fn _exec_expect_ok(conn: &mut RpcConnection, sql: &String) nothrow -> core.Result<Void, RpcError> {
 	match wire.query(&mut conn.wire_session, sql) {
 		core.Result::Ok(v) => {
@@ -344,6 +386,8 @@ fn _row_parse_err(tag: String, idx: Int, offset: Int) nothrow -> RpcError {
 	return _rpc_error(tag, "index=" + format.format_int(idx) + ",offset=" + format.format_int(offset));
 }
 
+// Get a reference to a cell by index. Uses linear scan to locate the
+// element and return a borrow from within the match body.
 fn _row_cell_ref(row: &RpcRow, idx: Int) nothrow -> core.Result<&wire.ResultSetCell, RpcError> {
 	if idx < 0 or idx >= row.values.len {
 		return core.Result::Err(_row_oob(idx));
@@ -358,6 +402,13 @@ fn _row_cell_ref(row: &RpcRow, idx: Int) nothrow -> core.Result<&wire.ResultSetC
 	return core.Result::Err(_row_oob(idx));
 }
 
+// Connect to MariaDB and set up session. Three steps:
+//   1. Wire-level TCP connect + handshake (wire.connect)
+//   2. SET NAMES charset COLLATE collation (character encoding)
+//   3. SET autocommit per config
+// If any step fails, the connection is closed before returning error.
+// Note: read_timeout_ms maps to wire io_timeout_ms; write_timeout_ms
+// is validated but not consumed (see RpcConnectionConfig doc).
 pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection, RpcError> {
 	val host = _dup_string(&config.host);
 	val user = _dup_string(&config.user);

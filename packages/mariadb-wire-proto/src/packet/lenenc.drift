@@ -1,3 +1,17 @@
+// Length-encoded integer and string codec.
+//
+// MariaDB uses a variable-width encoding for integers and strings
+// throughout its protocol (column counts, string lengths, row data):
+//
+//   prefix byte < 251  → 1-byte integer (value = prefix)
+//   prefix = 251       → NULL marker (error in integer context)
+//   prefix = 252       → 2-byte LE integer follows
+//   prefix = 253       → 3-byte LE integer follows
+//   prefix = 254       → 8-byte LE integer follows
+//
+// Length-encoded strings are a lenenc integer (byte count) followed by
+// that many raw bytes, decoded as UTF-8. Length-encoded bytes are the
+// same but skip UTF-8 validation.
 module mariadb.wire.proto.packet.lenenc
 
 import std.core as core;

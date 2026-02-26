@@ -1,3 +1,13 @@
+// OK packet decoder.
+//
+// An OK packet (header byte 0x00) is the server's success response for
+// non-resultset operations (INSERT, UPDATE, SET, COM_PING, etc.).
+// Layout: header(0x00) + lenenc affected_rows + lenenc last_insert_id
+//         + 2 bytes status_flags (LE) + 2 bytes warnings (LE).
+//
+// The status_flags field drives session state tracking: autocommit,
+// in_transaction, and more_results_exist flags are extracted from it
+// by the session layer after each OK.
 module mariadb.wire.proto.decode.ok_packet
 
 import std.core as core;

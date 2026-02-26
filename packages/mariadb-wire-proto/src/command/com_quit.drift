@@ -1,3 +1,8 @@
+// COM_QUIT command encoder.
+//
+// Builds a single-byte payload (0x01) that tells the server to close
+// the connection. Sent during close() as a graceful shutdown signal.
+// The server does not send a response packet.
 module mariadb.wire.proto.command.com_quit
 
 import std.core as core;

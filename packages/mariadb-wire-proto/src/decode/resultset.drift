@@ -1,3 +1,19 @@
+// Resultset response routing and text-row decoding.
+//
+// discriminate_first_response() examines the first byte of a server
+// response to determine the packet type:
+//   0x00 → OK packet   |  0xFF → ERR packet
+//   0xFB → LOCAL INFILE (unsupported, returns error)
+//   anything else → resultset (column count follows)
+//
+// decode_text_row() parses a single row of the text resultset protocol:
+// each column is either NULL (0xFB marker) or a length-encoded UTF-8
+// string. Row must contain exactly column_count cells with no trailing
+// bytes.
+//
+// decode_text_resultset_packets() is a batch decoder for pre-collected
+// packet arrays, used by fixture-replay tests. Not used in streaming
+// production paths.
 module mariadb.wire.proto.decode.resultset
 
 import std.core as core;

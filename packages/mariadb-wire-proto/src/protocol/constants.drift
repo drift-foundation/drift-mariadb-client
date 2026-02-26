@@ -1,3 +1,12 @@
+// MariaDB/MySQL wire protocol numeric constants.
+//
+// Handshake structure field sizes (HANDSHAKE_*) define byte offsets and
+// lengths for parsing the Initial Handshake Packet (protocol version 10)
+// and building HandshakeResponse41.
+//
+// CLIENT_* constants are capability flag bit values (decimal). These
+// control which protocol features are negotiated during handshake.
+// Values match the MySQL/MariaDB C client definitions.
 module mariadb.wire.proto.protocol.constants
 
 export {
