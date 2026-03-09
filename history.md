@@ -447,3 +447,20 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
   - `WireConnectOptions` timeout fields must be `> 0`
   - values `<= 0` are clamped to `1ms` as defense-in-depth for direct wire-proto callers
   - RPC layer remains strict (`> 0` validation in config builder).
+
+## 2026-03-09
+
+### Deployed toolchain validation (`~/opt/drift/current`)
+
+- Revalidated the repo as an external package consumer against deployed Drift toolchain `0.27.17-dev` (ABI 4).
+- Confirmed the build uses the signed stdlib package from:
+  - `~/opt/drift/current/lib/stdlib/std.dmp`
+  - signature verified from `std.dmp.sig` against the deployed trust store
+- Confirmed runtime linking uses only deployed prebuilt archives from:
+  - `~/opt/drift/current/lib/runtime`
+- Confirmed deployed wrapper isolation:
+  - `PYTHONSAFEPATH=1`
+  - no references to local `~/src/drift-lang` in the build chain
+- Final result:
+  - full project test suite passes against the deployed toolchain
+  - package-consumer convergence is validated for this repo with no local toolchain fallback
