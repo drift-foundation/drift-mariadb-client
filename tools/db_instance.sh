@@ -14,6 +14,7 @@ usage() {
 	echo "  $0 logs <instance>"
 	echo "  $0 rm <instance>"
 	echo "  $0 sql <instance> <sql>"
+	echo "  $0 schema-load <instance> [sql_file]"
 	exit 1
 }
 
@@ -349,6 +350,28 @@ cmd_sql() {
 	docker exec -i "${instance_name}" mariadb -uroot "-p${root_password}" -e "${sql}"
 }
 
+cmd_schema_load() {
+	local instance="$1"
+	local sql_file="${2:-${ROOT_DIR}/tests/fixtures/appdb_schema.sql}"
+	require_instance "${instance}"
+	if [[ ! -f "${sql_file}" ]]; then
+		echo "error: missing sql file '${sql_file}'" >&2
+		exit 1
+	fi
+	local runtime_dir="${INSTANCE_ROOT}/${instance}/runtime"
+	local env_file="${runtime_dir}/run.env"
+	if [[ ! -f "${env_file}" ]]; then
+		echo "error: missing ${env_file}, run create first" >&2
+		exit 1
+	fi
+	local host_port root_password
+	host_port="$(read_env_key "${env_file}" "HOST_PORT")"
+	root_password="$(read_env_key "${env_file}" "ROOT_PASSWORD")"
+	validate_host_port "${host_port}"
+	mariadb -h 127.0.0.1 -P "${host_port}" -u root "-p${root_password}" < "${sql_file}"
+	echo "loaded schema into '${instance}' from ${sql_file}"
+}
+
 main() {
 	local action="${1:-}"
 	case "${action}" in
@@ -379,6 +402,10 @@ main() {
 		sql)
 			shift
 			cmd_sql "${1:-}" "${2:-}"
+			;;
+		schema-load)
+			shift
+			cmd_schema_load "${1:-}" "${2:-}"
 			;;
 		*)
 			usage

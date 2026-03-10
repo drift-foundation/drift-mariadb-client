@@ -39,6 +39,7 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `bash`
 - `just`
 - `docker` with Compose support (`docker compose` or `docker-compose`)
+- `mariadb` CLI client (used for schema loading, manual queries, and capture workflows)
 - `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/src/drift-lang/bin/driftc`)
 
 ### New machine check
@@ -49,6 +50,15 @@ Before bringing up a local MariaDB instance, verify both Docker and Compose are 
 - `docker compose version`
 
 If `docker` exists but `docker compose` does not, install the Compose plugin before running `just db-up ...`.
+
+Also verify your user can talk to the Docker daemon without `sudo`:
+
+- `docker ps`
+
+If Docker is installed but you get a permission error for `/var/run/docker.sock`, add your user to the `docker` group and start a new shell session:
+
+- `sudo usermod -aG docker "$USER"`
+- `newgrp docker`
 
 ### Compiler env
 
@@ -96,7 +106,7 @@ If `docker` exists but `docker compose` does not, install the Compose plugin bef
 Preconditions for `just test`:
 - `DRIFTC` is set.
 - Local MariaDB instance is running (default expected target is `mdb114-a` on `127.0.0.1:34114`).
-- Fixture schema/procedures are loaded (`tests/fixtures/appdb_schema.sql`).
+- Fixture schema/procedures are loaded (`just db-load-schema mdb114-a`).
 
 ### Wire Capture Proxy (Fixture Generation)
 
@@ -176,6 +186,7 @@ Notes:
 - `just db-ps mdb114-a`
 - `just db-logs mdb114-a`
 - `just db-sql mdb114-a "SELECT 1;"`
+- `just db-load-schema mdb114-a`
 - `just db-down mdb114-a`
 - `just db-rm mdb114-a`
 - Override host port and image:
@@ -185,7 +196,10 @@ Recommended first-run sequence on a new machine:
 
 1. `just db-create mdb114-a`
 2. `docker compose version`
-3. `just db-up mdb114-a`
+3. `docker ps`
+4. `mariadb --version`
+5. `just db-up mdb114-a`
+6. `just db-load-schema mdb114-a`
 
 ### Notes
 

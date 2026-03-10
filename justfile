@@ -35,6 +35,9 @@ db-rm INSTANCE:
 db-sql INSTANCE SQL:
 	tools/db_instance.sh sql "{{INSTANCE}}" "{{SQL}}"
 
+db-load-schema INSTANCE SQL_FILE="tests/fixtures/appdb_schema.sql":
+	tools/db_instance.sh schema-load "{{INSTANCE}}" "{{SQL_FILE}}"
+
 # Drift compiler helpers (expects DRIFTC in environment).
 driftc-help:
 	bash -lc ': "${DRIFTC:?set DRIFTC to your driftc path}"; "$DRIFTC" --help'
