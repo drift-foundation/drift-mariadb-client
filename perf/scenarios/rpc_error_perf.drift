@@ -1,0 +1,75 @@
+module perf.scenarios.rpc_error_perf
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34115;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+const ITERATIONS: Int = 25;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _consume(stmt: &mut rpc.RpcStatement) nothrow -> Int {
+	while true {
+		match stmt.next_event() {
+			core.Result::Err(_) => { return 20; },
+			core.Result::Ok(ev) => {
+				match ev {
+					rpc.RpcEvent::Row(_) => { return 21; },
+					rpc.RpcEvent::ResultSetEnd => {},
+					rpc.RpcEvent::ServerErr(err) => {
+						if err.error_code != cast<Uint>(1644) { return 22; }
+						return 0;
+					},
+					rpc.RpcEvent::StatementEnd(_) => { return 23; }
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { return 10; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { return 11; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					var i = 0;
+					while i < ITERATIONS {
+						match conn.call(&"sp_error") {
+							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 12; },
+							core.Result::Ok(s) => {
+								var stmt = move s;
+								val rc = _consume(&mut stmt);
+								if rc != 0 { val _ = rpc.close(&mut conn); return rc; }
+							}
+						}
+						i = i + 1;
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}

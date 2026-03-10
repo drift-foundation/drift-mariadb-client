@@ -40,7 +40,7 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `just`
 - `docker` with Compose support (`docker compose` or `docker-compose`)
 - `mariadb` CLI client (used for schema loading, manual queries, and capture workflows)
-- `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/src/drift-lang/bin/driftc`)
+- `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/opt/drift/current/bin/driftc`)
 
 ### New machine check
 
@@ -107,6 +107,22 @@ Preconditions for `just test`:
 - `DRIFTC` is set.
 - Local MariaDB instance is running (default expected target is `mdb114-a` on `127.0.0.1:34114`).
 - Fixture schema/procedures are loaded (`just db-load-schema mdb114-a`).
+
+### Performance Baseline
+
+- `just perf`
+  - Runs a small fixed RPC baseline through the local wire-capture proxy.
+  - Writes timestamped results under `perf/results/` and updates `perf/results/latest.json`.
+  - Current scenarios cover:
+    - single-result stored procedure calls
+    - multi-result stored procedure calls
+    - stored procedure error path
+
+Preconditions for `just perf`:
+- same as `just test`
+- local proxy port `127.0.0.1:34115` available
+
+See `perf/README.md` for the result format and comparison guidance.
 
 ### Wire Capture Proxy (Fixture Generation)
 
