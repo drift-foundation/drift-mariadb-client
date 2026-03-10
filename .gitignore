@@ -4,3 +4,4 @@ tmp_db_instance/
 tmp_db_instances_config/
 db_instances_config/
 tmp/
+.claude-session
