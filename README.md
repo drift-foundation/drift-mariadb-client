@@ -41,6 +41,15 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `docker` with Compose support (`docker compose` or `docker-compose`)
 - `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/src/drift-lang/bin/driftc`)
 
+### New machine check
+
+Before bringing up a local MariaDB instance, verify both Docker and Compose are available:
+
+- `docker --version`
+- `docker compose version`
+
+If `docker` exists but `docker compose` does not, install the Compose plugin before running `just db-up ...`.
+
 ### Compiler env
 
 - `DRIFTC` should point to the compiler launcher.
@@ -171,6 +180,12 @@ Notes:
 - `just db-rm mdb114-a`
 - Override host port and image:
 - `just db-create mdb114-b 34080 mariadb:11.4`
+
+Recommended first-run sequence on a new machine:
+
+1. `just db-create mdb114-a`
+2. `docker compose version`
+3. `just db-up mdb114-a`
 
 ### Notes
 
