@@ -214,6 +214,40 @@ All errors are `PacketDecodeError` with a string `tag` for programmatic matching
 - `resultset-row-truncated`, `resultset-row-trailing-bytes`, `resultset-missing-terminator`
 - `lenenc-out-of-bounds`, `lenenc-truncated`, `lenenc-null`
 
+## Optional resultset metadata suppression
+
+`connect()` negotiates `MARIADB_CLIENT_CACHE_METADATA` with the server via MariaDB extended capabilities. When the server agrees, it may omit column-definition packets and the column-def EOF terminator from resultsets, reducing per-resultset wire overhead.
+
+**How it works:**
+
+1. During handshake, the client advertises `MARIADB_CLIENT_CACHE_METADATA` in the extended capabilities field of HandshakeResponse41 (bytes 19-22 of the 23-byte reserved area).
+2. The server advertises its support in the Initial Handshake Packet (bytes 6-9 of the 10-byte reserved area).
+3. If both sides agree, the column-count packet gains an extra `metadata_follows` lenenc integer after the column count.
+4. Per-resultset, the client inspects `metadata_follows`:
+   - **1 (present)**: consume column defs + EOF terminator as normal.
+   - **0 (suppressed)**: skip directly to row data. Column count is still available; column defs array is empty.
+
+**Packet savings per resultset (N columns):**
+
+| Path | Packets before rows |
+|---|---|
+| Metadata present | 1 (count) + N (coldefs) + 1 (EOF) = N+2 |
+| Metadata suppressed | 1 (count) = 1 |
+
+For a 2-resultset stored procedure with 3 columns each, this saves 8 packets per call.
+
+**Session field:** `metadata_suppression_negotiated` (Bool) on `WireSession` tracks whether the capability was successfully negotiated for the current session.
+
+**Correctness guarantee:** The client never assumes metadata is suppressed. It reads the `metadata_follows` flag from every column-count packet and branches accordingly. A server that sends metadata despite negotiation will be handled correctly.
+
+**Impact on callers:**
+- `statement_column_count()` always returns the correct count.
+- `statement_column_defs()` returns an empty array when metadata is suppressed.
+- Row decoding is unaffected (uses column_count, not column_defs).
+- RPC-layer index-based row access works unchanged.
+
+**Benchmarking:** The wire-capture proxy (`just wire-capture`) can be used to compare actual bytes/packets on the wire. Manual-handshake tests (which pass `mariadb_ext_capabilities=0`) exercise the metadata-present baseline; high-level `connect()` tests exercise the suppressed path.
+
 ## Performance and memory guidance
 
 - Stream rows as consumed by caller.

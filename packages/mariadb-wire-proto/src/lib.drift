@@ -55,6 +55,7 @@ import mariadb.wire.proto.decode.ok_packet as ok_packet_decode;
 import mariadb.wire.proto.decode.err_packet as err_packet_decode;
 import mariadb.wire.proto.transport as transport;
 import mariadb.wire.proto.capabilities as capabilities;
+import mariadb.wire.proto.protocol.constants as protocol;
 
 export {
 	OkPacket,
@@ -326,12 +327,18 @@ fn _command_send_recv(session: &mut WireSession, payload: &Array<Byte>) nothrow 
 	return core.Result::Ok(move resp);
 }
 
-fn _decode_column_count(payload: &Array<Byte>) nothrow -> core.Result<Int, PacketDecodeError> {
+struct ColumnCountDecoded {
+	column_count: Int,
+	metadata_follows: Bool
+}
+
+fn _decode_column_count(payload: &Array<Byte>, metadata_cap_negotiated: Bool) nothrow -> core.Result<ColumnCountDecoded, PacketDecodeError> {
 	var col_count_dec = packet_lenenc.LenEncIntDecoded(value = cast<Uint>(0), next_offset = 0);
 	match packet_lenenc.decode_lenenc_int_at(payload, 0) {
 		core.Result::Ok(v) => { col_count_dec = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
+	var metadata_follows = true;
 	if col_count_dec.next_offset < payload.len {
 		var metadata_flag = packet_lenenc.LenEncIntDecoded(value = cast<Uint>(0), next_offset = 0);
 		match packet_lenenc.decode_lenenc_int_at(payload, col_count_dec.next_offset) {
@@ -341,8 +348,11 @@ fn _decode_column_count(payload: &Array<Byte>) nothrow -> core.Result<Int, Packe
 		if metadata_flag.next_offset != payload.len {
 			return core.Result::Err(_error(errors.TAG_RESULTSET_INVALID_COLUMN_COUNT_PACKET, col_count_dec.next_offset));
 		}
+		if metadata_cap_negotiated {
+			metadata_follows = metadata_flag.value != cast<Uint>(0);
+		}
 	}
-	return core.Result::Ok(cast<Int>(col_count_dec.value));
+	return core.Result::Ok(ColumnCountDecoded(column_count = cast<Int>(col_count_dec.value), metadata_follows = metadata_follows));
 }
 
 fn _u32le_at(payload: &Array<Byte>, offset: Int) nothrow -> Uint {
@@ -431,13 +441,18 @@ fn _init_statement_from_first(statement: &mut Statement, first: &Array<Byte>) no
 					}
 				},
 				decode_resultset.FirstResponseRoute::ResultSet => {
-					match _decode_column_count(first) {
+					match _decode_column_count(first, statement.session.metadata_suppression_negotiated) {
 						core.Result::Ok(cc) => {
-							statement.column_count = cc;
-							statement.column_defs_remaining = cc;
+							statement.column_count = cc.column_count;
 							var fresh_coldefs: Array<ColumnDef> = [];
 							statement.column_defs = move fresh_coldefs;
-							statement.awaiting_coldef_terminator = true;
+							if cc.metadata_follows {
+								statement.column_defs_remaining = cc.column_count;
+								statement.awaiting_coldef_terminator = true;
+							} else {
+								statement.column_defs_remaining = 0;
+								statement.awaiting_coldef_terminator = false;
+							}
 							statement.mode = MODE_RESULTSET;
 							return core.Result::Ok(core.void_value());
 						},
@@ -504,7 +519,7 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var empty_auth_data: Array<Byte> = [];
-			var hello = types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "");
+			var hello = types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "", mariadb_ext_capabilities = cast<Uint>(0));
 			match handshake_hello.decode_handshake_hello(&hello_payload) {
 				core.Result::Ok(v) => { hello = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
@@ -515,7 +530,8 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var token = _sha1_native_password_token(&opts.password, &hello.auth_plugin_data);
-			val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = opts.character_set, username = opts.username, auth_response = move token, database = opts.database, auth_plugin_name = hello.auth_plugin_name);
+			val ext_caps = capabilities.negotiate_mariadb_ext_capabilities(hello.mariadb_ext_capabilities);
+			val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = opts.character_set, username = opts.username, auth_response = move token, database = opts.database, auth_plugin_name = hello.auth_plugin_name, mariadb_ext_capabilities = ext_caps);
 			var auth_payload: Array<Byte> = [];
 			match handshake_auth.encode_handshake_response41(&req) {
 				core.Result::Ok(v) => { auth_payload = move v; },
@@ -563,7 +579,8 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				},
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), server_capabilities = hello.capabilities, reset_connection_supported = true, state = move state));
+			val metadata_negotiated = (ext_caps & protocol.MARIADB_CLIENT_EXT_CACHE_METADATA) != cast<Uint>(0);
+			return core.Result::Ok(types.WireSession(stream = move stream, io_timeout_ms = opts.io_timeout_ms, is_closed = false, active_statement = false, connection_id = hello.connection_id, expected_seq_id = cast<Byte>(0), server_capabilities = hello.capabilities, reset_connection_supported = true, metadata_suppression_negotiated = metadata_negotiated, state = move state));
 		},
 		core.Result::Err(_) => { return core.Result::Err(_error("connect-failed", 0)); }
 	}

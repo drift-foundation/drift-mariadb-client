@@ -24,6 +24,8 @@ export {
 	HANDSHAKE_POST_CAP_LOW_MIN_LEN,
 	HANDSHAKE_RESPONSE_RESERVED_LEN,
 	HANDSHAKE_RESPONSE_FIXED_LEN,
+	HANDSHAKE_RESERVED_MARIADB_EXT_OFFSET,
+	HANDSHAKE_RESPONSE_MARIADB_EXT_OFFSET,
 	UTF8MB4_CHARSET_ID,
 	CLIENT_LONG_FLAG,
 	CLIENT_CONNECT_WITH_DB,
@@ -36,7 +38,8 @@ export {
 	CLIENT_PS_MULTI_RESULTS,
 	CLIENT_PLUGIN_AUTH,
 	CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA,
-	CLIENT_SESSION_TRACK
+	CLIENT_SESSION_TRACK,
+	MARIADB_CLIENT_EXT_CACHE_METADATA
 };
 
 pub const HANDSHAKE_PROTOCOL_VERSION_V10: Int = 10;
@@ -70,3 +73,17 @@ pub const CLIENT_PS_MULTI_RESULTS: Uint = 262144;
 pub const CLIENT_PLUGIN_AUTH: Uint = 524288;
 pub const CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA: Uint = 2097152;
 pub const CLIENT_SESSION_TRACK: Uint = 8388608;
+
+// Offset within the 10-byte reserved field in the server hello where
+// MariaDB stores its 4-byte extended capabilities (LE uint32).
+pub const HANDSHAKE_RESERVED_MARIADB_EXT_OFFSET: Int = 6;
+// Offset within the 23-byte reserved field in the client response where
+// MariaDB extended capabilities are written (LE uint32, 4 bytes).
+pub const HANDSHAKE_RESPONSE_MARIADB_EXT_OFFSET: Int = 19;
+
+// MariaDB extended capability flag: when negotiated, the server may omit
+// column definition packets from resultsets. The column-count packet gains
+// a metadata_follows lenenc integer (0 = suppressed, 1 = present).
+// Bit 4 in the 4-byte MariaDB extended capabilities (= bit 36 in the
+// full 64-bit capability space, i.e. 1 << (36 - 32) = 16).
+pub const MARIADB_CLIENT_EXT_CACHE_METADATA: Uint = 16;

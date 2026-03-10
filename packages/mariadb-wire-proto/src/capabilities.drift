@@ -16,7 +16,8 @@ import mariadb.wire.proto.errors as errors;
 import mariadb.wire.proto.protocol.constants as protocol;
 
 export {
-	normalize_capabilities
+	normalize_capabilities,
+	negotiate_mariadb_ext_capabilities
 };
 
 pub type PacketDecodeError = errors.PacketDecodeError;
@@ -62,4 +63,11 @@ pub fn normalize_capabilities(requested: Uint, server: Uint, has_database: Bool)
 		return core.Result::Err(_error("server-missing-connect-with-db", 0));
 	}
 	return core.Result::Ok(final_caps);
+}
+
+// Negotiate MariaDB extended capabilities. Requests CACHE_METADATA if
+// the server advertises it (intersection). Returns the effective
+// extended capability bitmask to send in the handshake response.
+pub fn negotiate_mariadb_ext_capabilities(server_ext_caps: Uint) nothrow -> Uint {
+	return server_ext_caps & protocol.MARIADB_CLIENT_EXT_CACHE_METADATA;
 }

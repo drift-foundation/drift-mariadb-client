@@ -43,7 +43,8 @@ pub struct HandshakeHello {
 	pub character_set: Byte,
 	pub status_flags: Uint,
 	pub auth_plugin_data: Array<Byte>,
-	pub auth_plugin_name: String
+	pub auth_plugin_name: String,
+	pub mariadb_ext_capabilities: Uint
 }
 
 pub struct HandshakeResponse41 {
@@ -53,7 +54,8 @@ pub struct HandshakeResponse41 {
 	pub username: String,
 	pub auth_response: Array<Byte>,
 	pub database: String,
-	pub auth_plugin_name: String
+	pub auth_plugin_name: String,
+	pub mariadb_ext_capabilities: Uint
 }
 
 pub struct OkPacket {
@@ -134,6 +136,7 @@ pub struct WireSession {
 	pub expected_seq_id: Byte,
 	pub server_capabilities: Uint,
 	pub reset_connection_supported: Bool,
+	pub metadata_suppression_negotiated: Bool,
 	pub state: WireSessionState
 }
 

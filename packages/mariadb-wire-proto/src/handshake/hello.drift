@@ -55,8 +55,8 @@ fn _read_u32le_unchecked(input: &Array<Byte>, offset: Int) nothrow -> Uint {
 	return cast<Uint>(input[offset]) + cast<Uint>(input[offset + 1]) * cast<Uint>(256) + cast<Uint>(input[offset + 2]) * cast<Uint>(65536) + cast<Uint>(input[offset + 3]) * cast<Uint>(16777216);
 }
 
-fn _make_hello(protocol_version: Byte, server_version: String, connection_id: Uint, capabilities: Uint, character_set: Byte, status_flags: Uint, auth_plugin_data: Array<Byte>, auth_plugin_name: String) nothrow -> types.HandshakeHello {
-	return types.HandshakeHello(protocol_version = protocol_version, server_version = move server_version, connection_id = connection_id, capabilities = capabilities, character_set = character_set, status_flags = status_flags, auth_plugin_data = move auth_plugin_data, auth_plugin_name = move auth_plugin_name);
+fn _make_hello(protocol_version: Byte, server_version: String, connection_id: Uint, capabilities: Uint, character_set: Byte, status_flags: Uint, auth_plugin_data: Array<Byte>, auth_plugin_name: String, mariadb_ext_capabilities: Uint) nothrow -> types.HandshakeHello {
+	return types.HandshakeHello(protocol_version = protocol_version, server_version = move server_version, connection_id = connection_id, capabilities = capabilities, character_set = character_set, status_flags = status_flags, auth_plugin_data = move auth_plugin_data, auth_plugin_name = move auth_plugin_name, mariadb_ext_capabilities = mariadb_ext_capabilities);
 }
 
 pub fn decode_handshake_hello(payload: &Array<Byte>) nothrow -> core.Result<types.HandshakeHello, errors.PacketDecodeError> {
@@ -112,7 +112,7 @@ pub fn decode_handshake_hello(payload: &Array<Byte>) nothrow -> core.Result<type
 	var auth_plugin_name = "";
 
 	if idx >= payload.len {
-		return core.Result::Ok(_make_hello(protocol_version, move server_version, connection_id, capabilities, character_set, status_flags, move auth_plugin_data, move auth_plugin_name));
+		return core.Result::Ok(_make_hello(protocol_version, move server_version, connection_id, capabilities, character_set, status_flags, move auth_plugin_data, move auth_plugin_name, cast<Uint>(0)));
 	}
 
 	if idx + protocol.HANDSHAKE_POST_CAP_LOW_MIN_LEN > payload.len {
@@ -127,6 +127,8 @@ pub fn decode_handshake_hello(payload: &Array<Byte>) nothrow -> core.Result<type
 	capabilities = cap_low + cap_high * cast<Uint>(65536);
 	val auth_data_len = cast<Int>(payload[idx]);
 	idx = idx + protocol.HANDSHAKE_AUTH_DATA_LEN_LEN;
+	// MariaDB extended capabilities: bytes 6-9 of the 10-byte reserved field.
+	val mariadb_ext_caps = _read_u32le_unchecked(payload, idx + protocol.HANDSHAKE_RESERVED_MARIADB_EXT_OFFSET);
 	idx = idx + protocol.HANDSHAKE_RESERVED_LEN;
 
 	var auth_part2_len = 0;
@@ -160,5 +162,5 @@ pub fn decode_handshake_hello(payload: &Array<Byte>) nothrow -> core.Result<type
 		}
 	}
 
-	return core.Result::Ok(_make_hello(protocol_version, move server_version, connection_id, capabilities, character_set, status_flags, move auth_plugin_data, move auth_plugin_name));
+	return core.Result::Ok(_make_hello(protocol_version, move server_version, connection_id, capabilities, character_set, status_flags, move auth_plugin_data, move auth_plugin_name, mariadb_ext_caps));
 }

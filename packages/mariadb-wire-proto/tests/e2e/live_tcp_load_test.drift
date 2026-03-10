@@ -166,13 +166,13 @@ fn _read_hello(stream: &net.TcpStream) nothrow -> core.Result<types.HandshakeHel
 
 fn _empty_hello() nothrow -> types.HandshakeHello {
 	var empty_auth_data: Array<Byte> = [];
-	return types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "");
+	return types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "", mariadb_ext_capabilities = cast<Uint>(0));
 }
 
 fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Result<Void, Int> {
 	val token = _sha1_native_password_token(&LIVE_PASSWORD, &h.auth_plugin_data);
 	val caps = protocol.CLIENT_PROTOCOL_41 | protocol.CLIENT_TRANSACTIONS | protocol.CLIENT_SECURE_CONNECTION | protocol.CLIENT_PLUGIN_AUTH | protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | protocol.CLIENT_MULTI_RESULTS | protocol.CLIENT_CONNECT_WITH_DB;
-	val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = protocol.UTF8MB4_CHARSET_ID, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name);
+	val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = protocol.UTF8MB4_CHARSET_ID, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name, mariadb_ext_capabilities = cast<Uint>(0));
 	var auth_payload: Array<Byte> = [];
 	match auth.encode_handshake_response41(&req) {
 		core.Result::Ok(v) => { auth_payload = move v; },

@@ -90,7 +90,7 @@ fn expect_handshake_auth_nul_tag() nothrow -> Int {
 	}
 	var auth_response: Array<Byte> = [];
 	auth_response.push(cast<Byte>(1));
-	val req = types.HandshakeResponse41(capabilities = cast<Uint>(1), max_packet_size = cast<Uint>(1), character_set = cast<Byte>(45), username = move username, auth_response = move auth_response, database = "", auth_plugin_name = "mysql_native_password");
+	val req = types.HandshakeResponse41(capabilities = cast<Uint>(1), max_packet_size = cast<Uint>(1), character_set = cast<Byte>(45), username = move username, auth_response = move auth_response, database = "", auth_plugin_name = "mysql_native_password", mariadb_ext_capabilities = cast<Uint>(0));
 	match handshake_auth.encode_handshake_response41(&req) {
 		core.Result::Ok(_) => { return 41; },
 		core.Result::Err(e) => {

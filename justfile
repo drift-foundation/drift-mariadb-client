@@ -9,6 +9,7 @@ test:
 	@just wire-live-state-par
 	@just wire-live-tx-par
 	@just wire-live-load-par
+	@just wire-live-metadata-par
 	@just rpc-live-connect-state-stage-par
 	@just rpc-live-connect-state-regression-par
 	@just rpc-live-par
@@ -98,6 +99,12 @@ wire-live-state:
 
 wire-live-state-par:
 	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift --target-word-bits 64
+
+wire-live-metadata:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_metadata_suppression_test.drift --target-word-bits 64
+
+wire-live-metadata-par:
+	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --test-file packages/mariadb-wire-proto/tests/e2e/live_metadata_suppression_test.drift --target-word-bits 64
 
 rpc-live:
 	@tools/drift_test_parallel_runner.sh run-one --src-root packages/mariadb-wire-proto/src --src-root packages/mariadb-rpc/src --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift --target-word-bits 64

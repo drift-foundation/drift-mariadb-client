@@ -66,7 +66,15 @@ pub fn encode_handshake_response41(req: &types.HandshakeResponse41) nothrow -> c
 	_write_u32le(&mut out, req.max_packet_size);
 	out.push(req.character_set);
 
+	// 23-byte reserved field: bytes 0-18 are zero-padded, bytes 19-22 carry
+	// MariaDB extended capabilities (LE uint32) when negotiated.
 	var i = 0;
+	while i < protocol.HANDSHAKE_RESPONSE_MARIADB_EXT_OFFSET {
+		out.push(cast<Byte>(0));
+		i = i + 1;
+	}
+	_write_u32le(&mut out, req.mariadb_ext_capabilities);
+	i = protocol.HANDSHAKE_RESPONSE_MARIADB_EXT_OFFSET + 4;
 	while i < protocol.HANDSHAKE_RESPONSE_RESERVED_LEN {
 		out.push(cast<Byte>(0));
 		i = i + 1;

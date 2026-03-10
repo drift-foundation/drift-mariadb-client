@@ -8,7 +8,7 @@ fn _mk_req(database: String) nothrow -> types.HandshakeResponse41 {
 	auth_response.push(cast<Byte>(1));
 	auth_response.push(cast<Byte>(2));
 	auth_response.push(cast<Byte>(3));
-	return types.HandshakeResponse41(capabilities = cast<Uint>(305419896), max_packet_size = cast<Uint>(16777216), character_set = cast<Byte>(45), username = "app", auth_response = move auth_response, database = move database, auth_plugin_name = "mysql_native_password");
+	return types.HandshakeResponse41(capabilities = cast<Uint>(305419896), max_packet_size = cast<Uint>(16777216), character_set = cast<Byte>(45), username = "app", auth_response = move auth_response, database = move database, auth_plugin_name = "mysql_native_password", mariadb_ext_capabilities = cast<Uint>(0));
 }
 
 fn expect_encode_with_database() nothrow -> Int {
