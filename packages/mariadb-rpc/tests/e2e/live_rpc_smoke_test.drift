@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.e2e.live_rpc_smoke_test
+module mariadb.rpc.tests.e2e.live_rpc_smoke_test;
 
 import std.core as core;
 import std.concurrent as conc;

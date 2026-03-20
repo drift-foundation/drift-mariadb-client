@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.ok_packet_test
+module mariadb.wire.proto.tests.unit.ok_packet_test;
 
 import mariadb.wire.proto.decode.ok_packet as ok_packet;
 

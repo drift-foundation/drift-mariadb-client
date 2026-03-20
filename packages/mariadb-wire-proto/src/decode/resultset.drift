@@ -14,7 +14,7 @@
 // decode_text_resultset_packets() is a batch decoder for pre-collected
 // packet arrays, used by fixture-replay tests. Not used in streaming
 // production paths.
-module mariadb.wire.proto.decode.resultset
+module mariadb.wire.proto.decode.resultset;
 
 import std.core as core;
 import mariadb.wire.proto.errors as errors;

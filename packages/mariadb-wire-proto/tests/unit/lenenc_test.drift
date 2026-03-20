@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.lenenc_test
+module mariadb.wire.proto.tests.unit.lenenc_test;
 
 import mariadb.wire.proto.packet.lenenc as lenenc;
 

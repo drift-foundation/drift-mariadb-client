@@ -8,7 +8,7 @@
 // The status_flags field drives session state tracking: autocommit,
 // in_transaction, and more_results_exist flags are extracted from it
 // by the session layer after each OK.
-module mariadb.wire.proto.decode.ok_packet
+module mariadb.wire.proto.decode.ok_packet;
 
 import std.core as core;
 import mariadb.wire.proto.errors as errors;

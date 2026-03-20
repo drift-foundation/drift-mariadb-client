@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.packet_header_test
+module mariadb.wire.proto.tests.unit.packet_header_test;
 
 import mariadb.wire.proto.packet.header as header;
 

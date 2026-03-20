@@ -9,7 +9,7 @@
 // full packets with extended fields (capability-high, auth part 2,
 // auth plugin name). Parsing is positional with explicit bounds
 // checks at each field boundary.
-module mariadb.wire.proto.handshake.hello
+module mariadb.wire.proto.handshake.hello;
 
 import std.core as core;
 import std.text as text;

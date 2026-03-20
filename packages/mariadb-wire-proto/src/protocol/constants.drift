@@ -7,7 +7,7 @@
 // CLIENT_* constants are capability flag bit values (decimal). These
 // control which protocol features are negotiated during handshake.
 // Values match the MySQL/MariaDB C client definitions.
-module mariadb.wire.proto.protocol.constants
+module mariadb.wire.proto.protocol.constants;
 
 export {
 	HANDSHAKE_PROTOCOL_VERSION_V10,

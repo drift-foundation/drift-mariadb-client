@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.handshake_fixture_replay_test
+module mariadb.wire.proto.tests.unit.handshake_fixture_replay_test;
 
 import std.core as core;
 import std.codec as codec;

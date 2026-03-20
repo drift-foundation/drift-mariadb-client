@@ -8,7 +8,7 @@
 //
 // Error tag constants (TAG_*) are used by decode modules to produce
 // consistent, matchable error identifiers.
-module mariadb.wire.proto.errors
+module mariadb.wire.proto.errors;
 
 import std.core as core;
 

@@ -1,8 +1,8 @@
 # mariadb-client
 
-Drift user-land MariaDB client project.
+Drift user-land MariaDB client library.
 
-This repository is intentionally not part of Drift stdlib. It is a curated user-land library intended for package-index publication and normal third-party consumption.
+Published as signed packages for normal third-party consumption. Not part of Drift stdlib. For integration into your project, see `docs/integration-guide.md`.
 
 ## Packages
 
@@ -21,10 +21,11 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - TLS disabled for MVP.
 - Stored procedure workflow first (via `COM_QUERY` path).
 
-## Effective Usage Guides
+## Documentation
 
-- RPC-first guide (most users): `docs/effective-mariadb-rpc.md`
-- Wire-proto advanced guide: `docs/effective-mariadb-wire-proto.md`
+- **Integration guide** (consuming this library from another project): `docs/integration-guide.md`
+- RPC usage guide: `docs/effective-mariadb-rpc.md`
+- Wire-proto usage guide: `docs/effective-mariadb-wire-proto.md`
 
 ## Protocol References
 
@@ -40,7 +41,7 @@ This repository is intentionally not part of Drift stdlib. It is a curated user-
 - `just`
 - `docker` with Compose support (`docker compose` or `docker-compose`)
 - `mariadb` CLI client (used for schema loading, manual queries, and capture workflows)
-- `driftc` (set `DRIFTC` to the compiler path, for example `/home/sl/opt/drift/current/bin/driftc`)
+- `drift` toolchain (`driftc` compiler + `drift` CLI for prepare/deploy)
 
 ### New machine check
 
@@ -60,9 +61,20 @@ If Docker is installed but you get a permission error for `/var/run/docker.sock`
 - `sudo usermod -aG docker "$USER"`
 - `newgrp docker`
 
-### Compiler env
+### Environment
 
-- `DRIFTC` should point to the compiler launcher.
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `DRIFTC` | yes | — | Path to `driftc` compiler |
+| `DRIFT_PKG_ROOT` | no | `build/deploy` | Package library root for `just prepare` / `just deploy` |
+| `DRIFT_SIGN_KEY_FILE` | for deploy | — | Ed25519 signing key file |
+
+### Package Lifecycle
+
+This project uses `drift-manifest.json` to define two co-artifacts (`mariadb-wire-proto` and `mariadb-rpc`) with versioning, dependency resolution, and signed artifact publishing.
+
+- `just prepare` — resolve dependencies and write `drift-lock.json`
+- `just deploy` — build, sign, and publish both packages to `DRIFT_PKG_ROOT`
 
 ### Build Support Flags
 
@@ -75,38 +87,38 @@ If Docker is installed but you get a permission error for `/var/run/docker.sock`
 - `DRIFT_ASAN=1`
   - For execute-time checks, sets default `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` unless explicitly provided.
   - Incompatible with `DRIFT_MEMCHECK` and `DRIFT_MASSIF` in the same run.
+- `DRIFT_OPTIMIZED=1`
+  - Passes `--optimized` to driftc during test compilation.
 
-### Wire Recipes
+### Test Recipes
 
-- `just wire-check`
-  - Compile and execute all unit test entrypoints under `packages/mariadb-wire-proto/tests/unit`.
-- `just wire-check-unit packages/mariadb-wire-proto/tests/unit/packet_header_test.drift`
-  - Compile and execute one unit test entrypoint.
-- `just wire-compile-check`
-  - Compile-only check for library sources.
-- `just wire-compile-check-unit <test-file>`
-  - Compile-only check for a specific unit test entrypoint.
+All test recipes use `--manifest drift-manifest.json --artifact <name>` to derive source roots from the manifest. For co-artifact dependencies (e.g., `mariadb-rpc` depends on `mariadb-wire-proto`), the runner compiles against co-artifact source trees — not deployed `.zdmp` packages. This keeps the dev loop fast (no deploy-before-test gate) while still validating the manifest's module list. External (non-co-artifact) deps resolve through `--package-root` / `DRIFT_PACKAGE_ROOT`.
 
-### Full Test Sweep
+#### Wire-proto
 
-- `just test`
-  - Runs the full suite from local/unit checks to live DB e2e checks.
-  - Current order:
-    - `wire-check`
-    - `rpc-check`
-    - `wire-smoke`
-    - `wire-live`
-    - `wire-live-api`
-    - `wire-live-tx`
-    - `wire-live-load`
-    - `rpc-live-connect-state-stage`
-    - `rpc-live-connect-state-regression`
-    - `rpc-live`
+- `just wire-check` — all unit tests under `packages/mariadb-wire-proto/tests/unit`
+- `just wire-check-unit <file>` — single unit test
+- `just wire-compile-check [file]` — compile-only check
+
+#### RPC
+
+- `just rpc-check` — all unit tests under `packages/mariadb-rpc/tests/unit`
+- `just rpc-check-unit <file>` — single unit test
+- `just rpc-check-config` — config validation unit test
+
+#### Full Test Sweep
+
+- `just test` — runs `test-unit` then `test-live`
+- `just test-unit` — unit tests only (no DB required): `wire-check`, `rpc-check`
+- `just test-live` — live/e2e tests (needs running MariaDB):
+  - `wire-smoke`, `wire-live`, `wire-live-api`, `wire-live-state`
+  - `wire-live-tx`, `wire-live-load`, `wire-live-metadata`
+  - `rpc-live-connect-state-stage`, `rpc-live-connect-state-regression`
+  - `rpc-live`
 
 Preconditions for `just test`:
 - `DRIFTC` is set.
-- Local MariaDB instance is running (default expected target is `mdb114-a` on `127.0.0.1:34114`).
-- Fixture schema/procedures are loaded (`just db-load-schema mdb114-a`).
+- For `test-live`: local MariaDB instance running (default: `mdb114-a` on `127.0.0.1:34114`) with fixture schema loaded (`just db-load-schema mdb114-a`).
 
 ### Performance Baseline
 
@@ -232,14 +244,16 @@ Recommended first-run sequence on a new machine:
 ## Repository layout
 
 ```text
+drift-manifest.json                  # package manifest (artifacts, versions, deps)
+drift-lock.json                      # resolved dependency lock (generated by drift prepare)
+the-drift-foundation.author-profile  # publisher signing identity
 packages/
-  mariadb-wire-proto/
-  mariadb-rpc/
-examples/
+  mariadb-wire-proto/                # wire protocol package
+  mariadb-rpc/                       # RPC layer package
+build/deploy/                        # deploy output (gitignored)
 tests/
 docs/
-TODO.md
-AGENTS.md
+tools/
 ```
 
 ## Development policy

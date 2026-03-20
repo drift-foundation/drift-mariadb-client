@@ -8,7 +8,7 @@
 // Older servers respond with ERR code 1047 (unknown command), which
 // the caller handles by falling back to manual reset (ROLLBACK +
 // SET autocommit + PING).
-module mariadb.wire.proto.command.com_reset_connection
+module mariadb.wire.proto.command.com_reset_connection;
 
 import std.core as core;
 import mariadb.wire.proto.errors as errors;

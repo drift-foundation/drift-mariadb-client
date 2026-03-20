@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.unit.connect_state_handoff_nonnetwork_noncopypayload_test
+module mariadb.rpc.tests.unit.connect_state_handoff_nonnetwork_noncopypayload_test;
 
 import std.core as core;
 import mariadb.rpc.internal.repro_state_handoff_noncopypayload as repro;

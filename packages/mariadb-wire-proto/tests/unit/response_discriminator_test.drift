@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.response_discriminator_test
+module mariadb.wire.proto.tests.unit.response_discriminator_test;
 
 import mariadb.wire.proto.decode.resultset as resultset;
 

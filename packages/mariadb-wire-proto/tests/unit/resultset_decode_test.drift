@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.resultset_decode_test
+module mariadb.wire.proto.tests.unit.resultset_decode_test;
 
 import std.core as core;
 import mariadb.wire.proto.decode.resultset as resultset;

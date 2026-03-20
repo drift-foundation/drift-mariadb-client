@@ -7,7 +7,7 @@
 // MAX_PAYLOAD_LEN (16,777,215 = 2^24 - 1) is the protocol maximum for
 // a single packet payload. Larger data requires packet splitting (not
 // implemented here — this library targets normal query/result sizes).
-module mariadb.wire.proto.packet.header
+module mariadb.wire.proto.packet.header;
 
 import std.core as core;
 import mariadb.wire.proto.types as types;

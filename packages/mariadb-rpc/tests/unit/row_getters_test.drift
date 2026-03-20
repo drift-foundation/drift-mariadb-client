@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.unit.row_getters_test
+module mariadb.rpc.tests.unit.row_getters_test;
 
 import std.core as core;
 import mariadb.rpc as rpc;

@@ -1,4 +1,4 @@
-module mariadb.rpc.internal.repro_state_handoff
+module mariadb.rpc.internal.repro_state_handoff;
 
 import std.core as core;
 

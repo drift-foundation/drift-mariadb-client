@@ -28,7 +28,7 @@
 //   Pool reuse: reset_for_pool_reuse() delegates to wire layer to
 //   normalize session state. connect() runs SET NAMES and sets
 //   autocommit after wire handshake.
-module mariadb.rpc
+module mariadb.rpc;
 
 import std.core as core;
 import std.format as format;
@@ -414,7 +414,7 @@ pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection
 	val user = _dup_string(&config.user);
 	val password = _dup_string(&config.password);
 	val database = _dup_string(&config.database);
-	val opts = wire.WireConnectOptions(host = host, port = config.port, username = user, password = password, database = database, character_set = wire.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = config.connect_timeout_ms, io_timeout_ms = config.read_timeout_ms);
+	val opts = wire.create_connect_options(host, config.port, user, password, database, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), config.connect_timeout_ms, config.read_timeout_ms);
 	match wire.connect(&opts) {
 		core.Result::Ok(v) => {
 			var session = move v;

@@ -9,7 +9,7 @@
 //      SESSION_TRACK) to avoid features we don't implement.
 //   4. Intersecting with server-advertised capabilities.
 //   5. Verifying all required flags survived intersection.
-module mariadb.wire.proto.capabilities
+module mariadb.wire.proto.capabilities;
 
 import std.core as core;
 import mariadb.wire.proto.errors as errors;

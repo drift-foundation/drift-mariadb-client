@@ -9,7 +9,7 @@
 //
 // This module is the single source of truth for all wire-level type
 // definitions. Other modules in the package import from here.
-module mariadb.wire.proto.types
+module mariadb.wire.proto.types;
 
 import std.net as net;
 import std.core as core;

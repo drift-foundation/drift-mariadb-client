@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.unit.connect_state_handoff_nonnetwork_shape_test
+module mariadb.rpc.tests.unit.connect_state_handoff_nonnetwork_shape_test;
 
 import std.core as core;
 

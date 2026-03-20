@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.e2e.connect_state_handoff_stage_isolation_test
+module mariadb.rpc.tests.e2e.connect_state_handoff_stage_isolation_test;
 
 import std.core as core;
 import mariadb.rpc as rpc;

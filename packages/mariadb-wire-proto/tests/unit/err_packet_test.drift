@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.err_packet_test
+module mariadb.wire.proto.tests.unit.err_packet_test;
 
 import mariadb.wire.proto.decode.err_packet as err_packet;
 

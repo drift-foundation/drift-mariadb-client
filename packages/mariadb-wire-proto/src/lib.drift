@@ -33,7 +33,7 @@
 //   Pool reuse: reset_for_pool_reuse() tries COM_RESET_CONNECTION first,
 //   then falls back to ROLLBACK + SET autocommit=1 + PING if the server
 //   doesn't support it.
-module mariadb.wire.proto
+module mariadb.wire.proto;
 
 import std.core as core;
 import std.io as io;
@@ -87,7 +87,8 @@ export {
 	statement_column_count,
 	resultset_cell_is_null,
 	resultset_cell_text,
-	DEFAULT_CHARSET_ID
+	DEFAULT_CHARSET_ID,
+	create_connect_options
 };
 
 pub type OkPacket = types.OkPacket;
@@ -103,6 +104,10 @@ pub type StatementEvent = types.StatementEvent;
 pub type PacketDecodeError = errors.PacketDecodeError;
 // utf8mb4 general ci charset ID (mirrors protocol.constants.UTF8MB4_CHARSET_ID).
 pub const DEFAULT_CHARSET_ID: Byte = 45;
+
+pub fn create_connect_options(host: String, port: Int, username: String, password: String, database: String, character_set: Byte, client_capabilities: Uint, connect_timeout_ms: Int, io_timeout_ms: Int) nothrow -> WireConnectOptions {
+	return types.WireConnectOptions(host = host, port = port, username = username, password = password, database = database, character_set = character_set, client_capabilities = client_capabilities, connect_timeout_ms = connect_timeout_ms, io_timeout_ms = io_timeout_ms);
+}
 
 // Statement mode constants — see module-level doc for state machine.
 const MODE_PENDING_OK: Int = 1;

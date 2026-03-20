@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.handshake_auth_test
+module mariadb.wire.proto.tests.unit.handshake_auth_test;
 
 import mariadb.wire.proto.handshake.auth as auth;
 import mariadb.wire.proto.types as types;

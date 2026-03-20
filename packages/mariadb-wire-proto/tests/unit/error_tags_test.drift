@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.error_tags_test
+module mariadb.wire.proto.tests.unit.error_tags_test;
 
 import std.core as core;
 import std.text as text;

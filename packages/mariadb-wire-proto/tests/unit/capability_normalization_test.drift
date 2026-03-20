@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.capability_normalization_test
+module mariadb.wire.proto.tests.unit.capability_normalization_test;
 
 import std.core as core;
 import mariadb.wire.proto.capabilities as caps;

@@ -12,7 +12,7 @@
 // Length-encoded strings are a lenenc integer (byte count) followed by
 // that many raw bytes, decoded as UTF-8. Length-encoded bytes are the
 // same but skip UTF-8 validation.
-module mariadb.wire.proto.packet.lenenc
+module mariadb.wire.proto.packet.lenenc;
 
 import std.core as core;
 import std.text as text;

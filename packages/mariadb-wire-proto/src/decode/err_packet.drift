@@ -7,7 +7,7 @@
 // The optional SQLSTATE is present when CLIENT_PROTOCOL_41 is active
 // (always true for this library). ERR_SQLSTATE_MARKER (35 = '#')
 // distinguishes packets with vs without SQLSTATE.
-module mariadb.wire.proto.decode.err_packet
+module mariadb.wire.proto.decode.err_packet;
 
 import std.core as core;
 import std.text as text;

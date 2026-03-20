@@ -13,7 +13,7 @@
 //
 // NUL bytes within string fields (username, database, plugin name)
 // are rejected as protocol violations.
-module mariadb.wire.proto.handshake.auth
+module mariadb.wire.proto.handshake.auth;
 
 import std.core as core;
 import mariadb.wire.proto.types as types;

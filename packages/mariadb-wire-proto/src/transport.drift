@@ -13,7 +13,7 @@
 //
 // session_reset_seq() resets the sequence counter to 0. Must be called
 // at each command boundary (before sending a new COM_* packet).
-module mariadb.wire.proto.transport
+module mariadb.wire.proto.transport;
 
 import std.core as core;
 import std.io as io;

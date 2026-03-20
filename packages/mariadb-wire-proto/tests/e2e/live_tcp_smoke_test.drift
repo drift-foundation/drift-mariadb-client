@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.e2e.live_tcp_smoke_test
+module mariadb.wire.proto.tests.e2e.live_tcp_smoke_test;
 
 import std.core as core;
 import std.io as io;

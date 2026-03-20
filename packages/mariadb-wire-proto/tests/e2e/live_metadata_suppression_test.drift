@@ -14,7 +14,7 @@
 //
 // Scenario 3: manual handshake WITHOUT ext caps (mariadb_ext_capabilities=0)
 //   confirms the metadata-present path still works unchanged.
-module mariadb.wire.proto.tests.e2e.live_metadata_suppression_test
+module mariadb.wire.proto.tests.e2e.live_metadata_suppression_test;
 
 import std.core as core;
 import mariadb.wire.proto as proto;

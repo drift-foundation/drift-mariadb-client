@@ -1,4 +1,4 @@
-module mariadb.wire.proto.tests.unit.com_query_test
+module mariadb.wire.proto.tests.unit.com_query_test;
 
 import std.core as core;
 import mariadb.wire.proto.command.com_query as com_query;

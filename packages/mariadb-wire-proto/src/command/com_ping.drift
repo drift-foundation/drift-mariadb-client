@@ -3,7 +3,7 @@
 // Builds a single-byte payload (0x0E) that the server responds to
 // with an OK packet. Used for connection liveness checks and as part
 // of the pool-reuse fallback path.
-module mariadb.wire.proto.command.com_ping
+module mariadb.wire.proto.command.com_ping;
 
 import std.core as core;
 import mariadb.wire.proto.errors as errors;

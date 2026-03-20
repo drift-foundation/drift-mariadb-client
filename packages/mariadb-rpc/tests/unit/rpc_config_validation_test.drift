@@ -1,4 +1,4 @@
-module mariadb.rpc.tests.unit.rpc_config_validation_test
+module mariadb.rpc.tests.unit.rpc_config_validation_test;
 
 import std.core as core;
 import mariadb.rpc as rpc;
