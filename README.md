@@ -76,65 +76,98 @@ This project uses `drift-manifest.json` to define two co-artifacts (`mariadb-wir
 - `just prepare` — resolve dependencies and write `drift-lock.json`
 - `just deploy` — build, sign, and publish both packages to `DRIFT_PKG_ROOT`
 
+### Certification Gates
+
+The workspace orchestrator treats three `just` commands as the repo's public certification interface. Each must return clean pass/fail via exit code. A repo is certification-ready only when all three gates pass.
+
+| Gate | What it validates | Compilation path |
+|------|-------------------|-----------------|
+| `just test` | Correctness and memory safety | Local source roots (fast dev loop) |
+| `just stress` | Protocol contamination under concurrency | Deployed signed `.zdmp` packages |
+| `just perf` | Wire-level performance regression | Deployed signed `.zdmp` packages |
+
+**`just stress` and `just perf` depend on `just deploy`.** They build, sign, and publish both packages before compiling test/perf scenarios against the deployed `.zdmp` artifacts. This is intentional — it exercises the real signed-package consumption path that downstream consumers use, including `.zdmp` metadata parsing, namespace trust verification, and transitive dependency resolution. A failure during the deploy/package-production phase is a certification failure.
+
+#### `just test` — correctness and safety
+
+Runs the full test suite (unit + live/e2e) under three safety modes sequentially:
+
+1. **Plain** — baseline correctness
+2. **ASAN** (`DRIFT_ASAN=1`) — address sanitizer
+3. **Memcheck** (`DRIFT_MEMCHECK=1`) — valgrind memory checking
+
+Compiles from local source roots via the manifest. No deploy step required.
+
+Preconditions:
+- `DRIFTC` is set
+- Local MariaDB instance running at `127.0.0.1:34114` with fixture schema loaded (`just db-load-schema mdb114-a`)
+
+#### `just stress` — protocol contamination stress
+
+Runs 5 concurrent stress scenarios (16 workers x 50 iterations each) against a live MariaDB instance through the real `mariadb-rpc` API:
+
+1. Connection churn (rapid connect/call/close)
+2. Pool-reuse contamination (partial consume + reset + state verification)
+3. Interleaved multi-resultset (mixed consume/skip patterns)
+4. Transaction boundary stress (commit/rollback + reset + state verification)
+5. Error path cycling (alternating success/ServerErr + connection reuse)
+
+Compiles from deployed `.zdmp` packages via `--package-root` + `--dep`.
+
+Preconditions:
+- Same as `just test`
+- `DRIFT_SIGN_KEY_FILE` is set (required by `just deploy`)
+- `drift` CLI on `PATH` (for deploy)
+
+#### `just perf` — performance regression gate
+
+Runs RPC scenarios through a wire-capture proxy, measures bytes/packets on the wire, and compares against a machine-pinned baseline. Fails if any wire metric regresses more than 5% from baseline. Fails closed if no baseline exists for this machine.
+
+Machine identity: baselines are keyed by `/etc/machine-id` for exact host pinning.
+
+- `just perf` — run scenarios and gate against baseline
+- `just perf-record-baseline` — snapshot current results as the baseline for this machine
+
+Preconditions:
+- Same as `just stress`
+- Local proxy port `127.0.0.1:34115` available
+- Baseline recorded for this machine (`perf/baselines/<machine-id>.json`)
+
+See `perf/README.md` for result format and scenario details.
+
+### Trust and Deploy Prerequisites
+
+`just stress` and `just perf` compile test code against the deployed signed packages, not local source trees. This requires:
+
+1. **Signing key** — `DRIFT_SIGN_KEY_FILE` must point to an Ed25519 key file
+2. **Deploy tooling** — `drift` CLI must be on `PATH`
+3. **Trust store** — `drift/trust.json` must exist with namespace claims for `mariadb.rpc.*` and `mariadb.wire.proto.*`
+
+The trust store (`drift/trust.json`) is checked into the repo. It maps the project's signing key to its namespace claims so that `driftc` accepts the locally-deployed packages. This is the same trust mechanism that downstream consumers use — the only difference is that consumers import trust from the published `.author-profile` instead of using a pre-populated trust store.
+
+If the trust store is missing or the signing key changes, `just stress` and `just perf` will fail at compile time with a namespace trust error. This is intentional — it validates the trust chain end-to-end.
+
 ### Build Support Flags
 
-- `DRIFT_ALLOC_TRACK=1`
-  - Enables allocator tracking instrumentation in runtime and enforces per-case leak checks when expected config requires it.
-- `DRIFT_MEMCHECK=1`
-  - For execute-time checks (`just wire-check`, `just wire-check-unit ...`), runs binaries under `valgrind --tool=memcheck`.
-- `DRIFT_MASSIF=1`
-  - For execute-time checks (`just wire-check`, `just wire-check-unit ...`), runs binaries under `valgrind --tool=massif`.
-- `DRIFT_ASAN=1`
-  - For execute-time checks, sets default `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` unless explicitly provided.
-  - Incompatible with `DRIFT_MEMCHECK` and `DRIFT_MASSIF` in the same run.
-- `DRIFT_OPTIMIZED=1`
-  - Passes `--optimized` to driftc during test compilation.
+- `DRIFT_ASAN=1` — address sanitizer (sets `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`). Incompatible with `DRIFT_MEMCHECK`/`DRIFT_MASSIF`.
+- `DRIFT_MEMCHECK=1` — runs binaries under `valgrind --tool=memcheck`
+- `DRIFT_MASSIF=1` — runs binaries under `valgrind --tool=massif`
+- `DRIFT_ALLOC_TRACK=1` — enables allocator tracking instrumentation
+- `DRIFT_OPTIMIZED=1` — passes `--optimized` to driftc
 
-### Test Recipes
+### Dev Workflows (not certification gates)
 
-All test recipes use `--manifest drift-manifest.json --artifact <name>` to derive source roots from the manifest. For co-artifact dependencies (e.g., `mariadb-rpc` depends on `mariadb-wire-proto`), the runner compiles against co-artifact source trees — not deployed `.zdmp` packages. This keeps the dev loop fast (no deploy-before-test gate) while still validating the manifest's module list. External (non-co-artifact) deps resolve through `--package-root` / `DRIFT_PACKAGE_ROOT`.
+These are lighter-weight, source-level workflows for the inner dev loop. They compile from local source roots (no deploy required) and are not part of the orchestrator's certification interface.
 
-#### Wire-proto
+#### Individual test recipes
 
-- `just wire-check` — all unit tests under `packages/mariadb-wire-proto/tests/unit`
-- `just wire-check-unit <file>` — single unit test
+All dev test recipes use `--manifest drift-manifest.json --artifact <name>` to derive source roots from the manifest. Co-artifact dependencies compile against local source trees.
+
+- `just test-unit` — unit tests only (no DB): `wire-check` + `rpc-check`
+- `just test-live` — live/e2e tests (needs DB)
+- `just wire-check` / `just wire-check-unit <file>` — wire-proto unit tests
+- `just rpc-check` / `just rpc-check-unit <file>` — RPC unit tests
 - `just wire-compile-check [file]` — compile-only check
-
-#### RPC
-
-- `just rpc-check` — all unit tests under `packages/mariadb-rpc/tests/unit`
-- `just rpc-check-unit <file>` — single unit test
-- `just rpc-check-config` — config validation unit test
-
-#### Full Test Sweep
-
-- `just test` — runs `test-unit` then `test-live`
-- `just test-unit` — unit tests only (no DB required): `wire-check`, `rpc-check`
-- `just test-live` — live/e2e tests (needs running MariaDB):
-  - `wire-smoke`, `wire-live`, `wire-live-api`, `wire-live-state`
-  - `wire-live-tx`, `wire-live-load`, `wire-live-metadata`
-  - `rpc-live-connect-state-stage`, `rpc-live-connect-state-regression`
-  - `rpc-live`
-
-Preconditions for `just test`:
-- `DRIFTC` is set.
-- For `test-live`: local MariaDB instance running (default: `mdb114-a` on `127.0.0.1:34114`) with fixture schema loaded (`just db-load-schema mdb114-a`).
-
-### Performance Baseline
-
-- `just perf`
-  - Runs a small fixed RPC baseline through the local wire-capture proxy.
-  - Writes timestamped results under `perf/results/` and updates `perf/results/latest.json`.
-  - Current scenarios cover:
-    - single-result stored procedure calls
-    - multi-result stored procedure calls
-    - stored procedure error path
-
-Preconditions for `just perf`:
-- same as `just test`
-- local proxy port `127.0.0.1:34115` available
-
-See `perf/README.md` for the result format and comparison guidance.
 
 ### Wire Capture Proxy (Fixture Generation)
 
@@ -246,12 +279,18 @@ Recommended first-run sequence on a new machine:
 ```text
 drift-manifest.json                  # package manifest (artifacts, versions, deps)
 drift-lock.json                      # resolved dependency lock (generated by drift prepare)
+drift/trust.json                     # project-local trust store (namespace claims for signing key)
 the-drift-foundation.author-profile  # publisher signing identity
 packages/
   mariadb-wire-proto/                # wire protocol package
   mariadb-rpc/                       # RPC layer package
 build/deploy/                        # deploy output (gitignored)
 tests/
+  stress/                            # stress test scenarios (certification gate)
+perf/
+  scenarios/                         # perf benchmark scenarios
+  baselines/                         # machine-keyed perf baselines (by /etc/machine-id)
+  results/                           # timestamped perf run results
 docs/
 tools/
 ```

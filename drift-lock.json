@@ -4,7 +4,7 @@
     "mariadb-rpc": {
       "resolved": {
         "mariadb-wire-proto": {
-          "version": "0.1.2",
+          "version": "0.1.3",
           "integrity": "sha256:co-artifact",
           "dep_type": "co-artifact"
         }

@@ -1,0 +1,24 @@
+{
+  "machine_id": "8bb9310c2b63494db25197f9406fc9bc",
+  "recorded_at": "2026-03-22T01:34:02.539105Z",
+  "scenarios": {
+    "rpc_single_result": {
+      "bytes_written": 715,
+      "bytes_read": 1894,
+      "packets_written": 29,
+      "packets_read": 154
+    },
+    "rpc_multi_result": {
+      "bytes_written": 740,
+      "bytes_read": 3319,
+      "packets_written": 29,
+      "packets_read": 279
+    },
+    "rpc_error": {
+      "bytes_written": 665,
+      "bytes_read": 1094,
+      "packets_written": 29,
+      "packets_read": 29
+    }
+  }
+}

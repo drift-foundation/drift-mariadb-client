@@ -1,4 +1,4 @@
-module perf.scenarios.rpc_multi_result_perf
+module perf.scenarios.rpc_multi_result_perf;
 
 import std.core as core;
 import mariadb.rpc as rpc;

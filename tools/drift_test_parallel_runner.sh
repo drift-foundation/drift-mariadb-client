@@ -156,7 +156,13 @@ if [[ -n "${MANIFEST}" ]]; then
 fi
 
 require_driftc() {
-	: "${DRIFTC:?set DRIFTC to your driftc path}"
+	# Prefer DRIFT_TOOLCHAIN_ROOT; fall back to DRIFTC for dev convenience.
+	if [[ -n "${DRIFT_TOOLCHAIN_ROOT:-}" ]]; then
+		DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
+		export DRIFTC
+	fi
+	: "${DRIFTC:?set DRIFT_TOOLCHAIN_ROOT or DRIFTC}"
+	[[ -x "${DRIFTC}" ]] || { echo "error: driftc not executable at ${DRIFTC}" >&2; exit 1; }
 }
 
 guard_jobs() {

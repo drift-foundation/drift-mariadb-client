@@ -464,3 +464,69 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
 - Final result:
   - full project test suite passes against the deployed toolchain
   - package-consumer convergence is validated for this repo with no local toolchain fallback
+
+## 2026-03-19
+
+### Package/deploy modernization
+
+- Added first-class package metadata and signing inputs:
+  - `drift-manifest.json`
+  - `drift-lock.json`
+  - `the-drift-foundation.author-profile`
+- Split the repo into two publishable co-artifacts:
+  - `mariadb-wire-proto`
+  - `mariadb-rpc`
+- Added local package lifecycle workflow:
+  - `just prepare`
+  - `just deploy`
+- Updated the test runner to derive local co-artifact source roots and external package deps from the manifest rather than hardcoded source-root wiring.
+- Added package-version tracking in the manifest for both artifacts and co-artifact dependency linkage.
+
+### Toolchain compatibility updates
+
+- Updated all Drift module declarations to current syntax with trailing `;`.
+- Added `create_connect_options()` factory helper in `mariadb-wire-proto` and updated `mariadb-rpc` to use it for cross-package compatibility on current package/toolchain rules.
+
+### Documentation
+
+- Added package/deploy workflow documentation to `README.md`.
+- Added consumer-facing integration documentation:
+  - `docs/integration-guide.md`
+
+## 2026-03-21
+
+### Certification gate standardization
+
+- Standardized the public certification surface to:
+  - `just test`
+  - `just stress`
+  - `just perf`
+- `just test` now composes:
+  - plain run
+  - `DRIFT_ASAN=1`
+  - `DRIFT_MEMCHECK=1`
+- Added RPC stress coverage in:
+  - `tests/stress/rpc_stress_test.drift`
+  - covers connection churn, pool-reuse cleanup, multi-result draining patterns, transaction-boundary cycling, and error/success contamination checks under concurrent virtual-thread load.
+- Promoted perf from informational output to certification gate:
+  - machine-keyed baselines under `perf/baselines/`
+  - fail-closed behavior on unknown machines
+  - wire-metric regression checks for bytes/packet counts
+
+### Signed-package certification path
+
+- Updated `just stress` and `just perf` to compile against deployed signed `.zdmp` packages rather than local source roots.
+- Made `just stress` and `just perf` depend on `just deploy` so certification validates the publishable package surface, not only local source behavior.
+
+### Toolchain-root contract
+
+- Updated the public certification gates to require `DRIFT_TOOLCHAIN_ROOT`.
+- Certification commands now resolve tooling exclusively from:
+  - `$DRIFT_TOOLCHAIN_ROOT/bin/drift`
+  - `$DRIFT_TOOLCHAIN_ROOT/bin/driftc`
+- Kept lighter-weight source-level workflows separate as non-certification developer paths.
+
+### Trust and deploy behavior
+
+- Documented and retained the repo trust/deploy prerequisites needed for signed-package certification flows.
+- Aligned package-consumption perf/stress workflows with exact-machine baseline enforcement using `/etc/machine-id`.
