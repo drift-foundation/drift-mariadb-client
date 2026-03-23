@@ -17,6 +17,7 @@
 module mariadb.wire.proto.tests.e2e.live_metadata_suppression_test;
 
 import std.core as core;
+import std.text as text;
 import mariadb.wire.proto as proto;
 
 const LIVE_HOST: String = "127.0.0.1";
@@ -62,9 +63,14 @@ fn scenario_single_resultset_metadata_suppressed() nothrow -> Int {
 							match ev {
 								proto.StatementEvent::Row(cells) => {
 									if cells.len != 1 { val _ = proto.close(&mut conn); return 1005; }
-									match proto.resultset_cell_text(&cells[0]) {
+									match proto.resultset_cell_bytes(&cells[0]) {
 										Optional::Some(v) => {
-											if *v != "42" { val _ = proto.close(&mut conn); return 1006; }
+											match text.utf8_from_bytes(v) {
+												core.Result::Ok(s) => {
+													if s != "42" { val _ = proto.close(&mut conn); return 1006; }
+												},
+												core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1006; }
+											}
 										},
 										Optional::None() => { val _ = proto.close(&mut conn); return 1007; }
 									}
@@ -196,9 +202,14 @@ fn scenario_ok_response_unaffected() nothrow -> Int {
 							match ev {
 								proto.StatementEvent::Row(cells) => {
 									if cells.len != 1 { val _ = proto.close(&mut conn); return 3011; }
-									match proto.resultset_cell_text(&cells[0]) {
+									match proto.resultset_cell_bytes(&cells[0]) {
 										Optional::Some(v) => {
-											if *v != "1" { val _ = proto.close(&mut conn); return 3012; }
+											match text.utf8_from_bytes(v) {
+												core.Result::Ok(s) => {
+													if s != "1" { val _ = proto.close(&mut conn); return 3012; }
+												},
+												core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3012; }
+											}
 										},
 										Optional::None() => { val _ = proto.close(&mut conn); return 3013; }
 									}

@@ -7,9 +7,9 @@
 //   anything else → resultset (column count follows)
 //
 // decode_text_row() parses a single row of the text resultset protocol:
-// each column is either NULL (0xFB marker) or a length-encoded UTF-8
-// string. Row must contain exactly column_count cells with no trailing
-// bytes.
+// each non-NULL column is stored as raw bytes (no UTF-8 validation).
+// Interpretation is deferred to accessor time.
+// Row must contain exactly column_count cells with no trailing bytes.
 //
 // decode_text_resultset_packets() is a batch decoder for pre-collected
 // packet arrays, used by fixture-replay tests. Not used in streaming
@@ -48,6 +48,16 @@ pub const RESULTSET_METADATA_FOLLOWS_FALSE: Byte = 0;
 pub const RESULTSET_METADATA_FOLLOWS_TRUE: Byte = 1;
 
 type ResultSetCell = types.ResultSetCell;
+
+fn _copy_bytes(src: &Array<Byte>) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < src.len {
+		out.push(src[i]);
+		i = i + 1;
+	}
+	return move out;
+}
 
 fn _error(tag: String, offset: Int) nothrow -> errors.PacketDecodeError {
 	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = cast<Uint>(0), server_message = "");
@@ -88,14 +98,17 @@ pub fn decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core
 			col = col + 1;
 			continue;
 		}
-		match lenenc.decode_lenenc_string_at(payload, idx) {
-			core.Result::Ok(v) => {
-				row.push(ResultSetCell::Text(v.value));
-				idx = v.next_offset;
-				col = col + 1;
-			},
+		val bytes_res = lenenc.decode_lenenc_bytes_at(payload, idx);
+		var empty: Array<Byte> = [];
+		var decoded = lenenc.LenEncBytesDecoded(value = move empty, next_offset = 0);
+		match bytes_res {
+			core.Result::Ok(v) => { decoded = move v; },
 			core.Result::Err(e) => { return core.Result::Err(e); }
 		}
+		var cell_bytes = _copy_bytes(&decoded.value);
+		idx = decoded.next_offset;
+		row.push(ResultSetCell::Value(move cell_bytes));
+		col = col + 1;
 	}
 	if idx != payload.len {
 		return core.Result::Err(_error(errors.TAG_RESULTSET_ROW_TRAILING_BYTES, idx));

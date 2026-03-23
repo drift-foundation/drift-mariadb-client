@@ -34,6 +34,7 @@ import std.core as core;
 import std.format as format;
 import std.io as io;
 import std.parse as parse;
+import std.text as text;
 import mariadb.wire.proto as wire;
 
 export {
@@ -505,9 +506,14 @@ implement RpcRow {
 		match _row_cell_ref(self, idx) {
 			core.Result::Err(e) => { return core.Result::Err(e); },
 			core.Result::Ok(cell) => {
-				match wire.resultset_cell_text(cell) {
+				match wire.resultset_cell_bytes(cell) {
 					Optional::None => { return core.Result::Err(_row_null(idx)); },
-					Optional::Some(v) => { return core.Result::Ok(_dup_string(v)); }
+					Optional::Some(v) => {
+						match text.utf8_from_bytes(v) {
+							core.Result::Ok(s) => { return core.Result::Ok(move s); },
+							core.Result::Err(_) => { return core.Result::Err(_rpc_error("rpc-row-utf8-failed", "cell is not valid UTF-8")); }
+						}
+					}
 				}
 			}
 		}
@@ -544,6 +550,26 @@ implement RpcRow {
 				match parse.parse_float(s) {
 					core.Result::Ok(v) => { return core.Result::Ok(v); },
 					core.Result::Err(e) => { return core.Result::Err(_row_parse_err("rpc-row-parse-float-failed", idx, e.offset)); }
+				}
+			}
+		}
+	}
+
+	pub fn get_bytes(self: &RpcRow, idx: Int) nothrow -> core.Result<Array<Byte>, RpcError> {
+		match _row_cell_ref(self, idx) {
+			core.Result::Err(e) => { return core.Result::Err(e); },
+			core.Result::Ok(cell) => {
+				match wire.resultset_cell_bytes(cell) {
+					Optional::None => { return core.Result::Err(_row_null(idx)); },
+					Optional::Some(v) => {
+						var out: Array<Byte> = [];
+						var i = 0;
+						while i < v.len {
+							out.push((*v)[i]);
+							i = i + 1;
+						}
+						return core.Result::Ok(move out);
+					}
 				}
 			}
 		}

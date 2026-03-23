@@ -90,7 +90,7 @@ pub struct ColumnDef {
 
 pub variant ResultSetCell {
 	Null,
-	Text(value: String)
+	Value(bytes: Array<Byte>)
 }
 
 pub struct ResultSetDecoded {

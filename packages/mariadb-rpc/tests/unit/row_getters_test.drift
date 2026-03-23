@@ -4,9 +4,26 @@ import std.core as core;
 import mariadb.rpc as rpc;
 import mariadb.wire.proto as wire;
 
+fn _string_to_bytes(s: &String) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < s.byte_length() {
+		out.push(core.string_byte_at(s, i));
+		i = i + 1;
+	}
+	return move out;
+}
+
 fn _row_one_text(v: String) nothrow -> rpc.RpcRow {
 	var cells: Array<wire.ResultSetCell> = [];
-	cells.push(wire.ResultSetCell::Text(move v));
+	var bytes = _string_to_bytes(&v);
+	cells.push(wire.ResultSetCell::Value(move bytes));
+	return rpc.RpcRow(values = move cells);
+}
+
+fn _row_one_bytes(raw: Array<Byte>) nothrow -> rpc.RpcRow {
+	var cells: Array<wire.ResultSetCell> = [];
+	cells.push(wire.ResultSetCell::Value(move raw));
 	return rpc.RpcRow(values = move cells);
 }
 
@@ -75,6 +92,41 @@ fn main() nothrow -> Int {
 	match rp.get_float(0) {
 		core.Result::Ok(_) => { return 23; },
 		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-float-failed") { return 24; } }
+	}
+
+	// get_bytes() succeeds on any non-NULL cell and returns the original raw bytes.
+	var raw_bytes: Array<Byte> = [];
+	raw_bytes.push(cast<Byte>(93));   // 0x5D
+	raw_bytes.push(cast<Byte>(255));  // 0xFF — not valid UTF-8
+	raw_bytes.push(cast<Byte>(0));    // 0x00
+	raw_bytes.push(cast<Byte>(65));   // 0x41
+	var rb = _row_one_bytes(move raw_bytes);
+	match rb.get_bytes(0) {
+		core.Result::Err(_) => { return 25; },
+		core.Result::Ok(v) => {
+			if v.len != 4 { return 26; }
+			if v[0] != cast<Byte>(93) { return 27; }
+			if v[1] != cast<Byte>(255) { return 28; }
+			if v[2] != cast<Byte>(0) { return 29; }
+			if v[3] != cast<Byte>(65) { return 30; }
+		}
+	}
+
+	// get_string() returns rpc-row-utf8-failed on non-UTF-8 raw bytes.
+	var bad_utf8: Array<Byte> = [];
+	bad_utf8.push(cast<Byte>(255));
+	bad_utf8.push(cast<Byte>(254));
+	var ru = _row_one_bytes(move bad_utf8);
+	match ru.get_string(0) {
+		core.Result::Ok(_) => { return 31; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-utf8-failed") { return 32; } }
+	}
+
+	// get_bytes() on NULL cell returns rpc-row-null.
+	var rbn = _row_one_null();
+	match rbn.get_bytes(0) {
+		core.Result::Ok(_) => { return 33; },
+		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-null") { return 34; } }
 	}
 
 	return 0;

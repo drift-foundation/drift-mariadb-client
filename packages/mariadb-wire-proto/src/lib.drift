@@ -86,7 +86,7 @@ export {
 	statement_column_defs,
 	statement_column_count,
 	resultset_cell_is_null,
-	resultset_cell_text,
+	resultset_cell_bytes,
 	DEFAULT_CHARSET_ID,
 	create_connect_options
 };
@@ -618,14 +618,15 @@ pub fn session_is_reusable(session: &WireSession) nothrow -> Bool {
 pub fn resultset_cell_is_null(cell: &ResultSetCell) nothrow -> Bool {
 	match cell {
 		ResultSetCell::Null => { return true; },
-		ResultSetCell::Text(_) => { return false; }
+		ResultSetCell::Value(_) => { return false; }
 	}
 }
 
-pub fn resultset_cell_text(cell: &ResultSetCell) nothrow -> Optional<&String> {
+// Lossless accessor — returns a reference to the raw wire bytes for any non-NULL cell.
+pub fn resultset_cell_bytes(cell: &ResultSetCell) nothrow -> Optional<&Array<Byte>> {
 	match cell {
 		ResultSetCell::Null => { return Optional::None(); },
-		ResultSetCell::Text(v) => { return Optional::Some(v); }
+		ResultSetCell::Value(v) => { return Optional::Some(v); }
 	}
 }
 

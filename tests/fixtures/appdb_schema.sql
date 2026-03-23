@@ -54,4 +54,19 @@ BEGIN
         MESSAGE_TEXT = 'sp_error forced failure';
 END//
 
+-- Binary column regression test (mariadb-rpc-binary-column-utf8 defect).
+CREATE TABLE tb_binary_test (
+  id INT PRIMARY KEY,
+  raw_key BINARY(16) NOT NULL
+)//
+
+INSERT INTO tb_binary_test (id, raw_key)
+VALUES (1, UNHEX('5D41402ABC4B2A76B9719D911017C592'))//
+
+CREATE PROCEDURE sp_get_binary(IN arg_id INT)
+READS SQL DATA
+BEGIN
+  SELECT id, raw_key FROM tb_binary_test WHERE id = arg_id;
+END//
+
 DELIMITER ;

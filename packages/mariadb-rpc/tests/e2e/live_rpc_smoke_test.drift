@@ -283,6 +283,71 @@ fn scenario_invalid_proc_name(logger: &log.Logger) nothrow -> Int {
 	}
 }
 
+// Regression: BINARY/VARBINARY columns must decode without UTF-8 error.
+// See work/mariadb-rpc-binary-column-utf8.md
+fn scenario_binary_column(logger: &log.Logger) nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { val _ = logger.error("rpc-config-build-failed", {"scenario": "binary-column", "step": "build-config"}); return 1500; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "binary-column", "step": "connect"}); return 1501; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					var args: Array<rpc.RpcArg> = [];
+					args.push(rpc.arg_int(1));
+					match conn.call(&"sp_get_binary", &args) {
+						core.Result::Err(e) => { val _ = logger.error("rpc-call-failed", {"scenario": "binary-column", "proc": "sp_get_binary", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1502; },
+						core.Result::Ok(s) => {
+							var stmt = move s;
+							var saw_row = false;
+							var bytes_ok = false;
+							while true {
+								match stmt.next_event() {
+									core.Result::Err(e) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1503; },
+									core.Result::Ok(ev) => {
+										match ev {
+											rpc.RpcEvent::Row(row) => {
+												saw_row = true;
+												// col 0: id (INT) — text
+												match row.get_int(0) {
+													core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1504; },
+													core.Result::Ok(v) => { if v != 1 { val _ = rpc.close(&mut conn); return 1505; } }
+												}
+												// col 1: raw_key (BINARY(16)) — bytes
+												match row.get_bytes(1) {
+													core.Result::Err(e) => { val _ = logger.error("rpc-get-bytes-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1506; },
+													core.Result::Ok(v) => {
+														if v.len != 16 { val _ = rpc.close(&mut conn); return 1507; }
+														// First byte should be 0x5D
+														if v[0] != cast<Byte>(93) { val _ = rpc.close(&mut conn); return 1508; }
+														bytes_ok = true;
+													}
+												}
+											},
+											rpc.RpcEvent::ResultSetEnd => {},
+											rpc.RpcEvent::ServerErr(e) => { val _ = logger.error("rpc-server-error", {"scenario": "binary-column", "msg": e.message}); val _ = rpc.close(&mut conn); return 1509; },
+											rpc.RpcEvent::StatementEnd(_) => { break; }
+										}
+									}
+								}
+							}
+							if not saw_row { val _ = rpc.close(&mut conn); return 1510; }
+							if not bytes_ok { val _ = rpc.close(&mut conn); return 1511; }
+						}
+					}
+					match conn.rollback() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1512; }
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
 fn main() nothrow -> Int {
 	val logger = _make_logger();
 	val a = scenario_ping_no_args(&logger);
@@ -295,6 +360,8 @@ fn main() nothrow -> Int {
 	if d != 0 { return d; }
 	val e = scenario_invalid_proc_name(&logger);
 	if e != 0 { return e; }
+	val f = scenario_binary_column(&logger);
+	if f != 0 { return f; }
 	val _ = logger.flush(conc.Duration(millis = 50));
 	return 0;
 }

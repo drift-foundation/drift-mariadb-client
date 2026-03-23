@@ -2,6 +2,7 @@ module mariadb.wire.proto.tests.unit.resultset_decode_test;
 
 import std.core as core;
 import mariadb.wire.proto.decode.resultset as resultset;
+import mariadb.wire.proto.types as types;
 
 fn _push_ascii(target: &mut Array<Byte>, s: String) nothrow -> Void {
 	var i = 0;
@@ -98,10 +99,72 @@ fn expect_missing_terminator_error() nothrow -> Int {
 	}
 }
 
+// Non-UTF-8 bytes must decode successfully — no eager UTF-8 validation.
+// Cells are stored as raw Value(bytes), interpretation is deferred.
+fn expect_non_utf8_bytes_decode_ok() nothrow -> Int {
+	// Row: col0 = "1" (ASCII), col1 = [0x5D 0x41 0x40 0xFF] (non-UTF-8)
+	var payload: Array<Byte> = [];
+	// col0: lenenc "1" (length=1, byte=0x31)
+	payload.push(cast<Byte>(1));
+	payload.push(cast<Byte>(49));  // '1'
+	// col1: lenenc 4 bytes including 0xFF
+	payload.push(cast<Byte>(4));
+	payload.push(cast<Byte>(93));   // 0x5D
+	payload.push(cast<Byte>(65));   // 0x41
+	payload.push(cast<Byte>(64));   // 0x40
+	payload.push(cast<Byte>(255));  // 0xFF — not valid UTF-8
+
+	match resultset.decode_text_row(&payload, 2) {
+		core.Result::Err(_) => { return 30; },  // must not fail at decode time
+		core.Result::Ok(row) => {
+			if row.len != 2 { return 31; }
+			// col0: Value with bytes [0x31]
+			match &row[0] {
+				types.ResultSetCell::Value(v) => {
+					if v.len != 1 { return 32; }
+					if (*v)[0] != cast<Byte>(49) { return 33; }
+				},
+				default => { return 34; }
+			}
+			// col1: Value with bytes [0x5D, 0x41, 0x40, 0xFF]
+			match &row[1] {
+				types.ResultSetCell::Value(v) => {
+					if v.len != 4 { return 35; }
+					if (*v)[0] != cast<Byte>(93) { return 36; }
+					if (*v)[3] != cast<Byte>(255) { return 37; }
+				},
+				default => { return 38; }
+			}
+			return 0;
+		}
+	}
+}
+
+// NULL cells must still decode as Null, not Value.
+fn expect_null_cell_preserved() nothrow -> Int {
+	var payload: Array<Byte> = [];
+	payload.push(cast<Byte>(251));  // NULL marker
+
+	match resultset.decode_text_row(&payload, 1) {
+		core.Result::Err(_) => { return 40; },
+		core.Result::Ok(row) => {
+			if row.len != 1 { return 41; }
+			match &row[0] {
+				types.ResultSetCell::Null => { return 0; },
+				default => { return 42; }
+			}
+		}
+	}
+}
+
 fn main() nothrow -> Int {
 	val a = expect_decode_basic_resultset();
 	if a != 0 { return a; }
 	val b = expect_missing_terminator_error();
 	if b != 0 { return b; }
+	val c = expect_non_utf8_bytes_decode_ok();
+	if c != 0 { return c; }
+	val d = expect_null_cell_preserved();
+	if d != 0 { return d; }
 	return 0;
 }
