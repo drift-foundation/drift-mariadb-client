@@ -530,3 +530,13 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
 
 - Documented and retained the repo trust/deploy prerequisites needed for signed-package certification flows.
 - Aligned package-consumption perf/stress workflows with exact-machine baseline enforcement using `/etc/machine-id`.
+
+## 2026-04-02
+
+### Artifact kind alignment
+
+- Updated both published artifacts in `drift-manifest.json` from legacy `kind: package` to `kind: library` to match the current toolchain lane/model terminology.
+- Bumped:
+  - `mariadb-wire-proto` to `0.1.4`
+  - `mariadb-rpc` to `0.1.4`
+- Updated the co-artifact dependency in `mariadb-rpc` to `mariadb-wire-proto@0.1.4`.
