@@ -18,7 +18,7 @@ CAPTURE_ROOT = ROOT / "perf" / "captures"
 RESULT_ROOT = ROOT / "perf" / "results"
 BASELINE_ROOT = ROOT / "perf" / "baselines"
 DEPLOY_DEST = ROOT / os.environ.get("DRIFT_PKG_ROOT", "build/deploy")
-MANIFEST_PATH = ROOT / "drift-manifest.json"
+MANIFEST_PATH = ROOT / "drift" / "manifest.json"
 TARGET_HOST = "127.0.0.1"
 TARGET_PORT = 34114
 PROXY_PORT = 34115
@@ -67,7 +67,7 @@ def _require_env(name: str) -> str:
 
 
 def _read_manifest_versions() -> dict[str, str]:
-    """Extract artifact versions from drift-manifest.json."""
+    """Extract artifact versions from drift/manifest.json."""
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     return {a["name"]: a["version"] for a in manifest.get("artifacts", [])}
 

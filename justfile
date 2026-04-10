@@ -5,14 +5,14 @@
 #   DRIFT_PKG_ROOT       — package library root for deploy/prepare (default: build/deploy)
 #   DRIFT_SIGN_KEY_FILE  — Ed25519 signing key file (required for deploy)
 
-MANIFEST := "drift-manifest.json"
+MANIFEST := "drift/manifest.json"
 DEPLOY_DEST := env("DRIFT_PKG_ROOT", "build/deploy")
-RPC_VERSION := `python3 -c "import json; m=json.load(open('drift-manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-rpc'))"`
-WIRE_VERSION := `python3 -c "import json; m=json.load(open('drift-manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-wire-proto'))"`
+RPC_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-rpc'))"`
+WIRE_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-wire-proto'))"`
 
 # --- Package lifecycle ---
 
-# Resolve dependencies and write drift-lock.json.
+# Resolve dependencies and write drift/lock.json.
 prepare:
 	#!/usr/bin/env bash
 	set -euo pipefail
