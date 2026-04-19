@@ -540,3 +540,30 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
   - `mariadb-wire-proto` to `0.1.4`
   - `mariadb-rpc` to `0.1.4`
 - Updated the co-artifact dependency in `mariadb-rpc` to `mariadb-wire-proto@0.1.4`.
+
+## 2026-04-18
+
+### Drift 0.28.x / ABI 10 toolchain readiness
+
+- Reviewed the upcoming Drift 0.28.x release line, which introduces runtime ABI 10 and reworks `Arc<Interface>` so an interface face shares the control block and refcount of the originating `Arc<Concrete>`.
+- New supported construction pattern: allocate the concrete service first, then derive the interface face from the same `Arc` allocation:
+  - `conc.arc(Concrete(...)).as_interface<type Interface>()`
+  - direct `conc.arc<type Interface>(...)` and `conc.arc(interface_value)` are now rejected with `E_ARC_OF_INTERFACE_DIRECT`.
+- Audited the repo for affected call sites: no uses of `conc.arc`, `as_interface`, `ContextResolver`, or `LoggerConfigBuilder.context_resolver`. No source migration required for either co-artifact; ABI 10 promotion is a rebuild-only change.
+
+### `std.log::config_builder` leak (regression in 0.28.0, fixed in 0.28.1)
+
+- The `just test` memcheck gate failed against staged `drift-0.28.0+abi10` with a single 24-byte `definitely lost` block attributed to `std.log::config_builder` → `drift_alloc_array`.
+- Built a minimal repro (`config_builder()` + `build()`, no sinks/levels/resolvers) and confirmed:
+  - leaks under `drift-0.28.0+abi10` (24 bytes, 1 block)
+  - clean under certified `drift-0.27.202+abi9` (same source, same valgrind invocation, 6/6 alloc/free)
+  - clean under staged `drift-0.28.1+abi10` (6/6 alloc/free, matches ABI 9 baseline)
+- Per repo defect policy, treated this as a `CORE_BUG` rather than masking it in the library. Repro bundle handed off at `/tmp/drift-log-builder-leak/` (sources, prebuilt binaries against all three toolchains, valgrind outputs, README).
+- Fix landed in staged `drift-0.28.1+abi10` (git `2a5a735d`). 0.28.0 should be skipped for promotion; 0.28.1 is the candidate.
+
+### Version bump
+
+- Bumped both published artifacts in `drift/manifest.json` to mark ABI 10 readiness:
+  - `mariadb-wire-proto` to `0.1.5`
+  - `mariadb-rpc` to `0.1.5`
+- Updated the co-artifact dependency in `mariadb-rpc` to `mariadb-wire-proto@0.1.5`.
