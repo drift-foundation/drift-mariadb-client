@@ -46,31 +46,68 @@ deploy *ARGS:
 # .zdmp packages, not local source roots. A deploy failure is a gate failure.
 
 # Certification gate: correctness and memory safety (plain + ASAN + memcheck).
+# Phase 1 (test-unit, no DB): plain + ASAN + memcheck run concurrently.
+#   Per-pass compile parallelism defaults to nproc/3 to avoid triple-stacking
+#   the compile storm; override via DRIFT_TEST_JOBS.
+# Phase 2 (test-live, shared mdb114-a): three passes serial — the DB is a
+#   shared resource and live tests mutate session/tx/metadata state.
 # Requires DRIFT_TOOLCHAIN_ROOT. Resolves driftc exclusively from the toolchain root.
 test:
 	#!/usr/bin/env bash
-	set -euo pipefail
+	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
 	export DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
 	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	just _test-plain
-	just _test-asan
-	just _test-memcheck
-
-_test-plain:
-	@echo "=== test: plain ==="
-	@just test-unit
-	@just test-live
-
-_test-asan:
-	@echo "=== test: asan ==="
-	@DRIFT_ASAN=1 just test-unit
-	@DRIFT_ASAN=1 just test-live
-
-_test-memcheck:
-	@echo "=== test: memcheck ==="
-	@DRIFT_MEMCHECK=1 just test-unit
-	@DRIFT_MEMCHECK=1 just test-live
+	: "${DRIFT_TEST_JOBS:=$(( $(nproc) / 3 ))}"
+	export DRIFT_TEST_JOBS
+	LOG_DIR="$(mktemp -d -t drift-mdb-test-XXXXXX)"
+	HB_PID=""
+	cleanup() {
+		[[ -n "${HB_PID}" ]] && kill "${HB_PID}" 2>/dev/null
+		rm -rf "${LOG_DIR}"
+	}
+	trap cleanup EXIT
+	echo "=== phase 1: test-unit — plain + asan + memcheck concurrent (DRIFT_TEST_JOBS=${DRIFT_TEST_JOBS} per pass, logs in ${LOG_DIR}) ==="
+	( just test-unit                    > "${LOG_DIR}/unit-plain.log"    2>&1 ) & pid_plain=$!
+	( DRIFT_ASAN=1     just test-unit   > "${LOG_DIR}/unit-asan.log"     2>&1 ) & pid_asan=$!
+	( DRIFT_MEMCHECK=1 just test-unit   > "${LOG_DIR}/unit-memcheck.log" 2>&1 ) & pid_memcheck=$!
+	(
+		t=0
+		while true; do
+			sleep 10
+			t=$((t+10))
+			line="[hb ${t}s]"
+			for pass in plain asan memcheck; do
+				log="${LOG_DIR}/unit-${pass}.log"
+				ran=$(grep -c '^run ' "${log}" 2>/dev/null); ran=${ran:-0}
+				last=$(tail -n 1 "${log}" 2>/dev/null)
+				line+=" ${pass}(ran=${ran}; ${last:-starting})"
+			done
+			echo "${line}"
+		done
+	) & HB_PID=$!
+	status=0
+	report() {
+		local name="$1" pid="$2"
+		if wait "${pid}"; then
+			echo "=== unit-${name} — PASS ==="
+		else
+			echo "=== unit-${name} — FAIL ==="
+			sed 's/^/[unit-'"${name}"'] /' "${LOG_DIR}/unit-${name}.log"
+			status=1
+		fi
+	}
+	report plain    "${pid_plain}"
+	report asan     "${pid_asan}"
+	report memcheck "${pid_memcheck}"
+	kill "${HB_PID}" 2>/dev/null || true
+	wait "${HB_PID}" 2>/dev/null || true
+	[[ "${status}" -ne 0 ]] && exit "${status}"
+	echo ""
+	echo "=== phase 2: test-live — serial (shared DB at 127.0.0.1:34114) ==="
+	echo "--- live: plain ---";    just test-live                    || exit 1
+	echo "--- live: asan ---";     DRIFT_ASAN=1     just test-live   || exit 1
+	echo "--- live: memcheck ---"; DRIFT_MEMCHECK=1 just test-live   || exit 1
 
 # Certification gate: RPC-level protocol contamination stress (needs DB).
 # Requires DRIFT_TOOLCHAIN_ROOT. Compiles against deployed signed .zdmp packages.
