@@ -1,12 +1,14 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "artifacts": {
     "mariadb-rpc": {
       "resolved": {
         "mariadb-wire-proto": {
-          "version": "0.2.0",
+          "version": "0.3.0",
           "sha256": "",
           "author_key": "",
+          "source_content_id": "",
+          "source_attestation_key": "",
           "dep_type": "co-artifact"
         }
       }

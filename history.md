@@ -567,3 +567,19 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
   - `mariadb-wire-proto` to `0.1.5`
   - `mariadb-rpc` to `0.1.5`
 - Updated the co-artifact dependency in `mariadb-rpc` to `mariadb-wire-proto@0.1.5`.
+
+## 2026-04-20
+
+### Drift 0.30.0 — lock v4 and source-attestation sidecars
+
+- Migrated to staged `drift-0.30.0+abi10`. ABI stays at 10 (no compiler↔runtime boundary change); the behavioral delta is on the artifact identity surface, not the runtime.
+- `drift/lock.json` schema v3 → v4: each resolved dep now carries `source_content_id` and `source_attestation_key` alongside `sha256` / `author_key`. Default consumption re-verifies both the byte half and the source half.
+- `drift deploy` now emits a `.source-attestation` sidecar next to every `.zdmp` / `.sig` / `.provenance.zst` / `.author-profile`. The same Ed25519 seed (`$DRIFT_SIGN_KEY_FILE`) signs both the `.zdmp` and the source attestation — no new key material.
+- Republished both co-artifacts under 0.30.0; sidecars verified on disk for `mariadb-wire-proto` and `mariadb-rpc`.
+- Certification gates green on 0.30.0: `just test` (plain + ASAN + memcheck), `just stress`, and `just perf` (byte/packet counts unchanged from 0.29 baseline).
+- Opt-in `--source-rebuild` mode is available in `drift build` / `drift deploy` for source-from-commit certification; not used by this repo today. Incompatible with `author_key="unsigned"` by design.
+
+### Version bump
+
+- Bumped both published artifacts in `drift/manifest.json` to `0.3.0` to mark the 0.30-era republish (net-tls pattern — minor bump marks the republish, not a behavior change).
+- Updated the co-artifact dependency range in `mariadb-rpc` to `mariadb-wire-proto@0.3`.
