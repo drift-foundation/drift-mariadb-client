@@ -34,11 +34,11 @@ export {
 	TAG_RESULTSET_MISSING_TERMINATOR
 };
 
-pub struct PacketDecodeError {
-	pub tag: String,
-	pub offset: Int,
-	pub server_error_code: Uint,
-	pub server_message: String
+pub error PacketDecodeError {
+	tag: String,
+	offset: Int,
+	server_error_code: Uint,
+	server_message: String
 }
 
 pub const TAG_HANDSHAKE_AUTH_NUL_IN_PREFIX: String = "handshake-auth-nul-in-";
@@ -60,8 +60,3 @@ pub const TAG_RESULTSET_INVALID_COLUMN_COUNT: String = "resultset-invalid-column
 pub const TAG_RESULTSET_TRUNCATED_BEFORE_ROWS: String = "resultset-truncated-before-rows";
 pub const TAG_RESULTSET_MISSING_TERMINATOR: String = "resultset-missing-terminator";
 
-implement core.Diagnostic for PacketDecodeError {
-	pub fn to_diag(self: &PacketDecodeError) nothrow -> DiagnosticValue {
-		return DiagnosticValue::String(self.tag);
-	}
-}

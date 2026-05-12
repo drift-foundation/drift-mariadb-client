@@ -4,7 +4,7 @@
     "mariadb-rpc": {
       "resolved": {
         "mariadb-wire-proto": {
-          "version": "0.3.0",
+          "version": "0.3.1",
           "sha256": "",
           "author_key": "",
           "source_content_id": "",
