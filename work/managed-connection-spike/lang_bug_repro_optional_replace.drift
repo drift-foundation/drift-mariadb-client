@@ -1,0 +1,62 @@
+// Minimal repro for LANGUAGE_BUG / CORE_BUG:
+// generic-intrinsic inference fails on mem.replace<type Optional<T> >(&mut box.x, _none())
+// when T is non-Copy. No MariaDB / no networking required.
+//
+// Toolchain: drift-0.31.76+abi14 (git e4f5d42d)
+// Filed: 2026-05-14
+
+module lang_bug_repro_optional_replace;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.mem as mem;
+
+// Non-Copy resource.
+pub struct Resource {
+	pub id: Int
+}
+
+pub struct Box {
+	pub x: Optional<Resource>
+}
+
+fn _none_resource() nothrow -> Optional<Resource> {
+	return Optional<Resource>::None();
+}
+
+// Case A — field projection through &mut Self parameter. WORKS in minimal context.
+fn take_x_direct(box: &mut Box) nothrow -> Optional<Resource> {
+	return mem.replace<type Optional<Resource> >(&mut box.x, _none_resource());
+}
+
+// Case B — same operation, but the &mut T comes from guard.get_mut() on a Mutex<Optional<Resource>>.
+// This mirrors the spike's acquire() / close_slot() pattern that's failing.
+fn take_x_via_mutex(mu: &conc.Mutex<Optional<Resource> >) nothrow -> Optional<Resource> {
+	var guard = conc.lock(mu);
+	return mem.replace<type Optional<Resource> >(guard.get_mut(), _none_resource());
+}
+
+pub fn main() nothrow -> Int {
+	// Case A
+	var b = Box(x = Optional::Some(Resource(id = 42)));
+	val taken_a = take_x_direct(&mut b);
+	match taken_a {
+		Optional::None    => { return 101; },
+		Optional::Some(r) => {
+			if r.id != 42 { return 102; }
+		}
+	}
+
+	// Case B
+	val seeded: Optional<Resource> = Optional::Some(Resource(id = 99));
+	val mu: conc.Mutex<Optional<Resource> > = conc.mutex(move seeded);
+	val taken_b = take_x_via_mutex(&mu);
+	match taken_b {
+		Optional::None    => { return 201; },
+		Optional::Some(r) => {
+			if r.id != 99 { return 202; }
+		}
+	}
+
+	return 0;
+}

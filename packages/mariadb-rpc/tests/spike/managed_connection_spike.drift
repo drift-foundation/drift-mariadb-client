@@ -1,0 +1,243 @@
+// Spike: minimal ManagedConnection prototype — prove the borrow + RAII story.
+// Throwaway code. Findings → work/managed-connection-spike/findings.md.
+//
+// Toolchain requirement: Drift >= 0.31.81.
+// Earlier versions fail with E-AUTO-9370445a ("replace expects &mut T as the
+// first argument") because mem.replace did not accept a &mut T from a named
+// binding (parameter / local / MutexGuard::get_mut() return). Fixed in 0.31.81.
+// See work/managed-connection-spike/findings.md for the case matrix.
+
+module mariadb.rpc.tests.spike.managed_connection_spike;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.mem as mem;
+import std.console as console;
+import mariadb.rpc as rpc;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+// =========================
+// Minimal slot + lease
+// =========================
+
+// Slot is the storage cell — Mutex protects it; the conn moves in/out.
+// Note: triple-nested generics need spaces between '>' to avoid '>>' / '>>>' tokens.
+pub type Slot = conc.Arc<conc.Mutex<Optional<rpc.RpcConnection> > >;
+
+pub error ManagedError {
+	tag: String,
+	message: String
+}
+
+fn _mgr_error(tag: String, message: String) nothrow -> ManagedError {
+	return ManagedError(tag = tag, message = message);
+}
+
+pub struct LeasedConn {
+	pub conn: Optional<rpc.RpcConnection>,
+	pub slot: Slot
+}
+
+implement LeasedConn {
+	// Returns Result because the type can't statically prove conn is Some,
+	// even though the invariant is "conn is Some until destroy fires."
+	pub fn conn(self: &mut LeasedConn) nothrow -> core.Result<&mut rpc.RpcConnection, ManagedError> {
+		match &mut self.conn {
+			Optional::Some(v) => { return core.Result::Ok(v); },
+			Optional::None => { return core.Result::Err(_mgr_error("managed-lease-empty", "internal invariant violation")); }
+		}
+	}
+}
+
+// Helper: type-explicit None constructor. Toolchain team's recommended
+// spelling — `Optional<T>::None()` form, parens required.
+fn _none_conn() nothrow -> Optional<rpc.RpcConnection> {
+	return Optional<rpc.RpcConnection>::None();
+}
+
+// Take the conn out of a LeasedConn — &mut self.conn IS a valid inline
+// projection (Case A pattern), so this works without the SlotCell trick.
+fn _take_conn(lease: &mut LeasedConn) nothrow -> Optional<rpc.RpcConnection> {
+	return mem.replace(&mut lease.conn, _none_conn());
+}
+
+// Put a conn back into the slot.
+fn _put_back(slot: &Slot, conn: Optional<rpc.RpcConnection>) nothrow -> Void {
+	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = slot.get();
+	var guard = conc.lock(mu_ref);
+	val _old = mem.replace(guard.get_mut(), move conn);
+	return;
+}
+
+implement core.Destructible for LeasedConn {
+	pub fn destroy(var self: LeasedConn) nothrow -> Void {
+		val taken = _take_conn(&mut self);
+		_put_back(&self.slot, move taken);
+		return;
+	}
+}
+
+// Build a fresh Slot seeded with a live connection.
+pub fn open_slot(config: rpc.RpcConnectionConfig) nothrow -> core.Result<Slot, ManagedError> {
+	match rpc.connect(move config) {
+		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag.clone())); },
+		core.Result::Ok(c) => {
+			val seeded: Optional<rpc.RpcConnection> = Optional::Some(move c);
+			val mu: conc.Mutex<Optional<rpc.RpcConnection> > = conc.mutex(move seeded);
+			return core.Result::Ok(conc.arc(move mu));
+		}
+	}
+}
+
+// Take the conn out of the slot, wrap in a LeasedConn whose destructor
+// will return the conn to the slot when the lease goes out of scope.
+pub fn acquire(slot: &Slot) nothrow -> core.Result<LeasedConn, ManagedError> {
+	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = slot.get();
+	var guard = conc.lock(mu_ref);
+	val taken = mem.replace(guard.get_mut(), _none_conn());
+	match taken {
+		Optional::None => {
+			return core.Result::Err(_mgr_error("managed-acquire-busy", "slot empty"));
+		},
+		Optional::Some(c) => {
+			val slot_clone: Slot = slot.clone();
+			return core.Result::Ok(LeasedConn(conn = Optional::Some(move c), slot = move slot_clone));
+		}
+	}
+}
+
+// Cleanup: drop any conn left in the slot (called once, at process shutdown).
+pub fn close_slot(slot: Slot) nothrow -> Void {
+	var s = move slot;
+	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = s.get();
+	var guard = conc.lock(mu_ref);
+	val taken = mem.replace(guard.get_mut(), _none_conn());
+	match taken {
+		Optional::None => {},
+		Optional::Some(c) => {
+			var conn = move c;
+			val _ = rpc.close(&mut conn);
+		}
+	}
+	return;
+}
+
+// =========================
+// Scenarios
+// =========================
+
+fn scenario_open_close() nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { return 101; },
+		core.Result::Ok(cfg) => {
+			match open_slot(move cfg) {
+				core.Result::Err(e) => {
+					val _ = console.println("[s1] open failed: " + e.tag);
+					return 102;
+				},
+				core.Result::Ok(slot) => {
+					val _ = console.println("[s1] opened");
+					close_slot(move slot);
+					val _ = console.println("[s1] closed");
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn scenario_acquire_use_release() nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { return 201; },
+		core.Result::Ok(cfg) => {
+			match open_slot(move cfg) {
+				core.Result::Err(_) => { return 202; },
+				core.Result::Ok(s) => {
+					var slot = move s;
+					// First lease: acquire, ping, drop.
+					match acquire(&slot) {
+						core.Result::Err(e) => {
+							val _ = console.println("[s2] acquire failed: " + e.tag);
+							close_slot(move slot);
+							return 203;
+						},
+						core.Result::Ok(lv) => {
+							var lease = move lv;
+							match lease.conn() {
+								core.Result::Err(_) => {
+									val _ = console.println("[s2] lease.conn() returned Err");
+								},
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Err(e) => {
+											val _ = console.println("[s2] ping failed: " + e.tag);
+										},
+										core.Result::Ok(_) => {
+											val _ = console.println("[s2] ping ok via lease #1");
+										}
+									}
+								}
+							}
+							// lease goes out of scope here → Destructible::destroy fires.
+						}
+					}
+					// Second lease: prove conn was returned to slot.
+					match acquire(&slot) {
+						core.Result::Err(e) => {
+							val _ = console.println("[s2] re-acquire failed: " + e.tag);
+							close_slot(move slot);
+							return 204;
+						},
+						core.Result::Ok(lv2) => {
+							var lease2 = move lv2;
+							match lease2.conn() {
+								core.Result::Err(_) => {},
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Ok(_) => {
+											val _ = console.println("[s2] ping ok via lease #2 (slot restored)");
+										},
+										core.Result::Err(_) => {}
+									}
+								}
+							}
+						}
+					}
+					close_slot(move slot);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val _ = console.println("=== spike: ManagedConnection (minimal) ===");
+	val a = scenario_open_close();
+	if a != 0 { return a; }
+	val b = scenario_acquire_use_release();
+	if b != 0 { return b; }
+	val _ = console.println("=== spike: minimal scenarios passed ===");
+	return 0;
+}

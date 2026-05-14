@@ -136,6 +136,21 @@ Arguments are encoded into the CALL SQL string with type-appropriate escaping:
 | `String(v)` | single-quoted with `'` doubled (`'it''s'`) |
 | `Bytes(v)` | hex literal (`0xABCD...`) |
 
+### Fixed-width binary arguments — `arg_binary_fixed`
+
+For `BINARY(N)` or `VARBINARY(N)` parameters where a length mismatch would corrupt application semantics, prefer the fail-loud helper over raw `arg_bytes`:
+
+```drift
+match rpc.arg_binary_fixed(uuid_bytes, 16) {
+    core.Result::Ok(a) => { args.push(move a); },
+    core.Result::Err(e) => { /* surface as FAILED_INVALID_PAYLOAD */ }
+}
+```
+
+Why this exists: `BINARY(N)` is fixed-width on the server. If your `Array<Byte>` has fewer than `N` bytes, MariaDB silently right-pads with `\0` and stores it under the padded value. For idempotency keys, lease owners, or any column you read back to compare, this produces a "valid-looking but wrong" key — two requests with subtly different input lengths get different stored keys, and the next request can't find the prior write. `arg_binary_fixed` rejects with `rpc-binary-length-mismatch` (message format `expected=N,got=M`) before the bytes ever reach the wire.
+
+Use `arg_bytes` directly only for variable-length binary parameters (`BLOB`, `VARBINARY` with no fixed app-side length contract).
+
 ## Proc name validation
 
 Proc names are validated to contain only `[A-Za-z0-9_]` characters. This prevents SQL injection through proc name manipulation. Names with spaces, semicolons, quotes, or other special characters are rejected with `rpc-invalid-proc-name`.
@@ -160,6 +175,42 @@ Proc names are validated to contain only `[A-Za-z0-9_]` characters. This prevent
   - one or more `conn.call(...)`
   - `conn.commit()` or `conn.rollback()`
 - Keep transactions short when calls can produce large resultsets; stream/skip aggressively.
+
+## Liveness and transport-error classification
+
+Long-lived connections need three primitives to write a clean reconnect-on-disconnect path:
+
+| Helper | Cost | Use |
+|---|---|---|
+| `conn.ping() -> Result<Void, RpcError>` | one round-trip (COM_PING / OK) | Active probe — recommended keepalive on long-lived idle conns. Failure marks the conn dead. Returns `rpc-wire-ping-failed` on error. |
+| `conn.is_alive() -> Bool` | flag check, no I/O | Returns `true` iff session is not marked dead, not closed, and has no active statement. Cheap; use to short-circuit before issuing a call. **Caveat:** does not detect silent TCP half-close (NAT timeout, cable yank) until the next syscall — for true network liveness use `ping()`. |
+| `rpc.is_transport_error(&RpcError) -> Bool` | pure | Returns `true` for any `rpc-wire-*` tag — the class for which the connection may be dead and a reconnect is the right response. Server SQL errors arrive via `RpcEvent::ServerErr`, not `RpcError`, so they never pass through here. Use as the gate in a retry-once-on-transport-error wrapper. |
+
+### Reconnect recipe (single-connection, long-lived)
+
+```drift
+match rpc.call(&mut conn, &proc_name, &args) {
+    core.Result::Ok(stmt) => { /* stream events */ },
+    core.Result::Err(e) => {
+        if rpc.is_transport_error(&e) {
+            // Drop the dead conn and rebuild from the same config.
+            val _ = rpc.close(&mut conn);
+            match rpc.connect(config) {
+                core.Result::Ok(new_conn) => { conn = move new_conn; /* retry once */ },
+                core.Result::Err(_) => { /* connect-failed: jittered exponential backoff */ }
+            }
+        } else {
+            /* config/proc-name/etc. — not retriable */
+        }
+    }
+}
+```
+
+Differentiate `rpc-wire-connect-failed` from mid-flight `rpc-wire-*` tags for backoff: the former usually indicates "we never had a conn this attempt" (DNS / firewall / server-down — longer jittered backoff); the latter means "we had a conn and lost it" (fast retry-once is reasonable).
+
+### Idle timeout
+
+The library does not emit keepalives. MariaDB's `wait_timeout` will reap idle conns; the next call surfaces as `rpc-wire-*`. For proactive keepalive on long-lived conns, call `conn.ping()` on a timer; safe cadence is `wait_timeout / 2`.
 
 ## Error model
 
@@ -192,12 +243,14 @@ Connection lifecycle:
 | `rpc-wire-rollback-failed` | `conn.rollback()` | Wire layer rollback failed |
 | `rpc-wire-reset-failed` | `conn.reset_for_pool_reuse()` | Wire layer reset failed |
 | `rpc-wire-close-failed` | `conn.close()` | Wire layer close failed |
+| `rpc-wire-ping-failed` | `conn.ping()` | Wire layer ping failed (conn marked dead) |
 
 Statement operations:
 
 | Tag | Source | When |
 |---|---|---|
 | `rpc-invalid-proc-name` | `conn.call()` | Proc name empty or has non-identifier characters |
+| `rpc-binary-length-mismatch` | `arg_binary_fixed()` | `v.len != expected_len` (message: `expected=N,got=M`) |
 | `rpc-wire-next-event-failed` | `stmt.next_event()` | Wire layer next_event failed |
 | `rpc-wire-skip-result-failed` | `stmt.skip_result()` | Wire layer skip_result failed |
 | `rpc-wire-skip-remaining-failed` | `stmt.skip_remaining()` | Wire layer skip_remaining failed |

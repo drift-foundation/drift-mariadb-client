@@ -1,0 +1,101 @@
+module mariadb.rpc.tests.unit.arg_binary_fixed_test;
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+fn _bytes_n(n: Int) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < n {
+		out.push(cast<Byte>(i % 256));
+		i = i + 1;
+	}
+	return move out;
+}
+
+fn scenario_exact_len_ok() nothrow -> Int {
+	val v = _bytes_n(16);
+	match rpc.arg_binary_fixed(move v, 16) {
+		core.Result::Err(_) => { return 101; },
+		core.Result::Ok(a) => {
+			match a {
+				rpc.RpcArg::Bytes(b) => {
+					if b.len != 16 { return 102; }
+					return 0;
+				},
+				rpc.RpcArg::Null => { return 103; },
+				rpc.RpcArg::Bool(_) => { return 104; },
+				rpc.RpcArg::Int(_) => { return 105; },
+				rpc.RpcArg::Float(_) => { return 106; },
+				rpc.RpcArg::String(_) => { return 107; }
+			}
+		}
+	}
+}
+
+fn scenario_short_input_err() nothrow -> Int {
+	val v = _bytes_n(15);
+	match rpc.arg_binary_fixed(move v, 16) {
+		core.Result::Ok(_) => { return 201; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-binary-length-mismatch" { return 202; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_long_input_err() nothrow -> Int {
+	val v = _bytes_n(17);
+	match rpc.arg_binary_fixed(move v, 16) {
+		core.Result::Ok(_) => { return 301; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-binary-length-mismatch" { return 302; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_empty_input_for_nonzero_expected_err() nothrow -> Int {
+	val v = _bytes_n(0);
+	match rpc.arg_binary_fixed(move v, 16) {
+		core.Result::Ok(_) => { return 401; },
+		core.Result::Err(e) => {
+			if e.tag != "rpc-binary-length-mismatch" { return 402; }
+			return 0;
+		}
+	}
+}
+
+fn scenario_zero_expected_with_empty_input_ok() nothrow -> Int {
+	val v = _bytes_n(0);
+	match rpc.arg_binary_fixed(move v, 0) {
+		core.Result::Err(_) => { return 501; },
+		core.Result::Ok(a) => {
+			match a {
+				rpc.RpcArg::Bytes(b) => {
+					if b.len != 0 { return 502; }
+					return 0;
+				},
+				rpc.RpcArg::Null => { return 503; },
+				rpc.RpcArg::Bool(_) => { return 504; },
+				rpc.RpcArg::Int(_) => { return 505; },
+				rpc.RpcArg::Float(_) => { return 506; },
+				rpc.RpcArg::String(_) => { return 507; }
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_exact_len_ok();
+	if a != 0 { return a; }
+	val b = scenario_short_input_err();
+	if b != 0 { return b; }
+	val c = scenario_long_input_err();
+	if c != 0 { return c; }
+	val d = scenario_empty_input_for_nonzero_expected_err();
+	if d != 0 { return d; }
+	val e = scenario_zero_expected_with_empty_input_ok();
+	if e != 0 { return e; }
+	return 0;
+}

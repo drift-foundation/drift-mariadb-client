@@ -1,0 +1,92 @@
+module mariadb.rpc.tests.unit.is_transport_error_test;
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+fn _err(tag: String) nothrow -> rpc.RpcError {
+	return rpc.RpcError(tag = move tag, message = "");
+}
+
+fn scenario_wire_connect_failed_is_transport() nothrow -> Int {
+	val e = _err("rpc-wire-connect-failed");
+	if not rpc.is_transport_error(&e) { return 101; }
+	return 0;
+}
+
+fn scenario_wire_query_failed_is_transport() nothrow -> Int {
+	val e = _err("rpc-wire-query-failed");
+	if not rpc.is_transport_error(&e) { return 201; }
+	return 0;
+}
+
+fn scenario_wire_next_event_failed_is_transport() nothrow -> Int {
+	val e = _err("rpc-wire-next-event-failed");
+	if not rpc.is_transport_error(&e) { return 301; }
+	return 0;
+}
+
+fn scenario_wire_ping_failed_is_transport() nothrow -> Int {
+	val e = _err("rpc-wire-ping-failed");
+	if not rpc.is_transport_error(&e) { return 401; }
+	return 0;
+}
+
+fn scenario_server_error_not_transport() nothrow -> Int {
+	val e = _err("rpc-server-error");
+	if rpc.is_transport_error(&e) { return 501; }
+	return 0;
+}
+
+fn scenario_row_null_not_transport() nothrow -> Int {
+	val e = _err("rpc-row-null");
+	if rpc.is_transport_error(&e) { return 601; }
+	return 0;
+}
+
+fn scenario_invalid_proc_name_not_transport() nothrow -> Int {
+	val e = _err("rpc-invalid-proc-name");
+	if rpc.is_transport_error(&e) { return 701; }
+	return 0;
+}
+
+fn scenario_binary_length_mismatch_not_transport() nothrow -> Int {
+	val e = _err("rpc-binary-length-mismatch");
+	if rpc.is_transport_error(&e) { return 801; }
+	return 0;
+}
+
+fn scenario_empty_tag_not_transport() nothrow -> Int {
+	val e = _err("");
+	if rpc.is_transport_error(&e) { return 901; }
+	return 0;
+}
+
+fn scenario_prefix_without_dash_not_transport() nothrow -> Int {
+	val e = _err("rpc-wirex-foo");
+	if rpc.is_transport_error(&e) { return 1001; }
+	return 0;
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_wire_connect_failed_is_transport();
+	if a != 0 { return a; }
+	val b = scenario_wire_query_failed_is_transport();
+	if b != 0 { return b; }
+	val c = scenario_wire_next_event_failed_is_transport();
+	if c != 0 { return c; }
+	val d = scenario_wire_ping_failed_is_transport();
+	if d != 0 { return d; }
+	val e = scenario_server_error_not_transport();
+	if e != 0 { return e; }
+	val f = scenario_row_null_not_transport();
+	if f != 0 { return f; }
+	val g = scenario_invalid_proc_name_not_transport();
+	if g != 0 { return g; }
+	val h = scenario_binary_length_mismatch_not_transport();
+	if h != 0 { return h; }
+	val i = scenario_empty_tag_not_transport();
+	if i != 0 { return i; }
+	val j = scenario_prefix_without_dash_not_transport();
+	if j != 0 { return j; }
+	return 0;
+}

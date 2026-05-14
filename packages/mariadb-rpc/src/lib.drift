@@ -58,6 +58,7 @@ export {
 	arg_float,
 	arg_string,
 	arg_bytes,
+	arg_binary_fixed,
 	connect,
 	close,
 	next_event,
@@ -66,7 +67,10 @@ export {
 	set_autocommit,
 	commit,
 	rollback,
-	reset_for_pool_reuse
+	reset_for_pool_reuse,
+	ping,
+	is_alive,
+	is_transport_error
 };
 
 // write_timeout_ms: reserved. Wire layer uses one io_timeout_ms for reads and
@@ -338,6 +342,18 @@ pub fn arg_float(v: Float) nothrow -> RpcArg { return RpcArg::Float(v); }
 pub fn arg_string(v: String) nothrow -> RpcArg { return RpcArg::String(move v); }
 pub fn arg_bytes(v: Array<Byte>) nothrow -> RpcArg { return RpcArg::Bytes(move v); }
 
+// Fixed-width binary argument helper for BINARY(N) / VARBINARY(N) parameters
+// where silent length divergence is hazardous. Returns Err with tag
+// "rpc-binary-length-mismatch" if v.len != expected_len, instead of letting
+// the server right-pad with \0 (BINARY(N)) and produce a wrong-but-valid key.
+// Typical use: passing a 16-byte UUID to a BINARY(16) idempotency column.
+pub fn arg_binary_fixed(v: Array<Byte>, expected_len: Int) nothrow -> core.Result<RpcArg, RpcError> {
+	if v.len != expected_len {
+		return core.Result::Err(_rpc_error("rpc-binary-length-mismatch", "expected=" + format.format_int(expected_len) + ",got=" + format.format_int(v.len)));
+	}
+	return core.Result::Ok(RpcArg::Bytes(move v));
+}
+
 // Execute a SQL statement via wire.query and drain to StatementEnd.
 // Any ServerErr is mapped to rpc-server-error. Used for internal
 // commands (SET NAMES) that must succeed cleanly.
@@ -480,6 +496,24 @@ implement RpcConnection {
 			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-close-failed", _dup_string(&e.tag))); }
 		}
 	}
+
+	// Active liveness probe: sends COM_PING and waits for OK. On failure the
+	// wire layer marks the session dead, so a subsequent is_alive() returns
+	// false and the next call returns rpc-wire-* without an extra syscall.
+	pub fn ping(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+		match wire.ping(&mut self.wire_session) {
+			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-ping-failed", _dup_string(&e.tag))); }
+		}
+	}
+
+	// Flag check, no I/O. Returns true iff the session has not been marked
+	// dead, is not closed, and has no active statement. Caveat: a TCP half-
+	// close (NAT timeout, cable yank) leaves is_alive() returning true until
+	// the next syscall discovers the EOF — use ping() for an active probe.
+	pub fn is_alive(self: &RpcConnection) nothrow -> Bool {
+		return wire.session_is_reusable(&self.wire_session);
+	}
 }
 
 implement RpcRow {
@@ -602,3 +636,14 @@ pub fn commit(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
 pub fn rollback(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.rollback(); }
 pub fn reset_for_pool_reuse(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.reset_for_pool_reuse(); }
 pub fn close(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.close(); }
+pub fn ping(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.ping(); }
+pub fn is_alive(conn: &RpcConnection) nothrow -> Bool { return conn.is_alive(); }
+
+// Classifies an RpcError as a transport/protocol failure (rpc-wire-*) for
+// which the conn may be dead and a reconnect+retry is the right response.
+// Server-level errors arrive via RpcEvent::ServerErr, not RpcError, so they
+// never pass through here. Config-time and row-getter tags also return false.
+pub fn is_transport_error(e: &RpcError) nothrow -> Bool {
+	val prefix = "rpc-wire-";
+	return text.starts_with(&e.tag, &prefix);
+}

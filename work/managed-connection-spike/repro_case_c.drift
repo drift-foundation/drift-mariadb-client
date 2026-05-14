@@ -1,0 +1,32 @@
+module repro_case_c;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.mem as mem;
+
+pub struct Resource { pub id: Int }
+
+fn _none_resource() nothrow -> Optional<Resource> {
+	return Optional<Resource>::None();
+}
+
+// Helper takes &mut Optional<Resource> directly — explicit parameter type.
+fn _take_from_slot(slot_mut: &mut Optional<Resource>) nothrow -> Optional<Resource> {
+	return mem.replace<type Optional<Resource> >(slot_mut, _none_resource());
+}
+
+// Case C — pass guard.get_mut() to a helper with explicit &mut Optional<T> parameter.
+fn take_x_via_helper(mu: &conc.Mutex<Optional<Resource> >) nothrow -> Optional<Resource> {
+	var guard = conc.lock(mu);
+	return _take_from_slot(guard.get_mut());
+}
+
+pub fn main() nothrow -> Int {
+	val seeded: Optional<Resource> = Optional::Some(Resource(id = 77));
+	val mu: conc.Mutex<Optional<Resource> > = conc.mutex(move seeded);
+	val taken = take_x_via_helper(&mu);
+	match taken {
+		Optional::Some(r) => { return r.id; },
+		Optional::None    => { return -1; }
+	}
+}
