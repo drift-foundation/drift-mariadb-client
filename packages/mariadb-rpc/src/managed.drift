@@ -1,0 +1,394 @@
+// Managed-connection layer on top of mariadb.rpc.
+//
+// Scope (deliberately narrow):
+//   - Hand out leases on a single live RpcConnection (single-conn v1; a
+//     ConnectionPool can implement the same ConnectionSource interface later).
+//   - Run an autonomous keepalive that pings on a timer and reconnects on
+//     failure — including DNS re-resolution, so a DB host moved to a new IP
+//     during maintenance is recovered without app involvement.
+//
+// Out of scope:
+//   - Call-error retry / business-level disconnect interpretation. Callers
+//     (or Microflows above them) decide what to do with an RpcError from a
+//     call. The wrapper never inspects or replays calls.
+//
+// Concurrency model:
+//   - `slot: conc.Mutex<Optional<RpcConnection>>` is the storage cell.
+//   - The conn MOVES out of the slot on acquire (slot becomes None), and
+//     MOVES BACK on release (LeasedConn::destroy). The mutex is held only
+//     for the moment of transition — never for the duration of a lease.
+//   - Background keepalive runs on a virtual thread parked on `conc.sleep`.
+//     `close()` calls `vt.cancel()` to unpark immediately rather than
+//     waiting for the next tick.
+//
+// Release semantics:
+//   - There is NO public release() / drop() function. The only path to
+//     return a leased conn is `LeasedConn::destroy` firing when the value
+//     goes out of scope. Forgetting to release is structurally impossible.
+module mariadb.rpc.managed;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.sync as sync;
+import std.mem as mem;
+import mariadb.rpc as rpc;
+
+export {
+	ManagedConfig,
+	ManagedEvent,
+	ManagedError,
+	ManagedConnection,
+	LeasedConn,
+	ConnectionSource,
+	default_managed_config,
+	open
+};
+
+// -----------------------------------------------------------------------
+// Public types
+// -----------------------------------------------------------------------
+
+pub error ManagedError {
+	tag: String,
+	message: String
+}
+
+pub variant ManagedEvent {
+	KeepalivePingOk,
+	KeepalivePingFailed(ping_failed_tag: String),
+	ReconnectAttempt(attempt_attempt: Int),
+	ReconnectSucceeded(succeeded_attempt: Int),
+	ReconnectFailed(failed_attempt: Int, failed_tag: String)
+}
+
+pub struct ManagedConfig {
+	pub keepalive_interval_ms: Int,
+	pub reconnect_backoff_initial_ms: Int,
+	pub reconnect_backoff_max_ms: Int,
+	pub reconnect_backoff_jitter_pct: Int,
+	pub event_sink: Optional<core.Callback1<ManagedEvent, Void> >
+}
+
+pub fn default_managed_config() nothrow -> ManagedConfig {
+	return ManagedConfig(
+		keepalive_interval_ms = 30000,
+		reconnect_backoff_initial_ms = 1000,
+		reconnect_backoff_max_ms = 16000,
+		reconnect_backoff_jitter_pct = 25,
+		event_sink = Optional::None<type core.Callback1<ManagedEvent, Void> >()
+	);
+}
+
+// -----------------------------------------------------------------------
+// Internal shared state
+// -----------------------------------------------------------------------
+
+pub struct ManagedInner {
+	pub slot: conc.Mutex<Optional<rpc.RpcConnection> >,
+	pub config: rpc.RpcConnectionConfig,
+	pub mc_config: ManagedConfig,
+	pub stop_flag: conc.AtomicBool
+}
+
+// -----------------------------------------------------------------------
+// LeasedConn — RAII handle owning the conn during a lease.
+// -----------------------------------------------------------------------
+
+pub struct LeasedConn {
+	pub conn: Optional<rpc.RpcConnection>,
+	pub inner: conc.Arc<ManagedInner>
+}
+
+implement LeasedConn {
+	// Returns Result because the type system can't statically prove conn is
+	// Some, even though the invariant is "conn is Some until destroy fires."
+	pub fn conn(self: &mut LeasedConn) nothrow -> core.Result<&mut rpc.RpcConnection, ManagedError> {
+		match &mut self.conn {
+			Optional::Some(v) => { return core.Result::Ok(v); },
+			Optional::None => { return core.Result::Err(_mgr_error("managed-lease-empty", "internal invariant violation")); }
+		}
+	}
+}
+
+implement core.Destructible for LeasedConn {
+	pub fn destroy(var self: LeasedConn) nothrow -> Void {
+		val taken = mem.replace(&mut self.conn, Optional<rpc.RpcConnection>::None());
+		val inner_ref: &ManagedInner = self.inner.get();
+		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+		var guard = conc.lock(mu_ref);
+		val _old = mem.replace(guard.get_mut(), move taken);
+		return;
+	}
+}
+
+// -----------------------------------------------------------------------
+// ConnectionSource interface — substitutable across ManagedConnection
+// (now) and a future ConnectionPool. Keep fixed-signature only; generic
+// methods stay on concrete types per compiler-team guidance.
+// -----------------------------------------------------------------------
+
+pub interface ConnectionSource {
+	fn acquire(self: &mut Self) nothrow -> core.Result<LeasedConn, ManagedError>;
+	fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
+}
+
+// -----------------------------------------------------------------------
+// ManagedConnection — single-conn implementation of ConnectionSource.
+// -----------------------------------------------------------------------
+
+pub struct ManagedConnection {
+	pub inner: conc.Arc<ManagedInner>,
+	pub keepalive_vt: Optional<conc.VirtualThread<Int> >
+}
+
+implement ConnectionSource for ManagedConnection {
+	pub fn acquire(self: &mut ManagedConnection) nothrow -> core.Result<LeasedConn, ManagedError> {
+		val inner_ref: &ManagedInner = self.inner.get();
+		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+		var guard = conc.lock(mu_ref);
+		val taken = mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
+		match taken {
+			Optional::None => {
+				return core.Result::Err(_mgr_error("managed-acquire-busy", "slot empty (keepalive in flight or no live conn)"));
+			},
+			Optional::Some(c) => {
+				val inner_clone: conc.Arc<ManagedInner> = self.inner.clone();
+				return core.Result::Ok(LeasedConn(conn = Optional::Some(move c), inner = move inner_clone));
+			}
+		}
+	}
+
+	pub fn close(self: &mut ManagedConnection) nothrow -> core.Result<Void, ManagedError> {
+		// Belt: signal stop.
+		val inner_ref: &ManagedInner = self.inner.get();
+		val flag_ref: &conc.AtomicBool = &inner_ref.stop_flag;
+		flag_ref.store(true, sync.MemoryOrder::Release());
+		// Suspenders: cancel the sleeping VT so it unparks immediately.
+		val vt_taken = mem.replace(&mut self.keepalive_vt, Optional<conc.VirtualThread<Int> >::None());
+		match vt_taken {
+			Optional::None => {},
+			Optional::Some(v) => {
+				var vt = move v;
+				vt.cancel();
+				val _ = vt.join();
+			}
+		}
+		// Close any conn left in the slot.
+		val inner_ref2: &ManagedInner = self.inner.get();
+		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref2.slot;
+		var guard = conc.lock(mu_ref);
+		val taken = mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
+		match taken {
+			Optional::None => {},
+			Optional::Some(c) => {
+				var conn = move c;
+				val _ = rpc.close(&mut conn);
+			}
+		}
+		return core.Result::Ok(core.void_value());
+	}
+}
+
+// -----------------------------------------------------------------------
+// Construction
+// -----------------------------------------------------------------------
+
+pub fn open(rpc_config: rpc.RpcConnectionConfig, mc_config: ManagedConfig) nothrow -> core.Result<ManagedConnection, ManagedError> {
+	// Seed the slot with one live conn.
+	val seed_cfg = _clone_cfg(&rpc_config);
+	match rpc.connect(move seed_cfg) {
+		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag.clone())); },
+		core.Result::Ok(c) => {
+			val seeded: Optional<rpc.RpcConnection> = Optional::Some(move c);
+			val slot: conc.Mutex<Optional<rpc.RpcConnection> > = conc.mutex(move seeded);
+			val stop: conc.AtomicBool = conc.atomic_bool(false);
+			val inner = ManagedInner(
+				slot = move slot,
+				config = move rpc_config,
+				mc_config = move mc_config,
+				stop_flag = move stop
+			);
+			var inner_arc: conc.Arc<ManagedInner> = conc.arc(move inner);
+			// Closure construction isolated in a helper to dodge a Drift v1
+			// SSA "load before store" panic when the same function both
+			// captures and later moves the same Arc binding.
+			val vt: conc.VirtualThread<Int> = _spawn_keepalive(inner_arc.clone());
+			val vt_opt: Optional<conc.VirtualThread<Int> > = Optional::Some(move vt);
+			return core.Result::Ok(ManagedConnection(
+				inner = move inner_arc,
+				keepalive_vt = move vt_opt
+			));
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
+// Keepalive thread spawn — isolated helper.
+// -----------------------------------------------------------------------
+
+fn _spawn_keepalive(inner_for_thread: conc.Arc<ManagedInner>) nothrow -> conc.VirtualThread<Int> {
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move inner_for_thread) => { return _keepalive_loop(move inner_for_thread); });
+	return conc.spawn(move cb);
+}
+
+// -----------------------------------------------------------------------
+// Keepalive loop — virtual thread parked on conc.sleep between ticks.
+// -----------------------------------------------------------------------
+
+fn _keepalive_loop(inner: conc.Arc<ManagedInner>) nothrow -> Int {
+	val interval_ms = _inner_keepalive_ms(&inner);
+	if interval_ms <= 0 { return 0; }  // caller opted out of keepalive
+	var attempt_num = 0;
+	while not _inner_stop_flag(&inner) {
+		// Park until the timer fires OR close() cancels us.
+		match conc.sleep(conc.Duration(millis = interval_ms)) {
+			core.Result::Err(_) => { return 0; },
+			core.Result::Ok(_) => {}
+		}
+		if _inner_stop_flag(&inner) {
+			return 0;
+		}
+		// Try to take the conn for a ping. Skip if currently leased.
+		val taken = _slot_take(&inner);
+		match taken {
+			Optional::None => {
+				// Lease holds the conn — skip this tick.
+			},
+			Optional::Some(c) => {
+				var conn = move c;
+				match rpc.ping(&mut conn) {
+					core.Result::Ok(_) => {
+						_emit(&inner, ManagedEvent::KeepalivePingOk());
+						_slot_put(&inner, Optional::Some(move conn));
+					},
+					core.Result::Err(e) => {
+						_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag.clone()));
+						val _ = rpc.close(&mut conn);
+						attempt_num = _reconnect_with_backoff(&inner, attempt_num);
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+// Reconnect loop — runs until success or stop_flag flips. Returns the
+// updated attempt counter so the keepalive loop can keep track.
+fn _reconnect_with_backoff(inner: &conc.Arc<ManagedInner>, prior_attempts: Int) nothrow -> Int {
+	var attempt = prior_attempts;
+	var delay_ms = _inner_backoff_initial_ms(inner);
+	val max_ms = _inner_backoff_max_ms(inner);
+	while not _inner_stop_flag(inner) {
+		attempt = attempt + 1;
+		_emit(inner, ManagedEvent::ReconnectAttempt(attempt_attempt = attempt));
+		val fresh_cfg = _inner_clone_config(inner);
+		match rpc.connect(move fresh_cfg) {
+			core.Result::Ok(new_conn) => {
+				_emit(inner, ManagedEvent::ReconnectSucceeded(succeeded_attempt = attempt));
+				_slot_put(inner, Optional::Some(move new_conn));
+				return attempt;
+			},
+			core.Result::Err(e) => {
+				_emit(inner, ManagedEvent::ReconnectFailed(failed_attempt = attempt, failed_tag = e.tag.clone()));
+				match conc.sleep(conc.Duration(millis = delay_ms)) {
+					core.Result::Err(_) => { return attempt; },  // cancelled mid-backoff
+					core.Result::Ok(_) => {}
+				}
+				delay_ms = delay_ms * 2;
+				if delay_ms > max_ms { delay_ms = max_ms; }
+			}
+		}
+	}
+	return attempt;
+}
+
+// -----------------------------------------------------------------------
+// Internal helpers
+// -----------------------------------------------------------------------
+
+fn _mgr_error(tag: String, message: String) nothrow -> ManagedError {
+	return ManagedError(tag = tag, message = message);
+}
+
+fn _emit(inner: &conc.Arc<ManagedInner>, event: ManagedEvent) nothrow -> Void {
+	val inner_ref: &ManagedInner = inner.get();
+	val mc_ref: &ManagedConfig = &inner_ref.mc_config;
+	val sink_ref: &Optional<core.Callback1<ManagedEvent, Void> > = &mc_ref.event_sink;
+	match sink_ref {
+		Optional::None => {},
+		Optional::Some(cb) => { cb.call(event); }
+	}
+	return;
+}
+
+// -----------------------------------------------------------------------
+// Projection helpers — bind &ManagedInner first, then project to fields.
+// Drift v1 doesn't auto-borrow through chained `arc.get().field` access
+// for non-Copy fields; these helpers contain the workaround in one place.
+// -----------------------------------------------------------------------
+
+fn _inner_stop_flag(inner: &conc.Arc<ManagedInner>) nothrow -> Bool {
+	val inner_ref: &ManagedInner = inner.get();
+	val flag_ref: &conc.AtomicBool = &inner_ref.stop_flag;
+	return flag_ref.load(sync.MemoryOrder::Acquire());
+}
+
+fn _inner_keepalive_ms(inner: &conc.Arc<ManagedInner>) nothrow -> Int {
+	val inner_ref: &ManagedInner = inner.get();
+	val mc_ref: &ManagedConfig = &inner_ref.mc_config;
+	return mc_ref.keepalive_interval_ms;
+}
+
+fn _inner_backoff_initial_ms(inner: &conc.Arc<ManagedInner>) nothrow -> Int {
+	val inner_ref: &ManagedInner = inner.get();
+	val mc_ref: &ManagedConfig = &inner_ref.mc_config;
+	return mc_ref.reconnect_backoff_initial_ms;
+}
+
+fn _inner_backoff_max_ms(inner: &conc.Arc<ManagedInner>) nothrow -> Int {
+	val inner_ref: &ManagedInner = inner.get();
+	val mc_ref: &ManagedConfig = &inner_ref.mc_config;
+	return mc_ref.reconnect_backoff_max_ms;
+}
+
+fn _inner_clone_config(inner: &conc.Arc<ManagedInner>) nothrow -> rpc.RpcConnectionConfig {
+	val inner_ref: &ManagedInner = inner.get();
+	val cfg_ref: &rpc.RpcConnectionConfig = &inner_ref.config;
+	return _clone_cfg(cfg_ref);
+}
+
+fn _slot_take(inner: &conc.Arc<ManagedInner>) nothrow -> Optional<rpc.RpcConnection> {
+	val inner_ref: &ManagedInner = inner.get();
+	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+	var guard = conc.lock(mu_ref);
+	return mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
+}
+
+fn _slot_put(inner: &conc.Arc<ManagedInner>, value: Optional<rpc.RpcConnection>) nothrow -> Void {
+	val inner_ref: &ManagedInner = inner.get();
+	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+	var guard = conc.lock(mu_ref);
+	val _old = mem.replace(guard.get_mut(), move value);
+	return;
+}
+
+// Manual clone of RpcConnectionConfig — required for reconnect since
+// rpc.connect consumes the config. String fields are refcounted, so each
+// clone is O(1) (per project_drift_array_string_repr memory).
+fn _clone_cfg(c: &rpc.RpcConnectionConfig) nothrow -> rpc.RpcConnectionConfig {
+	return rpc.RpcConnectionConfig(
+		host = c.host.clone(),
+		port = c.port,
+		user = c.user.clone(),
+		password = c.password.clone(),
+		database = c.database.clone(),
+		connect_timeout_ms = c.connect_timeout_ms,
+		read_timeout_ms = c.read_timeout_ms,
+		write_timeout_ms = c.write_timeout_ms,
+		autocommit = c.autocommit,
+		strict_reuse = c.strict_reuse,
+		charset = c.charset.clone(),
+		collation = c.collation.clone()
+	);
+}

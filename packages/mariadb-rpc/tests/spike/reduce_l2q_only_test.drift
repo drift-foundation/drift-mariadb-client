@@ -1,0 +1,55 @@
+// L2q ONLY — fresh state, no prior scenarios.
+// Does a single SELECT 1 query on a wire.session trigger the bug?
+
+module mariadb.rpc.tests.spike.reduce_l2q_only;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import mariadb.wire.proto as wire;
+
+const HOST: String = "127.0.0.1";
+const PORT: Int = 34114;
+const USER: String = "root";
+const PASSWORD: String = "rootpw";
+const DB: String = "appdb";
+const TIMEOUT_MS: Int = 1000;
+
+fn main() nothrow -> Int {
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(_) => { return 1; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			val sql = "SELECT 1";
+			match wire.query(&mut session, &sql) {
+				core.Result::Err(_) => { val _ = wire.close(&mut session); return 2; },
+				core.Result::Ok(stv) => {
+					var stmt = move stv;
+					var done = false;
+					while not done {
+						match wire.next_event(&mut stmt) {
+							core.Result::Err(_) => { done = true; },
+							core.Result::Ok(ev) => {
+								match ev {
+									wire.StatementEvent::Row(_) => {},
+									wire.StatementEvent::ResultSetEnd => {},
+									wire.StatementEvent::StatementEnd(_) => { done = true; },
+									wire.StatementEvent::StatementErr(_) => { done = true; }
+								}
+							}
+						}
+					}
+				}
+			}
+			console.println("query drained");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			console.println("sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t)));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}

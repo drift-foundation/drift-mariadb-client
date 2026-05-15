@@ -278,6 +278,12 @@ rpc-live-connect-state-stage:
 	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift \
 	  --target-word-bits 64
 
+rpc-live-managed:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
+	  --target-word-bits 64
+
 # --- Local MariaDB dev instances ---
 
 db-create INSTANCE HOST_PORT="" IMAGE="mariadb:11.4":

@@ -210,7 +210,105 @@ Differentiate `rpc-wire-connect-failed` from mid-flight `rpc-wire-*` tags for ba
 
 ### Idle timeout
 
-The library does not emit keepalives. MariaDB's `wait_timeout` will reap idle conns; the next call surfaces as `rpc-wire-*`. For proactive keepalive on long-lived conns, call `conn.ping()` on a timer; safe cadence is `wait_timeout / 2`.
+`RpcConnection` itself does not emit keepalives. MariaDB's `wait_timeout` will reap idle conns; the next call surfaces as `rpc-wire-*`. For proactive keepalive on long-lived conns, either call `conn.ping()` on a timer yourself or use **`mariadb.rpc.managed`** (next section), which handles the lifecycle for you.
+
+## Managed connection (`mariadb.rpc.managed`)
+
+For long-lived single connections that need autonomous keepalive and DNS-remap recovery, the `mariadb.rpc.managed` module wraps `RpcConnection` and hands out leases.
+
+```drift
+import mariadb.rpc.managed as managed;
+
+var mc_cfg = managed.default_managed_config();
+mc_cfg.keepalive_interval_ms = 30000;  // ping every 30s; 0 disables
+
+match managed.open(rpc_config, move mc_cfg) {
+    core.Result::Err(e) => { /* handle open failure */ },
+    core.Result::Ok(v) => {
+        var mc = move v;
+        match mc.acquire() {
+            core.Result::Ok(lv) => {
+                var lease = move lv;
+                match lease.conn() {
+                    core.Result::Ok(c) => {
+                        // c: &mut RpcConnection — exclusive use during the lease.
+                        // No lock held; the conn was MOVED out of the wrapper's slot.
+                        rpc.call(c, &"sp_my_proc", &args)
+                    },
+                    core.Result::Err(_) => { /* internal invariant — unreachable in practice */ }
+                }
+                // lease drops here → Destructible::destroy fires and returns
+                // the conn to the wrapper's slot. There is no release() method.
+            },
+            core.Result::Err(_) => { /* slot busy: lease in flight or keepalive ticking */ }
+        }
+        val _ = mc.close();
+    }
+}
+```
+
+### Model
+
+- **Lease-based borrow.** `mc.acquire()` returns a `LeasedConn` that owns the underlying `RpcConnection` for the duration of the lease. Multiple sequential calls can run on the same lease — the single-active-statement rule still applies per call.
+- **RAII release only.** `LeasedConn` has no `release()` method. The only way to return the conn is to let the value go out of scope; `Destructible::destroy` puts it back in the wrapper's slot. You can't forget to release.
+- **Mutex protects the storage slot, not the lease.** The internal `Mutex<Optional<RpcConnection>>` is held only at acquire/release transition points — milliseconds, not the lease duration. A streaming statement that runs for minutes does not monopolize any lock.
+- **Autonomous keepalive thread.** When `keepalive_interval_ms > 0`, `managed.open()` spawns a virtual thread that periodically tries to take the conn from the slot, `ping`s it, and puts it back. On ping failure it drops the dead conn and calls `rpc.connect(config)` again — which **re-resolves DNS**, so a DB host migrated to a new IP during maintenance is recovered without app involvement. Keepalive ticks fire `ManagedEvent::KeepalivePingOk` / `KeepalivePingFailed` events through the optional `event_sink`.
+- **Reconnect-on-failure with jittered exponential backoff.** Configured via `ManagedConfig`. Continues retrying until success or `close()`.
+
+### `ConnectionSource` interface
+
+`ManagedConnection` implements a fixed-signature `pub interface ConnectionSource`:
+
+```drift
+pub interface ConnectionSource {
+    fn acquire(self: &mut Self) nothrow -> core.Result<LeasedConn, ManagedError>;
+    fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
+}
+```
+
+Callers can depend on `ConnectionSource` rather than the concrete `ManagedConnection` type. A future `ConnectionPool` would implement the same interface — switching from one connection to N is a constructor-line change at the call site, not a refactor.
+
+### What the wrapper does NOT do
+
+- **Does not interpret call errors.** If a `rpc.call(...)` inside a lease returns `RpcError`, it goes straight to the caller. The wrapper does not auto-retry, does not classify "retriable vs not", does not silence anything. Business-level retry policy is the caller's problem (or their orchestration layer's).
+- **Does not validate result semantics.** The wrapper holds a conn live; what the caller does with it is between them and MariaDB.
+- **Does not provide a connection pool.** v1 is single-conn. A pool is planned as a separate `ConnectionSource` implementation; until then, run multiple `ManagedConnection`s if you need parallelism.
+
+### `ManagedConfig` defaults
+
+```drift
+pub struct ManagedConfig {
+    pub keepalive_interval_ms: Int,        // default 30000 (30s; 0 disables)
+    pub reconnect_backoff_initial_ms: Int, // default 1000
+    pub reconnect_backoff_max_ms: Int,     // default 16000
+    pub reconnect_backoff_jitter_pct: Int, // default 25
+    pub event_sink: Optional<core.Callback1<ManagedEvent, Void> >  // default None
+}
+```
+
+Pick `keepalive_interval_ms` based on the server's `wait_timeout` — half of it is a safe floor. Set to `0` for short-lived connections where the wrapper is only buying you the RAII lease shape.
+
+### Events
+
+```drift
+pub variant ManagedEvent {
+    KeepalivePingOk,
+    KeepalivePingFailed(ping_failed_tag: String),
+    ReconnectAttempt(attempt_attempt: Int),
+    ReconnectSucceeded(succeeded_attempt: Int),
+    ReconnectFailed(failed_attempt: Int, failed_tag: String)
+}
+```
+
+Install a `core.Callback1<ManagedEvent, Void>` via `ManagedConfig.event_sink` to observe these. The callback fires on the keepalive virtual thread; if it shares state with the main thread, protect it via `conc.Arc<conc.Mutex<...>>`.
+
+### ManagedError tags
+
+| Tag | When |
+|---|---|
+| `managed-open-connect-failed` | Initial `rpc.connect` inside `open()` failed |
+| `managed-acquire-busy` | `acquire()` found the slot empty (lease in flight or keepalive ticking) |
+| `managed-lease-empty` | Internal invariant violation in `LeasedConn::conn()` — should not happen in normal use |
 
 ## Error model
 

@@ -1,0 +1,46 @@
+module mariadb.rpc.tests.spike.repro_keepalive_with_rpc_import;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.sync as sync;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+
+pub struct Counter { pub n: Int }
+
+fn _loop(c: conc.Arc<conc.Mutex<Counter> >, stop: conc.Arc<conc.AtomicBool>) nothrow -> Int {
+	while not stop.get().load(sync.MemoryOrder::Acquire()) {
+		match conc.sleep(conc.Duration(millis = 100)) {
+			core.Result::Err(_) => { return 0; },
+			core.Result::Ok(_) => {}
+		}
+		if stop.get().load(sync.MemoryOrder::Acquire()) { return 0; }
+		val mu_ref: &conc.Mutex<Counter> = c.get();
+		var guard = conc.lock(mu_ref);
+		val state = guard.get_mut();
+		state.n = state.n + 1;
+	}
+	return 0;
+}
+
+fn _spawn(c: conc.Arc<conc.Mutex<Counter> >, stop: conc.Arc<conc.AtomicBool>) nothrow -> conc.VirtualThread<Int> {
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move c, move stop) => { return _loop(move c, move stop); });
+	return conc.spawn(move cb);
+}
+
+fn main() nothrow -> Int {
+	var counter: conc.Arc<conc.Mutex<Counter> > = conc.arc(conc.mutex(Counter(n = 0)));
+	var stop: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
+	var vt: conc.VirtualThread<Int> = _spawn(counter.clone(), stop.clone());
+	val _ = conc.sleep(conc.Duration(millis = 550));
+	stop.get().store(true, sync.MemoryOrder::Release());
+	vt.cancel();
+	val _ = vt.join();
+	val mu_ref: &conc.Mutex<Counter> = counter.get();
+	var guard = conc.lock(mu_ref);
+	val state = guard.get_mut();
+	val seen = state.n;
+	val _ = console.println("seen=" + format.format_int(seen));
+	return seen;
+}

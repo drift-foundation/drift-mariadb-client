@@ -1,0 +1,331 @@
+// Reduction probe: does rpc.connect() alone (no managed module, no keepalive
+// VT) cause subsequent conc.sleep to short-circuit? Tests each layer of the
+// stack in isolation against mdb114-a.
+
+module mariadb.rpc.tests.spike.reduce_sleep_after_connect;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.io as io;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import std.net as net;
+import mariadb.rpc as rpc;
+import mariadb.wire.proto as wire;
+
+const HOST: String = "127.0.0.1";
+const PORT: Int = 34114;
+const USER: String = "root";
+const PASSWORD: String = "rootpw";
+const DB: String = "appdb";
+const TIMEOUT_MS: Int = 1000;
+
+fn _ms(start: &time.Instant) nothrow -> Int {
+	return time.elapsed_ms(start);
+}
+
+fn _report(label: String, elapsed: Int) nothrow -> Void {
+	console.println("[" + label + "] sleep(550ms) elapsed=" + format.format_int(elapsed));
+	return;
+}
+
+// L0 — baseline: conc.sleep with no prior I/O at all.
+fn l0_baseline() nothrow -> Int {
+	console.println("--- L0: baseline sleep ---");
+	val t = time.now_monotonic();
+	val _ = conc.sleep(conc.Duration(millis = 550));
+	_report("L0", _ms(&t));
+	return 0;
+}
+
+// L1 — just std.net.connect to the TCP port (no protocol).
+fn l1_net_connect() nothrow -> Int {
+	console.println("--- L1: net.connect only ---");
+	val addr = net.socket_addr(HOST, PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(e) => {
+			console.println("[L1] net.connect failed kind=" + e.kind);
+			return 101;
+		},
+		core.Result::Ok(s) => {
+			var stream = move s;
+			console.println("[L1] tcp connected");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L1", _ms(&t));
+			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
+			return 0;
+		}
+	}
+}
+
+// L2 — std.net.connect + a single read from the socket (no protocol parsing).
+fn l2_net_connect_plus_one_read() nothrow -> Int {
+	console.println("--- L2: net.connect + 1 socket read ---");
+	val addr = net.socket_addr(HOST, PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(_) => { return 201; },
+		core.Result::Ok(s) => {
+			var stream = move s;
+			var buf = io.buffer(256);
+			match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+				core.Result::Err(e) => { console.println("[L2] read failed kind=" + e.kind); val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 202; },
+				core.Result::Ok(n) => { console.println("[L2] read " + format.format_int(n) + " bytes"); }
+			}
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L2", _ms(&t));
+			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
+			return 0;
+		}
+	}
+}
+
+// L2b — net.connect + read + ONE write (no further reads).
+fn l2b_net_connect_read_write() nothrow -> Int {
+	console.println("--- L2b: net.connect + 1 read + 1 write ---");
+	val addr = net.socket_addr(HOST, PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(_) => { return 211; },
+		core.Result::Ok(s) => {
+			var stream = move s;
+			var rbuf = io.buffer(256);
+			match stream.read(&mut rbuf, conc.Duration(millis = TIMEOUT_MS)) {
+				core.Result::Err(_) => { val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 212; },
+				core.Result::Ok(_) => {}
+			}
+			console.println("[L2b] read hello");
+			// Write a single garbage byte so the server will close (or just write SOMETHING).
+			var wbuf = io.buffer(4);
+			io.buffer_write(&mut wbuf, 0, cast<Byte>(0));
+			io.buffer_write(&mut wbuf, 1, cast<Byte>(0));
+			io.buffer_write(&mut wbuf, 2, cast<Byte>(0));
+			io.buffer_write(&mut wbuf, 3, cast<Byte>(1));
+			match stream.write(&wbuf, conc.Duration(millis = TIMEOUT_MS)) {
+				core.Result::Err(_) => { val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 213; },
+				core.Result::Ok(n) => { console.println("[L2b] wrote " + format.format_int(n) + " bytes"); }
+			}
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L2b", _ms(&t));
+			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
+			return 0;
+		}
+	}
+}
+
+// L2w — call wire.connect (does the full protocol handshake) — no rpc layer.
+fn l2w_wire_connect() nothrow -> Int {
+	console.println("--- L2w: wire.connect (no SET NAMES / autocommit) ---");
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(e) => { console.println("[L2w] wire.connect failed " + e.tag); return 221; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			console.println("[L2w] wire connected");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L2w", _ms(&t));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}
+
+// L2q — wire.connect + ONE wire.query that drains to StatementEnd.
+// Tests whether COM_QUERY + drain is the trigger (the thing rpc.connect adds).
+fn l2q_wire_connect_plus_one_query() nothrow -> Int {
+	console.println("--- L2q: wire.connect + 1 wire.query (drain to end) ---");
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(e) => { console.println("[L2q] wire.connect failed " + e.tag); return 231; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			val sql = "SELECT 1";
+			match wire.query(&mut session, &sql) {
+				core.Result::Err(e) => { console.println("[L2q] wire.query failed " + e.tag); val _ = wire.close(&mut session); return 232; },
+				core.Result::Ok(stv) => {
+					var stmt = move stv;
+					// Drain to terminal event.
+					var drained = false;
+					while not drained {
+						match wire.next_event(&mut stmt) {
+							core.Result::Err(_) => { drained = true; },
+							core.Result::Ok(ev) => {
+								match ev {
+									wire.StatementEvent::Row(_) => {},
+									wire.StatementEvent::ResultSetEnd => {},
+									wire.StatementEvent::StatementEnd(_) => { drained = true; },
+									wire.StatementEvent::StatementErr(_) => { drained = true; }
+								}
+							}
+						}
+					}
+					console.println("[L2q] query drained");
+				}
+			}
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L2q", _ms(&t));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}
+
+// Helper: drain a Statement to its terminal event.
+fn _drain(stmt: &mut wire.Statement) nothrow -> Void {
+	var done = false;
+	while not done {
+		match wire.next_event(stmt) {
+			core.Result::Err(_) => { done = true; },
+			core.Result::Ok(ev) => {
+				match ev {
+					wire.StatementEvent::Row(_) => {},
+					wire.StatementEvent::ResultSetEnd => {},
+					wire.StatementEvent::StatementEnd(_) => { done = true; },
+					wire.StatementEvent::StatementErr(_) => { done = true; }
+				}
+			}
+		}
+	}
+	return;
+}
+
+// L3a — wire.connect + a single SET NAMES query + drain + sleep.
+// Tests whether SET NAMES specifically (vs a vanilla SELECT) is the trigger.
+fn l3a_set_names_only() nothrow -> Int {
+	console.println("--- L3a: wire.connect + ONE 'SET NAMES utf8mb4' query ---");
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(_) => { return 341; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			val sql = "SET NAMES utf8mb4";
+			match wire.query(&mut session, &sql) {
+				core.Result::Err(_) => { val _ = wire.close(&mut session); return 342; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			}
+			console.println("[L3a] SET NAMES drained");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L3a", _ms(&t));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}
+
+// L3b — wire.connect + wire.set_autocommit (no prior SET NAMES) + sleep.
+// Tests whether set_autocommit's specific code path is the trigger.
+fn l3b_set_autocommit_only() nothrow -> Int {
+	console.println("--- L3b: wire.connect + set_autocommit(false), no prior query ---");
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(_) => { return 351; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			match wire.set_autocommit(&mut session, false) {
+				core.Result::Err(_) => { val _ = wire.close(&mut session); return 352; },
+				core.Result::Ok(_) => {}
+			}
+			console.println("[L3b] set_autocommit done");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L3b", _ms(&t));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}
+
+// L3c — wire.connect + TWO identical simple queries + sleep.
+// Tests whether any second query (regardless of content) is the trigger.
+fn l3c_two_queries() nothrow -> Int {
+	console.println("--- L3c: wire.connect + 'SELECT 1' x 2 ---");
+	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
+	match wire.connect(&opts) {
+		core.Result::Err(_) => { return 361; },
+		core.Result::Ok(s) => {
+			var session = move s;
+			val sql = "SELECT 1";
+			match wire.query(&mut session, &sql) {
+				core.Result::Err(_) => { val _ = wire.close(&mut session); return 362; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			}
+			console.println("[L3c] first SELECT 1 drained");
+			val sql2 = "SELECT 1";
+			match wire.query(&mut session, &sql2) {
+				core.Result::Err(_) => { val _ = wire.close(&mut session); return 363; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			}
+			console.println("[L3c] second SELECT 1 drained");
+			val t = time.now_monotonic();
+			val _ = conc.sleep(conc.Duration(millis = 550));
+			_report("L3c", _ms(&t));
+			val _ = wire.close(&mut session);
+			return 0;
+		}
+	}
+}
+
+// L3 — full rpc.connect (TCP + handshake + auth + SET NAMES + SET autocommit).
+fn l3_full_rpc_connect() nothrow -> Int {
+	console.println("--- L3: full rpc.connect ---");
+	var b = rpc.new_connection_config_builder();
+	b.with_host(HOST);
+	b.with_port(PORT);
+	b.with_user(USER);
+	b.with_password(PASSWORD);
+	b.with_database(DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	match rpc.build_connection_config(move b) {
+		core.Result::Err(_) => { return 301; },
+		core.Result::Ok(cfg) => {
+			match rpc.connect(move cfg) {
+				core.Result::Err(e) => { console.println("[L3] rpc.connect failed " + e.tag); return 302; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					console.println("[L3] rpc connected");
+					val t = time.now_monotonic();
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					_report("L3", _ms(&t));
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	// Narrowing scenarios FIRST — earlier scenarios appear to "warm up" the
+	// runtime and mask the bug. Running these first preserves the pristine
+	// state in which the trigger reproduces.
+	val na = l3a_set_names_only();
+	if na != 0 { return na; }
+	val nb = l3b_set_autocommit_only();
+	if nb != 0 { return nb; }
+	val nc = l3c_two_queries();
+	if nc != 0 { return nc; }
+	val a = l0_baseline();
+	if a != 0 { return a; }
+	val b = l1_net_connect();
+	if b != 0 { return b; }
+	val c = l2_net_connect_plus_one_read();
+	if c != 0 { return c; }
+	val cb = l2b_net_connect_read_write();
+	if cb != 0 { return cb; }
+	val cw = l2w_wire_connect();
+	if cw != 0 { return cw; }
+	val cq = l2q_wire_connect_plus_one_query();
+	if cq != 0 { return cq; }
+	val d = l3_full_rpc_connect();
+	if d != 0 { return d; }
+	return 0;
+}

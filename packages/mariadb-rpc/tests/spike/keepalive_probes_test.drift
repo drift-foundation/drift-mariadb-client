@@ -1,0 +1,218 @@
+// Path B probes for the keepalive-VT-not-scheduled bug (per toolchain reply
+// at ~/src/drift-lang/work/keepalive-vt-not-scheduled/reply-mariadb-keepalive-vt-not-scheduled.md).
+//
+// Three scenarios in one binary:
+//   A) Baseline: lift the local-spike pattern (proven to work) directly here.
+//      Probes: timings + join_timeout(0) right after spawn + join_timeout(100) after sleep.
+//   B) Production-shape: invoke mariadb.rpc.managed.open(); read mc.keepalive_vt
+//      via the same probes. Compare against A.
+//   C) Trivial-prime + join: spawn a trivial VT, JOIN it (force completion),
+//      then attempt B. If join hangs forever, NO VTs schedule (memory corruption).
+//      If join returns, the executor works.
+
+module mariadb.rpc.tests.spike.keepalive_probes;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.sync as sync;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+// ----- Baseline (Scenario A): local-spike pattern -----
+
+pub struct LocalCounter { pub n: Int }
+pub struct LocalInner {
+	pub slot: conc.Mutex<LocalCounter>,
+	pub stop: conc.AtomicBool
+}
+
+fn _local_inc(inner: &conc.Arc<LocalInner>) nothrow -> Void {
+	val r: &LocalInner = inner.get();
+	val mu: &conc.Mutex<LocalCounter> = &r.slot;
+	var g = conc.lock(mu);
+	val s = g.get_mut();
+	s.n = s.n + 1;
+	return;
+}
+
+fn _local_stop(inner: &conc.Arc<LocalInner>) nothrow -> Bool {
+	val r: &LocalInner = inner.get();
+	val f: &conc.AtomicBool = &r.stop;
+	return f.load(sync.MemoryOrder::Acquire());
+}
+
+fn _local_loop(inner: conc.Arc<LocalInner>) nothrow -> Int {
+	console.println("[A keepalive] start");
+	var ticks = 0;
+	while not _local_stop(&inner) {
+		match conc.sleep(conc.Duration(millis = 100)) {
+			core.Result::Err(_) => { return ticks; },
+			core.Result::Ok(_) => {}
+		}
+		if _local_stop(&inner) { return ticks; }
+		_local_inc(&inner);
+		ticks = ticks + 1;
+	}
+	return ticks;
+}
+
+fn _local_spawn(inner: conc.Arc<LocalInner>) nothrow -> conc.VirtualThread<Int> {
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move inner) => { return _local_loop(move inner); });
+	return conc.spawn(move cb);
+}
+
+// Probe a VT: join_timeout(0) returns Ok immediately if VT already completed,
+// Err(Timeout) if still running, Err(other) for other states. Stringify the result.
+fn _probe(label: String, vt: &mut conc.VirtualThread<Int>) nothrow -> Void {
+	match vt.join_timeout(conc.Duration(millis = 0)) {
+		core.Result::Ok(v) => { console.println("[probe] " + label + " join_timeout(0)=Ok value=" + format.format_int(v)); },
+		core.Result::Err(e) => { console.println("[probe] " + label + " join_timeout(0)=Err kind=" + e.kind + " code=" + format.format_int(e.code)); }
+	}
+	return;
+}
+
+fn scenario_a_baseline() nothrow -> Int {
+	console.println("--- Scenario A: local spike pattern ---");
+	val t0: time.Instant = time.now_monotonic();
+	var inner: conc.Arc<LocalInner> = conc.arc(LocalInner(slot = conc.mutex(LocalCounter(n = 0)), stop = conc.atomic_bool(false)));
+	console.println("[A] pre-spawn t+" + format.format_int(time.elapsed_ms(&t0)));
+	var vt: conc.VirtualThread<Int> = _local_spawn(inner.clone());
+	console.println("[A] post-spawn t+" + format.format_int(time.elapsed_ms(&t0)));
+	_probe("[A] post-spawn", &mut vt);
+	val _ = conc.sleep(conc.Duration(millis = 550));
+	console.println("[A] post-main-sleep t+" + format.format_int(time.elapsed_ms(&t0)));
+	_probe("[A] post-sleep", &mut vt);
+	val r: &LocalInner = inner.get();
+	val f: &conc.AtomicBool = &r.stop;
+	f.store(true, sync.MemoryOrder::Release());
+	vt.cancel();
+	match vt.join() {
+		core.Result::Ok(v) => { console.println("[A] join=Ok value=" + format.format_int(v)); },
+		core.Result::Err(e) => { console.println("[A] join=Err kind=" + e.kind); }
+	}
+	val mu: &conc.Mutex<LocalCounter> = &r.slot;
+	var g = conc.lock(mu);
+	val s = g.get_mut();
+	console.println("[A] counter=" + format.format_int(s.n));
+	return 0;
+}
+
+// ----- Production-shape (Scenario B): real managed.open() -----
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn scenario_b_production() nothrow -> Int {
+	console.println("--- Scenario B: mariadb.rpc.managed.open() ---");
+	val t0: time.Instant = time.now_monotonic();
+	match _build_cfg() {
+		core.Result::Err(_) => { return 200; },
+		core.Result::Ok(cfg) => {
+			var mc_cfg = managed.default_managed_config();
+			mc_cfg.keepalive_interval_ms = 100;
+			console.println("[B] pre-open t+" + format.format_int(time.elapsed_ms(&t0)));
+			match managed.open(move cfg, move mc_cfg) {
+				core.Result::Err(e) => { console.println("[B] open err " + e.tag); return 201; },
+				core.Result::Ok(v) => {
+					var mc = move v;
+					console.println("[B] post-open t+" + format.format_int(time.elapsed_ms(&t0)));
+					// Probe the keepalive VT inside the struct.
+					match &mut mc.keepalive_vt {
+						Optional::None => { console.println("[B] keepalive_vt is None?!"); return 202; },
+						Optional::Some(vtref) => { _probe("[B] post-open", vtref); }
+					}
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					console.println("[B] post-main-sleep t+" + format.format_int(time.elapsed_ms(&t0)));
+					match &mut mc.keepalive_vt {
+						Optional::None => {},
+						Optional::Some(vtref) => { _probe("[B] post-sleep", vtref); }
+					}
+					val _ = mc.close();
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+// ----- Prime + join (Scenario C): test K's "trivial spawn primes the executor" idea -----
+
+fn scenario_c_prime_with_join() nothrow -> Int {
+	console.println("--- Scenario C: prime executor with trivial spawn + JOIN ---");
+	val t0: time.Instant = time.now_monotonic();
+	// Trivial VT — no captures, returns 0.
+	var trivial_cb: core.Callback0<Int> = core.callback0(| | => { console.println("[C trivial] body"); return 0; });
+	console.println("[C] pre-trivial-spawn t+" + format.format_int(time.elapsed_ms(&t0)));
+	var trivial_vt: conc.VirtualThread<Int> = conc.spawn(move trivial_cb);
+	console.println("[C] post-trivial-spawn t+" + format.format_int(time.elapsed_ms(&t0)));
+	// JOIN the trivial VT. If this hangs, NO VTs schedule — memory corruption.
+	// If it returns cleanly, executor works.
+	match trivial_vt.join_timeout(conc.Duration(millis = 1000)) {
+		core.Result::Ok(v) => {
+			console.println("[C] trivial join_timeout(1s)=Ok value=" + format.format_int(v) + " t+" + format.format_int(time.elapsed_ms(&t0)));
+		},
+		core.Result::Err(e) => {
+			console.println("[C] trivial join_timeout(1s)=Err kind=" + e.kind + " t+" + format.format_int(time.elapsed_ms(&t0)));
+		}
+	}
+	// Now try the production open path AFTER the trivial join.
+	match _build_cfg() {
+		core.Result::Err(_) => { return 300; },
+		core.Result::Ok(cfg) => {
+			var mc_cfg = managed.default_managed_config();
+			mc_cfg.keepalive_interval_ms = 100;
+			console.println("[C] pre-open t+" + format.format_int(time.elapsed_ms(&t0)));
+			match managed.open(move cfg, move mc_cfg) {
+				core.Result::Err(_) => { return 301; },
+				core.Result::Ok(v) => {
+					var mc = move v;
+					console.println("[C] post-open t+" + format.format_int(time.elapsed_ms(&t0)));
+					match &mut mc.keepalive_vt {
+						Optional::None => {},
+						Optional::Some(vtref) => { _probe("[C] post-open", vtref); }
+					}
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					console.println("[C] post-main-sleep t+" + format.format_int(time.elapsed_ms(&t0)));
+					match &mut mc.keepalive_vt {
+						Optional::None => {},
+						Optional::Some(vtref) => { _probe("[C] post-sleep", vtref); }
+					}
+					val _ = mc.close();
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_a_baseline();
+	if a != 0 { return a; }
+	val b = scenario_b_production();
+	if b != 0 { return b; }
+	val c = scenario_c_prime_with_join();
+	if c != 0 { return c; }
+	return 0;
+}

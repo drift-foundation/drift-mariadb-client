@@ -1,0 +1,175 @@
+// Live e2e test for mariadb.rpc.managed.
+//
+// Two scenarios:
+//   1. Lifecycle — open → acquire → ping via lease → drop lease → re-acquire
+//      (proves RAII release returned the conn) → close.
+//   2. Observed keepalive — 100ms keepalive interval over ~550ms of main sleep,
+//      counts ManagedEvent::KeepalivePingOk events via the event sink. Expects
+//      a small handful of ticks (not 0, not thousands).
+
+module mariadb.rpc.tests.e2e.live_managed_smoke_test;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn scenario_lifecycle() nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { return 101; },
+		core.Result::Ok(cfg) => {
+			var mc_cfg = managed.default_managed_config();
+			mc_cfg.keepalive_interval_ms = 0;  // keepalive disabled — see header
+			match managed.open(move cfg, move mc_cfg) {
+				core.Result::Err(e) => {
+					console.println("[lifecycle] open failed: " + e.tag);
+					return 102;
+				},
+				core.Result::Ok(v) => {
+					var mc = move v;
+					console.println("[lifecycle] opened");
+					match mc.acquire() {
+						core.Result::Err(e) => {
+							console.println("[lifecycle] acquire failed: " + e.tag);
+							val _ = mc.close();
+							return 103;
+						},
+						core.Result::Ok(lv) => {
+							var lease = move lv;
+							match lease.conn() {
+								core.Result::Err(_) => { return 104; },
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Ok(_) => {
+											console.println("[lifecycle] ping ok via lease #1");
+										},
+										core.Result::Err(e) => {
+											console.println("[lifecycle] ping failed: " + e.tag);
+											return 105;
+										}
+									}
+								}
+							}
+						}
+					}
+					match mc.acquire() {
+						core.Result::Err(e) => {
+							console.println("[lifecycle] re-acquire failed: " + e.tag);
+							val _ = mc.close();
+							return 106;
+						},
+						core.Result::Ok(lv2) => {
+							var lease2 = move lv2;
+							match lease2.conn() {
+								core.Result::Err(_) => { return 107; },
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Ok(_) => {
+											console.println("[lifecycle] ping ok via lease #2 (slot restored)");
+										},
+										core.Result::Err(_) => { return 108; }
+									}
+								}
+							}
+						}
+					}
+					match mc.close() {
+						core.Result::Err(_) => { return 109; },
+						core.Result::Ok(_) => {
+							console.println("[lifecycle] closed");
+							return 0;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// --- Scenario 2: observe keepalive ticks via event sink ---
+
+pub struct PingCounter {
+	pub ok_count: Int
+}
+
+fn scenario_observed_keepalive() nothrow -> Int {
+	match _build_cfg() {
+		core.Result::Err(_) => { return 201; },
+		core.Result::Ok(cfg) => {
+			var mc_cfg = managed.default_managed_config();
+			mc_cfg.keepalive_interval_ms = 100;
+			var counter_arc: conc.Arc<conc.Mutex<PingCounter> > = conc.arc(conc.mutex(PingCounter(ok_count = 0)));
+			var counter_for_sink = counter_arc.clone();
+			var sink: core.Callback1<managed.ManagedEvent, Void> = core.callback1(|ev: managed.ManagedEvent| captures(move counter_for_sink) => {
+				match ev {
+					managed.ManagedEvent::KeepalivePingOk => {
+						val mu_ref: &conc.Mutex<PingCounter> = counter_for_sink.get();
+						var guard = conc.lock(mu_ref);
+						val state = guard.get_mut();
+						state.ok_count = state.ok_count + 1;
+					},
+					managed.ManagedEvent::KeepalivePingFailed(_) => {},
+					managed.ManagedEvent::ReconnectAttempt(_) => {},
+					managed.ManagedEvent::ReconnectSucceeded(_) => {},
+					managed.ManagedEvent::ReconnectFailed(_, _) => {}
+				}
+				return;
+			});
+			mc_cfg.event_sink = Optional::Some(move sink);
+			match managed.open(move cfg, move mc_cfg) {
+				core.Result::Err(_) => { return 202; },
+				core.Result::Ok(v) => {
+					var mc = move v;
+					console.println("[keepalive] opened with 100ms interval");
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					match mc.close() {
+						core.Result::Err(_) => { return 203; },
+						core.Result::Ok(_) => {}
+					}
+					val mu_ref: &conc.Mutex<PingCounter> = counter_arc.get();
+					var guard = conc.lock(mu_ref);
+					val state = guard.get_mut();
+					val seen = state.ok_count;
+					console.println("[keepalive] observed pings: " + format.format_int(seen));
+					if seen < 1 { return 204; }
+					if seen > 50 { return 205; }
+					return 0;
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	console.println("=== live_managed_smoke_test ===");
+	val a = scenario_lifecycle();
+	if a != 0 { return a; }
+	val b = scenario_observed_keepalive();
+	if b != 0 { return b; }
+	console.println("=== live_managed_smoke_test: passed ===");
+	return 0;
+}

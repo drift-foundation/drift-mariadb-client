@@ -1,0 +1,60 @@
+// Just rpc.connect + sleep, nothing else. Isolates whether order of prior
+// scenarios affects the post-rpc.connect sleep behavior.
+
+module mariadb.rpc.tests.spike.reduce_sleep_l3_only;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+
+const HOST: String = "127.0.0.1";
+const PORT: Int = 34114;
+const USER: String = "root";
+const PASSWORD: String = "rootpw";
+const DB: String = "appdb";
+const TIMEOUT_MS: Int = 1000;
+
+fn main() nothrow -> Int {
+	// Probe: does one baseline sleep BEFORE any I/O prime the runtime?
+	val tp = time.now_monotonic();
+	val _ = conc.sleep(conc.Duration(millis = 50));
+	console.println("baseline sleep(50ms) elapsed=" + format.format_int(time.elapsed_ms(&tp)));
+
+	var b = rpc.new_connection_config_builder();
+	b.with_host(HOST);
+	b.with_port(PORT);
+	b.with_user(USER);
+	b.with_password(PASSWORD);
+	b.with_database(DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	match rpc.build_connection_config(move b) {
+		core.Result::Err(_) => { return 1; },
+		core.Result::Ok(cfg) => {
+			match rpc.connect(move cfg) {
+				core.Result::Err(e) => { console.println("connect failed: " + e.tag); return 2; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					console.println("connected");
+					val t1 = time.now_monotonic();
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					console.println("[after connect]   sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t1)));
+					val _ = rpc.close(&mut conn);
+					val t2 = time.now_monotonic();
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					console.println("[after close]     sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t2)));
+					val t3 = time.now_monotonic();
+					val _ = conc.sleep(conc.Duration(millis = 550));
+					console.println("[after close x2]  sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t3)));
+					return 0;
+				}
+			}
+		}
+	}
+}

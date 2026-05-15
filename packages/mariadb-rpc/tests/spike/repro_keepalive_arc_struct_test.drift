@@ -1,0 +1,65 @@
+module mariadb.rpc.tests.spike.repro_keepalive_arc_struct;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.sync as sync;
+import std.format as format;
+import std.console as console;
+
+// Mirrors managed.drift's ManagedInner shape: single Arc, multiple fields.
+pub struct Inner {
+	pub slot: conc.Mutex<Counter>,
+	pub stop: conc.AtomicBool
+}
+
+pub struct Counter { pub n: Int }
+
+fn _inner_stop(inner: &conc.Arc<Inner>) nothrow -> Bool {
+	val r: &Inner = inner.get();
+	val f: &conc.AtomicBool = &r.stop;
+	return f.load(sync.MemoryOrder::Acquire());
+}
+
+fn _inc(inner: &conc.Arc<Inner>) nothrow -> Void {
+	val r: &Inner = inner.get();
+	val mu: &conc.Mutex<Counter> = &r.slot;
+	var g = conc.lock(mu);
+	val s = g.get_mut();
+	s.n = s.n + 1;
+	return;
+}
+
+fn _loop(inner: conc.Arc<Inner>) nothrow -> Int {
+	val _ = console.println("[DBG] loop start");
+	while not _inner_stop(&inner) {
+		match conc.sleep(conc.Duration(millis = 100)) {
+			core.Result::Err(_) => { val _ = console.println("[DBG] sleep err"); return 0; },
+			core.Result::Ok(_) => { val _ = console.println("[DBG] sleep ok"); }
+		}
+		if _inner_stop(&inner) { return 0; }
+		_inc(&inner);
+	}
+	return 0;
+}
+
+fn _spawn(inner: conc.Arc<Inner>) nothrow -> conc.VirtualThread<Int> {
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move inner) => { return _loop(move inner); });
+	return conc.spawn(move cb);
+}
+
+fn main() nothrow -> Int {
+	var inner: conc.Arc<Inner> = conc.arc(Inner(slot = conc.mutex(Counter(n = 0)), stop = conc.atomic_bool(false)));
+	var vt: conc.VirtualThread<Int> = _spawn(inner.clone());
+	val _ = conc.sleep(conc.Duration(millis = 550));
+	val r: &Inner = inner.get();
+	val f: &conc.AtomicBool = &r.stop;
+	f.store(true, sync.MemoryOrder::Release());
+	vt.cancel();
+	val _ = vt.join();
+	val mu: &conc.Mutex<Counter> = &r.slot;
+	var g = conc.lock(mu);
+	val s = g.get_mut();
+	val seen = s.n;
+	val _ = console.println("seen=" + format.format_int(seen));
+	return seen;
+}
