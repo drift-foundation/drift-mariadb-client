@@ -1,71 +1,112 @@
-# Reply to bookkeeper / singular team — `ManagedConnection` v1 is ready
+# `mariadb.rpc.managed` + `mariadb.rpc.pool` — ready to integrate
 
 ## TL;DR
 
-`mariadb.rpc.managed` v1 is in `mariadb-rpc` 0.4.0. It matches the shape you asked for: `acquire()` / RAII `LeasedConn` / `close()`, autonomous keepalive with DNS-remap recovery, observable events, no business-level retry. The `ConnectionSource` interface is in place, so swapping in a future `ConnectionPool` is a constructor-line change at your call sites.
+Two `ConnectionSource` implementations in `mariadb-rpc` 0.5.0:
 
-## What landed
+- **`mariadb.rpc.managed.ManagedConnection`** — single long-lived conn. Use for bookkeeper-style daemons that do one thing serially.
+- **`mariadb.rpc.pool.ConnectionPool`** — elastic pool, block-waits on exhaustion via Condvar. Use for app servers with concurrent requests.
 
-- `mariadb.rpc.managed` module (~330 LOC): `ManagedConnection`, `LeasedConn`, `ConnectionSource` interface, `ManagedConfig`, `ManagedEvent`, `ManagedError`.
-- Doc section in `docs/effective-mariadb-rpc.md` under "Managed connection (`mariadb.rpc.managed`)" with full example, `ManagedConfig` defaults, event variants, and error tags.
-- `live_managed_smoke_test` e2e — lifecycle + observed keepalive both pass against the test instance.
+Both implement `pub interface ConnectionSource { acquire / close }` with identical `LeasedConn` semantics, so call sites are interchangeable. Switching from one to the other is a one-line constructor change.
 
-## Matches your spec — quick checklist
+## What you get
 
-- **Acquire/release via RAII.** No `release()` method. `LeasedConn::destroy` is the only path back to the wrapper's slot. Can't leak.
-- **Mutex protects the storage slot, not the lease.** The conn moves out of `Mutex<Optional<RpcConnection>>` on acquire and back on release. Lock held only at transitions. A 10-minute streaming statement holds no mutex.
-- **Autonomous keepalive.** Background `conc.spawn`'d virtual thread pings on the configured interval. On failure, drops the dead conn and calls `rpc.connect(config)` again — re-resolves DNS, so DB host migration during maintenance is recovered transparently.
-- **No business-level retry.** `RpcError` from a call goes straight to your code. Microflows owns that policy.
-- **Events.** `ManagedConfig.event_sink: Optional<Callback1<ManagedEvent, Void>>` — install if you want logs. Fires for `KeepalivePingOk`, `KeepalivePingFailed`, `ReconnectAttempt`, `ReconnectSucceeded`, `ReconnectFailed`.
-- **`ConnectionSource` interface from v1.** Fixed-signature `acquire` / `close`. Concrete `ManagedConnection` implements it now; `ConnectionPool` will implement it later. Depend on the interface at your call sites and the future swap is free.
+- **`acquire()`** — exclusive lease on an `RpcConnection`.
+- **`LeasedConn`** — RAII handle, returns the conn on drop. No public `release()` — can't leak.
+- **`lease.conn() -> &mut RpcConnection`** — pass to `rpc.call(...)` etc.
+- **Autonomous keepalive** — pings + reconnects on failure, re-resolves DNS so DB host migration during maintenance recovers without app code.
+- **Block-wait under contention** (pool only) — waiters park on Condvar until a peer releases.
+- **No business-level retry** — `RpcError` from a call surfaces to your code untouched. Microflows owns retry policy.
+- **Event sink** — `ManagedEvent` / `PoolEvent` for observability (ping outcomes, reconnects, pool sizing). Install via config; defaults to no-op.
 
-## Toolchain requirement
-
-Requires Drift `0.31.89+abi14` or later for `conc.sleep` correctness inside the keepalive VT. We've verified end-to-end against `0.31.89` staged (5/5 deterministic runs showing 4-7 ping ticks in 550ms with a 100ms interval, exactly the predicted range). Cert promotion will pull this version when next run.
-
-## Sample integration shape (Singular bridge)
+## Integration shape — app server (pool)
 
 ```drift
 import mariadb.rpc as rpc;
-import mariadb.rpc.managed as managed;
+import mariadb.rpc.pool as pool;
 
 // At startup:
-var mc_cfg = managed.default_managed_config();
-mc_cfg.keepalive_interval_ms = 30000;
-mc_cfg.event_sink = Optional::Some(<your log-routing Callback1>);
-val mc = managed.open(rpc_config, move mc_cfg).or_throw();
+var pc = pool.default_pool_config();
+pc.min_idle = 2;
+pc.max_conns = 50;
+pc.idle_timeout_ms = 60000;
+pc.keepalive_interval_ms = 30000;
+pc.event_sink = Optional::Some(<your log sink>);
+val p = pool.open(rpc_config, move pc).or_throw();
 
-// On each request:
-match mc.acquire() {
-    core.Result::Err(e) => { /* surface as FAILED_DB_UNAVAILABLE — let Microflows decide */ },
+// Per request handler:
+match p.acquire() {
+    core.Result::Err(e) => {
+        // pool-closed (we're shutting down) → 503
+        // pool-open-failed (couldn't open a new conn for you) → transient, retry-after
+    },
     core.Result::Ok(lv) => {
         var lease = move lv;
         match lease.conn() {
             core.Result::Ok(c) => {
-                // Your CALL sp_singular_complete(...) here.
+                // rpc.call(c, &"sp_singular_complete", &args)
             },
-            core.Result::Err(_) => { /* shouldn't happen */ }
+            core.Result::Err(_) => { /* invariant — won't happen */ }
         }
-        // lease drops at end of scope → conn returns to slot
+        // lease drops at end of scope → conn returns to pool, next waiter unblocked
     }
 }
 ```
 
-The whole "retry-once-on-wire-error" wrapper you sketched at the start of this thread is no longer needed at your layer. If `rpc.call` returns a wire error during a lease, you surface it; by the time your next `acquire()` runs, the keepalive thread has likely already noticed and reconnected (or is in jittered-backoff retry). Either way, the next acquire gets a healthy conn or a `managed-acquire-busy` (try again briefly).
+## Integration shape — single-conn (managed)
+
+```drift
+import mariadb.rpc.managed as managed;
+
+var mc_cfg = managed.default_managed_config();
+mc_cfg.keepalive_interval_ms = 30000;
+val mc = managed.open(rpc_config, move mc_cfg).or_throw();
+
+match mc.acquire() {
+    core.Result::Err(_) => { /* slot busy: keepalive in flight, retry briefly */ },
+    core.Result::Ok(lv) => {
+        var lease = move lv;
+        match lease.conn() { ... }
+    }
+}
+```
+
+## Both expose the same interface
+
+```drift
+pub interface ConnectionSource {
+    fn acquire(self: &mut Self) nothrow -> core.Result<LeasedConn, ManagedError>;
+    fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
+}
+```
+
+Your Singular bridge can hold either concretely or depend on the interface and decide at construction time. Starting concretely with `ConnectionPool` is fine — `ManagedConnection` is not on your critical path.
+
+## Pool sizing guidance
+
+- `max_conns`: match to MariaDB `max_connections` with headroom for other clients. 50–100 is typical for an app server.
+- `min_idle`: 0 is correct for bursty workloads. Raise to amortize connect cost if your QPS rarely drops to zero.
+- `idle_timeout_ms`: 60s default. Conns idle longer get reaped to free server resources. Keepalive doesn't count as use.
+- `keepalive_interval_ms`: half of MariaDB `wait_timeout` is a safe floor. 30s default.
+
+## Toolchain requirement
+
+`mariadb-rpc` 0.5.0 requires Drift `0.31.90+abi14` or later, which is **now certified**. `drift trust` + `just prepare` on your side picks it up.
 
 ## What's NOT in v1 — for transparency
 
-- **ConnectionPool**: implements the same `ConnectionSource`, single-conn-to-N is a constructor change at your call site. Not built; design is straightforward. Open if/when bookkeeper actually needs concurrency.
-- **`arg_binary_fixed` semantics**: unrelated, already shipped in 0.3.2.
-- **Caller-driven keepalive `tick()`**: not added; the autonomous keepalive thread covers the use case and works correctly now that the toolchain bug is fixed.
+- **No `acquire_timeout(d)`** — block-wait is unbounded. If you want a deadline, wrap with your own timeout via a separate VT. Easy to add; just hasn't shipped.
+- **No prepared statements / stmt cache** — same as `RpcConnection`; this is a `mariadb-rpc` text-protocol library.
+- **No per-conn affinity** — `acquire()` returns the most-recently-used conn (LIFO) but doesn't try to bind a request to a specific conn across multiple acquires. Sticky sessions are an app-level concern.
 
-## Reviewing the diff
+## Where to look
 
-- `packages/mariadb-rpc/src/managed.drift` — the module.
-- `docs/effective-mariadb-rpc.md` — see "Managed connection" section for the full reference.
-- `packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift` — both scenarios. `just rpc-live-managed` to run.
-- `drift/manifest.json` — version bumped to 0.4.0.
+- `packages/mariadb-rpc/src/pool.drift` — the pool implementation.
+- `packages/mariadb-rpc/src/managed.drift` — single-conn implementation + `ConnectionSource` interface + `LeasedConn`.
+- `docs/effective-mariadb-rpc.md` → "Connection pool" and "Managed connection" sections — full reference.
+- `packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift` — pool e2e. `just rpc-live-pool` to run.
+- `packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift` — single-conn e2e. `just rpc-live-managed`.
 
-Let me know if anything doesn't match what you had in mind.
+Ping me if any of the API doesn't match what you wanted.
 
 —SL

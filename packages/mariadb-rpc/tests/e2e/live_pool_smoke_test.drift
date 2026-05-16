@@ -1,0 +1,80 @@
+// Live e2e for mariadb.rpc.pool.ConnectionPool.
+//
+// Minimal scenario only — open with no seed conns, close. Verify the pool
+// lifecycle doesn't spin.
+
+module mariadb.rpc.tests.e2e.live_pool_smoke_test;
+
+import std.core as core;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+import mariadb.rpc.pool as pool;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn main() nothrow -> Int {
+	console.println("=== live_pool_smoke_test: open/close only ===");
+	match _build_cfg() {
+		core.Result::Err(_) => { return 1; },
+		core.Result::Ok(cfg) => {
+			var pc = pool.default_pool_config();
+			pc.min_idle = 0;
+			pc.max_conns = 1;
+			pc.keepalive_interval_ms = 0;  // disable keepalive
+			pc.idle_timeout_ms = 60000;
+			console.println("[step] calling pool.open");
+			match pool.open(move cfg, move pc) {
+				core.Result::Err(e) => { console.println("[step] open failed: " + e.tag); return 2; },
+				core.Result::Ok(v) => {
+					var p = move v;
+					console.println("[step] pool open returned");
+					match p.acquire() {
+						core.Result::Err(e) => { console.println("[step] acquire failed: " + e.tag); val _ = p.close(); return 4; },
+						core.Result::Ok(lv) => {
+							var lease = move lv;
+							console.println("[step] acquired");
+							match lease.conn() {
+								core.Result::Err(_) => { return 5; },
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Ok(_) => { console.println("[step] ping ok"); },
+										core.Result::Err(e) => { console.println("[step] ping fail: " + e.tag); return 6; }
+									}
+								}
+							}
+							console.println("[step] dropping lease");
+						}
+					}
+					console.println("[step] lease dropped");
+					match p.close() {
+						core.Result::Err(_) => { return 3; },
+						core.Result::Ok(_) => { console.println("[step] closed"); }
+					}
+				}
+			}
+		}
+	}
+	console.println("=== live_pool_smoke_test: passed ===");
+	return 0;
+}

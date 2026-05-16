@@ -92,11 +92,23 @@ pub struct ManagedInner {
 
 // -----------------------------------------------------------------------
 // LeasedConn — RAII handle owning the conn during a lease.
+//
+// Backed by a release callback so any ConnectionSource implementation
+// (ManagedConnection today, ConnectionPool tomorrow) can wrap its own
+// return-target into a LeasedConn without changing the public type.
+// Construct via new_leased_conn().
 // -----------------------------------------------------------------------
 
 pub struct LeasedConn {
-	pub conn: Optional<rpc.RpcConnection>,
-	pub inner: conc.Arc<ManagedInner>
+	conn: Optional<rpc.RpcConnection>,
+	release: Optional<core.Callback1<rpc.RpcConnection, Void> >
+}
+
+// Module-public constructor — used by ManagedConnection.acquire and by
+// other ConnectionSource implementations (e.g. ConnectionPool) to build
+// a LeasedConn that returns the conn to the source via the release callback.
+pub fn new_leased_conn(conn: rpc.RpcConnection, release: core.Callback1<rpc.RpcConnection, Void>) nothrow -> LeasedConn {
+	return LeasedConn(conn = Optional::Some(move conn), release = Optional::Some(move release));
 }
 
 implement LeasedConn {
@@ -112,11 +124,22 @@ implement LeasedConn {
 
 implement core.Destructible for LeasedConn {
 	pub fn destroy(var self: LeasedConn) nothrow -> Void {
-		val taken = mem.replace(&mut self.conn, Optional<rpc.RpcConnection>::None());
-		val inner_ref: &ManagedInner = self.inner.get();
-		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
-		var guard = conc.lock(mu_ref);
-		val _old = mem.replace(guard.get_mut(), move taken);
+		val taken_conn = mem.replace(&mut self.conn, Optional<rpc.RpcConnection>::None());
+		val taken_release = mem.replace(&mut self.release, Optional<core.Callback1<rpc.RpcConnection, Void> >::None());
+		match taken_conn {
+			Optional::None => {},
+			Optional::Some(c) => {
+				match taken_release {
+					Optional::Some(cb) => { cb.call(move c); },
+					Optional::None => {
+						// Invariant violation — no release callback. Close
+						// the conn defensively rather than leaking it.
+						var conn = move c;
+						val _ = rpc.close(&mut conn);
+					}
+				}
+			}
+		}
 		return;
 	}
 }
@@ -152,8 +175,12 @@ implement ConnectionSource for ManagedConnection {
 				return core.Result::Err(_mgr_error("managed-acquire-busy", "slot empty (keepalive in flight or no live conn)"));
 			},
 			Optional::Some(c) => {
-				val inner_clone: conc.Arc<ManagedInner> = self.inner.clone();
-				return core.Result::Ok(LeasedConn(conn = Optional::Some(move c), inner = move inner_clone));
+				var inner_for_release: conc.Arc<ManagedInner> = self.inner.clone();
+				var release_cb: core.Callback1<rpc.RpcConnection, Void> = core.callback1(|returned: rpc.RpcConnection| captures(move inner_for_release) => {
+					_slot_put(&inner_for_release, Optional::Some(move returned));
+					return;
+				});
+				return core.Result::Ok(new_leased_conn(move c, move release_cb));
 			}
 		}
 	}
@@ -197,7 +224,7 @@ pub fn open(rpc_config: rpc.RpcConnectionConfig, mc_config: ManagedConfig) nothr
 	// Seed the slot with one live conn.
 	val seed_cfg = _clone_cfg(&rpc_config);
 	match rpc.connect(move seed_cfg) {
-		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag.clone())); },
+		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag)); },
 		core.Result::Ok(c) => {
 			val seeded: Optional<rpc.RpcConnection> = Optional::Some(move c);
 			val slot: conc.Mutex<Optional<rpc.RpcConnection> > = conc.mutex(move seeded);
@@ -262,7 +289,7 @@ fn _keepalive_loop(inner: conc.Arc<ManagedInner>) nothrow -> Int {
 						_slot_put(&inner, Optional::Some(move conn));
 					},
 					core.Result::Err(e) => {
-						_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag.clone()));
+						_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag));
 						val _ = rpc.close(&mut conn);
 						attempt_num = _reconnect_with_backoff(&inner, attempt_num);
 					}
@@ -290,7 +317,7 @@ fn _reconnect_with_backoff(inner: &conc.Arc<ManagedInner>, prior_attempts: Int) 
 				return attempt;
 			},
 			core.Result::Err(e) => {
-				_emit(inner, ManagedEvent::ReconnectFailed(failed_attempt = attempt, failed_tag = e.tag.clone()));
+				_emit(inner, ManagedEvent::ReconnectFailed(failed_attempt = attempt, failed_tag = e.tag));
 				match conc.sleep(conc.Duration(millis = delay_ms)) {
 					core.Result::Err(_) => { return attempt; },  // cancelled mid-backoff
 					core.Result::Ok(_) => {}
@@ -378,17 +405,17 @@ fn _slot_put(inner: &conc.Arc<ManagedInner>, value: Optional<rpc.RpcConnection>)
 // clone is O(1) (per project_drift_array_string_repr memory).
 fn _clone_cfg(c: &rpc.RpcConnectionConfig) nothrow -> rpc.RpcConnectionConfig {
 	return rpc.RpcConnectionConfig(
-		host = c.host.clone(),
+		host = c.host,
 		port = c.port,
-		user = c.user.clone(),
-		password = c.password.clone(),
-		database = c.database.clone(),
+		user = c.user,
+		password = c.password,
+		database = c.database,
 		connect_timeout_ms = c.connect_timeout_ms,
 		read_timeout_ms = c.read_timeout_ms,
 		write_timeout_ms = c.write_timeout_ms,
 		autocommit = c.autocommit,
 		strict_reuse = c.strict_reuse,
-		charset = c.charset.clone(),
-		collation = c.collation.clone()
+		charset = c.charset,
+		collation = c.collation
 	);
 }

@@ -310,6 +310,86 @@ Install a `core.Callback1<ManagedEvent, Void>` via `ManagedConfig.event_sink` to
 | `managed-acquire-busy` | `acquire()` found the slot empty (lease in flight or keepalive ticking) |
 | `managed-lease-empty` | Internal invariant violation in `LeasedConn::conn()` — should not happen in normal use |
 
+## Connection pool (`mariadb.rpc.pool`)
+
+For app servers expecting concurrent acquirers, the `mariadb.rpc.pool` module hands out leases from an elastic pool of `RpcConnection`s. It implements the same `ConnectionSource` interface as `ManagedConnection`, so call sites are drop-in compatible — switch the constructor and the rest of your code keeps working.
+
+```drift
+import mariadb.rpc.pool as pool;
+
+var pc = pool.default_pool_config();
+pc.min_idle = 2;       // pre-seed 2 conns at open()
+pc.max_conns = 20;     // open up to 20 on demand
+pc.idle_timeout_ms = 60000;   // reap idle conns after 60s
+pc.keepalive_interval_ms = 30000;
+
+val p = pool.open(rpc_config, move pc).or_throw();
+```
+
+### Model
+
+- **Elastic sizing.** Starts with `min_idle` pre-opened conns. `acquire()` opens new conns on demand up to `max_conns`. Idle conns are reaped after `idle_timeout_ms` of no user lease (keepalive activity does NOT count as use).
+- **Block-wait on exhaustion.** When the pool is at `max_conns` and all conns are leased, `acquire()` parks the calling VT on an internal Condvar. The next `LeasedConn::destroy` (release) signals one waiter. `pool.close()` wakes all waiters with `pool-closed`.
+- **Lease shape identical to `ManagedConnection`.** `acquire()` returns the same `LeasedConn` type. RAII release via destructor; no `release()` method.
+- **Sequential calls per lease.** Single-active-statement rule applies per lease. To run two statements at once, hold two leases.
+- **One keepalive thread.** Periodically pings idle conns and reaps those beyond `idle_timeout_ms`. Same DNS-re-resolve-on-reconnect behavior as `ManagedConnection`.
+- **Lock discipline.** Never holds the internal slot mutex across network I/O. `rpc.connect`, `rpc.ping`, and `rpc.close` all run with the lock released. Idle reap, push-back, and counter updates are the only critical sections.
+
+### `PoolConfig` defaults
+
+```drift
+PoolConfig(
+    min_idle = 0,
+    max_conns = 10,
+    idle_timeout_ms = 60000,
+    keepalive_interval_ms = 30000,
+    reconnect_backoff_initial_ms = 1000,
+    reconnect_backoff_max_ms = 16000,
+    reconnect_backoff_jitter_pct = 25,
+    event_sink = None
+)
+```
+
+Pick `max_conns` matched to your MariaDB `max_connections` (with headroom for other clients). `min_idle = 0` is correct for bursty workloads; raise it to amortize the connect cost if your QPS rarely drops to zero.
+
+### `PoolEvent` variants
+
+```drift
+pub variant PoolEvent {
+    ConnOpened(opened_total: Int),
+    ConnClosedByReap(closed_total: Int),
+    KeepalivePingOk,
+    KeepalivePingFailed(ping_failed_tag: String),
+    ReconnectAttempt(attempt_attempt: Int),
+    ReconnectSucceeded(succeeded_attempt: Int),
+    ReconnectFailed(failed_attempt: Int, failed_tag: String),
+    AcquireWaiting(waiting_now: Int),
+    AcquireUnblocked
+}
+```
+
+Install via `PoolConfig.event_sink`. The callback fires on the keepalive virtual thread, on the releaser's VT, or on the acquirer's VT — protect any shared state with `conc.Arc<conc.Mutex<...>>`.
+
+### `ManagedError` tags from the pool
+
+| Tag | When |
+|---|---|
+| `pool-config-invalid-max-conns` | `max_conns < 1` |
+| `pool-config-invalid-min-idle` | `min_idle < 0 or min_idle > max_conns` |
+| `pool-open-seed-failed` | Failed to seed `min_idle` conns at `open()` |
+| `pool-open-failed` | On-demand `rpc.connect` failed inside `acquire()` |
+| `pool-closed` | `acquire()` after `close()` (or `close()` racing with a parked waiter) |
+| `pool-busy-keepalive` | Internal: keepalive tried to take a conn but pool was busy. Caller never sees this. |
+| `pool-wait-failed` | Condvar `wait` returned a non-CLOSED error (rare; runtime issue) |
+
+### When to use `ManagedConnection` vs `ConnectionPool`
+
+| Use case | Use |
+|---|---|
+| Single long-lived process with serial calls (CLI tool, bookkeeper-style daemon) | `ManagedConnection` |
+| App server expecting concurrent requests | `ConnectionPool` |
+| Migrating from one to the other later | Depend on `ConnectionSource` interface; the constructor is the only call-site change |
+
 ## Error model
 
 Two distinct error channels:

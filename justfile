@@ -284,6 +284,12 @@ rpc-live-managed:
 	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
 	  --target-word-bits 64
 
+rpc-live-pool:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift \
+	  --target-word-bits 64
+
 # --- Local MariaDB dev instances ---
 
 db-create INSTANCE HOST_PORT="" IMAGE="mariadb:11.4":
