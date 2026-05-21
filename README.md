@@ -67,14 +67,26 @@ If Docker is installed but you get a permission error for `/var/run/docker.sock`
 |----------|----------|---------|---------|
 | `DRIFTC` | yes | — | Path to `driftc` compiler |
 | `DRIFT_PKG_ROOT` | no | `build/deploy` | Package library root for `just prepare` / `just deploy` |
-| `DRIFT_SIGN_KEY_FILE` | for deploy | — | Ed25519 signing key file |
+| `DRIFT_SIGN_KEY_FILE` | for deploy | — | Ed25519 signing key file (cert-claim signer under trust-v1) |
+| `DRIFT_LANG_ROOT` | for `just author-claim` | `~/src/drift-lang` | drift-lang source root providing `tools.drift_author` |
 
 ### Package Lifecycle
 
 This project uses `drift/manifest.json` to define two co-artifacts (`mariadb-wire-proto` and `mariadb-rpc`) with versioning, dependency resolution, and signed artifact publishing.
 
 - `just prepare` — resolve dependencies and write `drift/lock.json`
-- `just deploy` — build, sign, and publish both packages to `DRIFT_PKG_ROOT`
+- `just author-claim` — re-mint `drift/<pkg>.author-claim` for both libraries
+  after any source change that affects SCI (modules, assets, deps, version).
+  The committed author-claims are what `drift deploy` consumes to emit
+  cert-claims; the author key never enters the deploy host.
+- `just deploy` — build, sign (cert-claim), smoke-test, and publish both
+  packages to `DRIFT_PKG_ROOT`. If no `--cert-suite-*` flag is present in
+  ARGS the recipe injects `--cert-suite-id mariadb-client/dev` and
+  `--cert-suite-no-evidence`, so the inner-dev loop (`just stress`, `just
+  perf`, which call bare `deploy`) works standalone. The orchestrator's
+  release certification flow calls `drift deploy` directly with its own
+  `--cert-suite-id` and `--cert-suite-evidence-sha256`; it does not flow
+  through this recipe.
 
 ### Certification Gates
 
@@ -116,8 +128,9 @@ Compiles from deployed `.zdmp` packages via `--package-root` + `--dep`.
 
 Preconditions:
 - Same as `just test`
-- `DRIFT_SIGN_KEY_FILE` is set (required by `just deploy`)
-- `drift` CLI on `PATH` (for deploy)
+- `DRIFT_SIGN_KEY_FILE` is set (cert-claim signer for `just deploy` under trust-v1)
+- `drift/<pkg>.author-claim` files committed and current (`just author-claim` if stale)
+- `drift/trust.json` present with v1 role grants for both namespaces
 
 #### `just perf` — performance regression gate
 
@@ -137,15 +150,15 @@ See `perf/README.md` for result format and scenario details.
 
 ### Trust and Deploy Prerequisites
 
-`just stress` and `just perf` compile test code against the deployed signed packages, not local source trees. This requires:
+`just stress` and `just perf` compile test code against the deployed signed packages, not local source trees. Under trust-v1 (toolchain 0.32.x+) this requires:
 
-1. **Signing key** — `DRIFT_SIGN_KEY_FILE` must point to an Ed25519 key file
-2. **Deploy tooling** — `drift` CLI must be on `PATH`
-3. **Trust store** — `drift/trust.json` must exist with namespace claims for `mariadb.rpc.*` and `mariadb.wire.proto.*`
+1. **Cert-claim signing key** — `DRIFT_SIGN_KEY_FILE` must point to an Ed25519 seed. `drift deploy` uses it to sign each artifact's `.cert-claim.<kid>.json`.
+2. **Author-claims committed** — `drift/mariadb-wire-proto.author-claim` and `drift/mariadb-rpc.author-claim` must exist (run `just author-claim` after any SCI-affecting source change).
+3. **Project trust store** — `drift/trust.json` (v1 role-tagged) grants `authors` and `certifiers` roles for `mariadb.wire.proto.*` and `mariadb.rpc.*` to the kids that signed the sidecars.
 
-The trust store (`drift/trust.json`) is checked into the repo. It maps the project's signing key to its namespace claims so that `driftc` accepts the locally-deployed packages. This is the same trust mechanism that downstream consumers use — the only difference is that consumers import trust from the published `.author-profile` instead of using a pre-populated trust store.
+The trust store is checked into the repo so that `driftc --package-root build/deploy` accepts the locally-deployed packages without any ambient user trust. Downstream consumers use the same mechanism in their own project trust store, populated via `drift trust import` against the published `.author-claim`.
 
-If the trust store is missing or the signing key changes, `just stress` and `just perf` will fail at compile time with a namespace trust error. This is intentional — it validates the trust chain end-to-end.
+If any of the three pieces is missing or stale (e.g. the version was bumped but `just author-claim` was not re-run), `just stress` / `just perf` fail at compile time with a verification error. That is intentional — it validates the trust chain end-to-end.
 
 ### Build Support Flags
 
@@ -277,10 +290,12 @@ Recommended first-run sequence on a new machine:
 ## Repository layout
 
 ```text
-drift/manifest.json                  # package manifest (artifacts, versions, deps)
-drift/lock.json                      # resolved dependency lock (generated by drift prepare)
-drift/trust.json                     # project-local trust store (namespace claims for signing key)
-the-drift-foundation.author-profile  # publisher signing identity
+drift/manifest.json                       # package manifest (artifacts, versions, deps)
+drift/lock.json                           # resolved dependency lock (generated by drift prepare)
+drift/trust.json                          # v1 role-tagged project trust store (authors + certifiers per namespace)
+drift/mariadb-wire-proto.author-claim     # committed v1 author-claim (re-mint via `just author-claim`)
+drift/mariadb-rpc.author-claim            # committed v1 author-claim (re-mint via `just author-claim`)
+drift/the-drift-foundation.author-profile # publisher identity (human-readable)
 packages/
   mariadb-wire-proto/                # wire protocol package
   mariadb-rpc/                       # RPC layer package

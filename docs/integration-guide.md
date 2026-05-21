@@ -30,47 +30,87 @@ protocol instrumentation).
 
 ## Consumer prerequisites
 
-- Drift toolchain (`driftc` compiler, ABI 6 or later)
-- Published package artifacts (`.zdmp` + `.sig`) under a library root
-- Trust established for the publisher via `drift trust`
+- Current Drift toolchain (0.32.x+ with trust-v1, ABI 14)
+- Published package artifacts under a library root: `.zdmp` plus the
+  trust-v1 sidecars (`.author-claim` and `.cert-claim.<kid>.json`)
+- A project trust store (`drift/trust.json`) granting both an `authors`
+  kid and a `certifiers` kid for `mariadb.wire.proto.*` and `mariadb.rpc.*`
 
 ## Trust and signed package setup
 
+mariadb-wire-proto and mariadb-rpc are consumed through Drift's trust-v1
+package flow. Consumers need each package's artifact, its two role-tagged
+sidecars, and a project trust store granting both roles for the package
+namespaces.
+
+### What Drift verifies
+
+Drift distinguishes between two trust domains:
+
+- **Bundled stdlib**: the deployed toolchain ships `std.zdmp` plus its v1
+  sidecars and a `core_trust_v1.json` listing the Foundation kids in
+  their respective roles. The compiler verifies stdlib against that core
+  store.
+- **User / third-party packages**: packages such as mariadb-rpc and
+  mariadb-wire-proto are verified against the consumer's project trust
+  store (`drift/trust.json`), layered on top of the core store. The
+  consumer grants the publisher's author kid the `authors` role and the
+  certifier's kid the `certifiers` role for the package namespaces.
+
 ### Package root layout
 
-After deployment, the library root contains:
+After deployment, the library root contains, per artifact and version:
 
 ```
 <library-root>/
   mariadb-wire-proto/
     <version>/
       mariadb-wire-proto.zdmp
-      mariadb-wire-proto.sig
+      mariadb-wire-proto.author-claim
+      mariadb-wire-proto.cert-claim.<certifier-kid>.json
       mariadb-wire-proto.author-profile
   mariadb-rpc/
     <version>/
       mariadb-rpc.zdmp
-      mariadb-rpc.sig
+      mariadb-rpc.author-claim
+      mariadb-rpc.cert-claim.<certifier-kid>.json
       mariadb-rpc.author-profile
 ```
 
-The `.author-profile` is published automatically by `drift deploy`
-inside each versioned artifact directory.
+The `.author-claim` binds the package id, version, namespace, declared
+deps, and source identity. The `.cert-claim.<kid>.json` binds the
+artifact bytes, source identity, toolchain, cert suite, and resolved
+dependency graph. `.author-profile` is a human-readable publisher
+descriptor; it is not consulted at load time.
 
-### Establishing trust
+### Trust setup
 
-Import the publisher's author-profile from any published artifact:
+Two options to populate the project trust store:
 
 ```bash
-drift trust <library-root>/mariadb-rpc/<version>/mariadb-rpc.author-profile
+# A. Import the publisher's author kid from a published .author-claim:
+drift trust import \
+    --trust-store drift/trust.json \
+    /path/to/mariadb-rpc/<version>/mariadb-rpc.author-claim
+
+# B. Grant explicitly (use when you have the pubkey out of band):
+drift trust add \
+    --trust-store drift/trust.json \
+    --namespace 'mariadb.rpc.*' \
+    --pubkey-b64 <base64-32> \
+    --kid ed25519:<kid> \
+    --role author    # or 'certifier' / 'both'
 ```
 
-Drift shows the publisher metadata, key fingerprint, and namespace
-claims (`mariadb.wire.proto.*`, `mariadb.rpc.*`). Review and confirm.
-This updates the trust store referenced by `DRIFT_TRUST_STORE`.
+Repeat for `mariadb.wire.proto.*`. Production trust stores SHOULD pass
+`--role author` or `--role certifier` explicitly so role separation is
+visible in the file; the verifier consults each role independently.
 
-This is a one-time step per publisher key. Once trusted, all packages
-signed by that key under the declared namespaces are accepted.
+At load time the compiler checks: (1) the author-claim verifies under a
+trusted `authors` kid for the package namespace; (2) the cert-claim
+verifies under a trusted `certifiers` kid; (3) the .zdmp bytes hash to
+the cert-claim's `artifact_sha256`; (4) the resolved dep graph matches
+the cert-claim's recorded closure. Any mismatch is a hard rejection.
 
 ## Compilation
 
@@ -263,8 +303,8 @@ Handle both explicitly. For the full error tag reference, see
 
 | Phase | Symptom |
 |---|---|
-| **Trust** | `drift trust` rejects the `.author-profile` |
-| **Verification** | Signature rejected, untrusted signer, missing `.sig` |
+| **Trust** | `drift trust import` rejects the `.author-claim`, or the project `drift/trust.json` lacks the required role grant |
+| **Verification** | Author-claim or cert-claim signature rejected, untrusted kid for the required role, artifact_sha256 mismatch, missing `.author-claim` / `.cert-claim.<kid>.json` sidecar |
 | **Package load** | Missing transitive dep (`mariadb-wire-proto` not under package root) |
 | **Checker** | Type errors referencing package types |
 | **Link-time** | Undefined symbols (check runtime library availability) |

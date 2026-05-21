@@ -27,9 +27,13 @@ just perf-record-baseline  # record new baseline for this machine
 
 ## Preconditions
 
-- `DRIFTC` points at the deployed compiler
-- `drift` CLI on `PATH`
-- `DRIFT_SIGN_KEY_FILE` set (required by `just deploy`)
+- `DRIFT_TOOLCHAIN_ROOT` set to a 0.32.x+ toolchain (provides `drift` and `driftc`)
+- `DRIFT_SIGN_KEY_FILE` set — `just deploy` uses it to sign each artifact's
+  trust-v1 `.cert-claim.<kid>.json` sidecar
+- `drift/mariadb-{wire-proto,rpc}.author-claim` committed (run `just author-claim`
+  if absent or stale after a version bump)
+- `drift/trust.json` present with v1 role grants for `mariadb.wire.proto.*` and
+  `mariadb.rpc.*`
 - Local MariaDB instance up at `127.0.0.1:34114` with fixture schema loaded
 - Local proxy port `127.0.0.1:34115` available
 - Baseline recorded for this machine (`perf/baselines/<machine-id>.json`)

@@ -1,6 +1,6 @@
 {
   "format": "drift-trust",
-  "version": 0,
+  "version": 1,
   "keys": {
     "ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0=": {
       "algo": "ed25519",
@@ -8,13 +8,14 @@
     }
   },
   "namespaces": {
-    "mariadb.wire.proto.*": [
-      "ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="
-    ],
-    "mariadb.rpc.*": [
-      "ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="
-    ]
+    "mariadb.wire.proto.*": {
+      "authors":    ["ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="],
+      "certifiers": ["ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="]
+    },
+    "mariadb.rpc.*": {
+      "authors":    ["ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="],
+      "certifiers": ["ed25519:6DSIXZVQiEPX1/4G95LcyZZRmuyqEeSTFiqQ4N+mjz0="]
+    }
   },
-  "revoked": [],
-  "version": 0
+  "revoked": []
 }

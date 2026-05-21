@@ -3,7 +3,8 @@
 #                          (gates resolve $DRIFT_TOOLCHAIN_ROOT/bin/{drift,driftc})
 #   DRIFTC               — path to driftc compiler (dev convenience fallback)
 #   DRIFT_PKG_ROOT       — package library root for deploy/prepare (default: build/deploy)
-#   DRIFT_SIGN_KEY_FILE  — Ed25519 signing key file (required for deploy)
+#   DRIFT_SIGN_KEY_FILE  — Ed25519 signing key file: cert-claim signer for
+#                          `just deploy`; author-claim signer for `just author-claim`
 
 MANIFEST := "drift/manifest.json"
 DEPLOY_DEST := env("DRIFT_PKG_ROOT", "build/deploy")
@@ -24,9 +25,50 @@ prepare:
 	fi
 	"$DRIFT" prepare --dest "{{DEPLOY_DEST}}"
 
+# Re-mint drift/mariadb-{wire-proto,rpc}.author-claim under the Foundation
+# author key. Runs the manifest-aware drift-author publish (0.32.3+ only)
+# once per library artifact, since the manifest declares two. Use after any
+# source change that affects SCI (modules, assets, deps, version).
+#
+# The author-claims are then committed; the orchestrator emits the cert-claim
+# during certification, so the author key never enters the deploy host.
+# Override the seed via DRIFT_SIGN_KEY_FILE; DRIFT_LANG_ROOT defaults to
+# ~/src/drift-lang.
+author-claim:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	DRIFT_LANG_ROOT="${DRIFT_LANG_ROOT:-${HOME}/src/drift-lang}"
+	KEY_FILE="${DRIFT_SIGN_KEY_FILE:-${HOME}/.config/drift/keys/default.seed}"
+	[[ -d "${DRIFT_LANG_ROOT}/tools/drift_author" ]] || { echo "error: tools.drift_author not found at ${DRIFT_LANG_ROOT}" >&2; exit 1; }
+	[[ -f "${KEY_FILE}" ]] || { echo "error: signing key not found: ${KEY_FILE}" >&2; exit 1; }
+	for ART in mariadb-wire-proto mariadb-rpc; do
+	  echo "[author-claim] minting drift/${ART}.author-claim"
+	  PYTHONPATH="${DRIFT_LANG_ROOT}" python3 -m tools.drift_author publish \
+	    --manifest "$(pwd)/drift/manifest.json" \
+	    --artifact "${ART}" \
+	    --key-file "${KEY_FILE}" \
+	    --overwrite
+	done
+
 # Build, sign, and publish both packages to DEPLOY_DEST.
 # When called from certification gates, DRIFT_TOOLCHAIN_ROOT is set and drift
 # is resolved from it. For standalone dev use, falls back to drift on PATH.
+#
+# Under trust-v1 (0.32.x+), this consumes drift/<pkg>.author-claim (committed)
+# and emits cert-claim sidecars per artifact. The cert-claim requires either
+# real cert-suite evidence or the explicit no-evidence sentinel.
+#
+# If ARGS contain any --cert-suite-* flag we leave them alone; otherwise we
+# default to `--cert-suite-id mariadb-client/dev --cert-suite-no-evidence` so
+# the inner-dev loop works without orchestrator context.
+#
+# Scope of that default:
+#   - `just deploy ...ARGS` from the orch (passes its own --cert-suite-* flags):
+#     the default is bypassed; the orch's evidence-bearing claim is used.
+#   - `just stress` / `just perf` (depend on bare `deploy`, no ARGS): always
+#     use the dev default. These gates never produce evidence-bearing claims
+#     locally; release certification is an orchestrator-side flow that calls
+#     `drift deploy` directly with --cert-suite-id / --cert-suite-evidence-sha256.
 deploy *ARGS:
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -37,7 +79,11 @@ deploy *ARGS:
 	  DRIFT="drift"
 	fi
 	mkdir -p "{{DEPLOY_DEST}}"
-	"$DRIFT" deploy --dest "{{DEPLOY_DEST}}" {{ARGS}}
+	EXTRA=""
+	if [[ "{{ARGS}}" != *--cert-suite* ]]; then
+	  EXTRA="--cert-suite-id mariadb-client/dev --cert-suite-no-evidence"
+	fi
+	"$DRIFT" deploy --dest "{{DEPLOY_DEST}}" ${EXTRA} {{ARGS}}
 
 # --- Certification gates (orchestrator interface) ---
 # These three commands are the repo's public certification surface.
