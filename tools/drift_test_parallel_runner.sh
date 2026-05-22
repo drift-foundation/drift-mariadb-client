@@ -168,6 +168,27 @@ require_driftc() {
 	[[ -x "${DRIFTC}" ]] || { echo "error: driftc not executable at ${DRIFTC}" >&2; exit 1; }
 }
 
+# Resolve the toolchain's `flocker` wrapper for global compile-slot capping.
+# Sets FLOCKER_WRAP to an argv prefix that, when prepended to a command, caps
+# total concurrent invocations across all callers sharing the same key on this
+# host. Only engages when DRIFT_TEST_JOBS is explicitly set (the `just test`
+# certification gate) — in that mode the 3 lanes (plain/asan/memcheck) share
+# one slot pool, preventing 3× DRIFT_TEST_JOBS driftc from OOMing the box.
+# No-op for standalone single-lane runs that leave DRIFT_TEST_JOBS unset.
+resolve_flocker_wrap() {
+	FLOCKER_WRAP=()
+	[[ -z "${DRIFT_TEST_JOBS:-}" ]] && return 0
+	local flocker=""
+	if [[ -n "${DRIFT_TOOLCHAIN_ROOT:-}" && -x "${DRIFT_TOOLCHAIN_ROOT}/bin/flocker" ]]; then
+		flocker="${DRIFT_TOOLCHAIN_ROOT}/bin/flocker"
+	elif command -v flocker >/dev/null 2>&1; then
+		flocker="$(command -v flocker)"
+	else
+		return 0
+	fi
+	FLOCKER_WRAP=("${flocker}" --key drift-jobs -j "${DRIFT_TEST_JOBS}" --)
+}
+
 guard_jobs() {
 	if [[ ! "${JOBS}" =~ ^[0-9]+$ ]] || [[ "${JOBS}" -lt 1 ]]; then
 		echo "error: --jobs must be a positive integer (got '${JOBS}')" >&2
@@ -243,7 +264,7 @@ compile_only_file() {
 	local file="$1"
 	[[ -f "${file}" ]] || { echo "error: missing file ${file}" >&2; exit 2; }
 	build_pkg_flags
-	env -u DRIFT_MEMCHECK -u DRIFT_MASSIF "${DRIFTC}" --target-word-bits "${TARGET_WORD_BITS}" "${OPTIMIZED_FLAG[@]}" "${PKG_FLAGS[@]}" "${SRC_FILES[@]}" "${file}"
+	"${FLOCKER_WRAP[@]}" env -u DRIFT_MEMCHECK -u DRIFT_MASSIF "${DRIFTC}" --target-word-bits "${TARGET_WORD_BITS}" "${OPTIMIZED_FLAG[@]}" "${PKG_FLAGS[@]}" "${SRC_FILES[@]}" "${file}"
 }
 
 compile_test_binary() {
@@ -254,7 +275,7 @@ compile_test_binary() {
 	[[ -n "${test_module}" ]] || { echo "error: missing module declaration in ${test_file}" >&2; exit 2; }
 	local entry_symbol="${test_module}::main"
 	build_pkg_flags
-	env -u DRIFT_MEMCHECK -u DRIFT_MASSIF "${DRIFTC}" --target-word-bits "${TARGET_WORD_BITS}" "${OPTIMIZED_FLAG[@]}" "${PKG_FLAGS[@]}" --entry "${entry_symbol}" "${SRC_FILES[@]}" "${test_file}" -o "${bin_path}"
+	"${FLOCKER_WRAP[@]}" env -u DRIFT_MEMCHECK -u DRIFT_MASSIF "${DRIFTC}" --target-word-bits "${TARGET_WORD_BITS}" "${OPTIMIZED_FLAG[@]}" "${PKG_FLAGS[@]}" --entry "${entry_symbol}" "${SRC_FILES[@]}" "${test_file}" -o "${bin_path}"
 }
 
 run_binary() {
@@ -384,6 +405,7 @@ run_one_test() {
 }
 
 require_driftc
+resolve_flocker_wrap
 guard_jobs
 guard_incompat
 collect_src_files

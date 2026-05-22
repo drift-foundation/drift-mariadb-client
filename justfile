@@ -93,8 +93,12 @@ deploy *ARGS:
 
 # Certification gate: correctness and memory safety (plain + ASAN + memcheck).
 # Phase 1 (test-unit, no DB): plain + ASAN + memcheck run concurrently.
-#   Per-pass compile parallelism defaults to nproc/3 to avoid triple-stacking
-#   the compile storm; override via DRIFT_TEST_JOBS.
+#   DRIFT_TEST_JOBS is a GLOBAL compile-slot count: the runner wraps each
+#   driftc invocation with the toolchain's `flocker --key drift-jobs -j N`,
+#   so all 3 lanes share one N-slot pool on this host. Total concurrent
+#   driftc processes are bounded by DRIFT_TEST_JOBS regardless of lane count,
+#   preventing OOM cascades (driftc 0.32.x peaks ~500-800 MB RSS per process).
+#   Defaults to nproc/3; override via env.
 # Phase 2 (test-live, shared mdb114-a): three passes serial — the DB is a
 #   shared resource and live tests mutate session/tx/metadata state.
 # Requires DRIFT_TOOLCHAIN_ROOT. Resolves driftc exclusively from the toolchain root.
@@ -113,7 +117,7 @@ test:
 		rm -rf "${LOG_DIR}"
 	}
 	trap cleanup EXIT
-	echo "=== phase 1: test-unit — plain + asan + memcheck concurrent (DRIFT_TEST_JOBS=${DRIFT_TEST_JOBS} per pass, logs in ${LOG_DIR}) ==="
+	echo "=== phase 1: test-unit — plain + asan + memcheck concurrent (DRIFT_TEST_JOBS=${DRIFT_TEST_JOBS} global flocker slots, logs in ${LOG_DIR}) ==="
 	( just test-unit                    > "${LOG_DIR}/unit-plain.log"    2>&1 ) & pid_plain=$!
 	( DRIFT_ASAN=1     just test-unit   > "${LOG_DIR}/unit-asan.log"     2>&1 ) & pid_asan=$!
 	( DRIFT_MEMCHECK=1 just test-unit   > "${LOG_DIR}/unit-memcheck.log" 2>&1 ) & pid_memcheck=$!
