@@ -583,3 +583,33 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
 
 - Bumped both published artifacts in `drift/manifest.json` to `0.3.0` to mark the 0.30-era republish (net-tls pattern — minor bump marks the republish, not a behavior change).
 - Updated the co-artifact dependency range in `mariadb-rpc` to `mariadb-wire-proto@0.3`.
+
+## 2026-05-29
+
+### Drift 0.33.8 / ABI 14 toolchain adoption
+
+> Note: the 0.31.x / 0.5.0 and 0.32.x trust-v1 / flocker republishes landed in git
+> (`5042061`, `df26566`, `fb0743a`) without history entries; this entry resumes the log
+> from the current baseline (`mariadb-wire-proto@0.3.2`, `mariadb-rpc@0.5.1`).
+
+- Adopted staged `drift-0.33.8+abi14`. ABI stays at 14 (no compiler↔runtime boundary change); the delta is a compiler front-end strictness change, not a runtime change.
+- Headline compiler change: the front-end now **rejects implicit copies of non-Copy types** (`error: cannot copy 'x': type 'T' is not Copy (use move x)` [`E-AUTO-*`]). Affected types are structs, variants/enums, `Array<T>`, and anything holding them; `Int` / `Bool` / `String` remain `Copy`.
+- Audited both co-artifacts against 0.33.8 — **no source migration required**. The codebase already writes `move` at every site the new compiler flags (row buffers, connection-param structs, `move cfg` handoffs).
+- Full certification suite green on 0.33.8:
+  - `just test` — phase 1 unit (plain + ASAN + memcheck) and phase 2 live (×3 passes, shared `mdb114-a`); valgrind clean (all heap freed, 0 errors — no `std.log`-style leak).
+  - `just stress` — deploy + RPC contamination stress, exit 0.
+  - `just perf` — all gated wire metrics (`bytes_written` / `bytes_read` / `packets_written` / `packets_read`) **exactly equal** to the machine-keyed baseline for all three scenarios; zero on-wire change from the rebuild (`elapsed_ms` excluded from gating).
+- Pre-existing orphan (not a 0.33.8 regression): `packages/mariadb-rpc/tests/e2e/connect_state_handoff_probe_regression_test.drift` references `rpc.connect_handoff_probe`, which `mariadb.rpc` does not export. It fails identically on `drift-0.33.7+abi14` and is not wired into any `just` gate. Left as-is for separate cleanup.
+- `drift/lock.json` re-resolved via `drift prepare` → `mariadb-rpc: mariadb-wire-proto@0.3.3` (co-artifact, schema v4 unchanged).
+- Deploy-flow notes for the certification pass (per net-tls 0.5.2 adoption heads-up):
+  - A manifest version bump invalidates the committed `drift/<pkg>.author-claim` — it must be re-minted (`just author-claim`, wraps `drift author --overwrite`) or `drift deploy` hard-fails with a stale-claim error.
+  - This toolchain's `drift author` also emits a new `drift/<pkg>.author-pubkey.b64` sidecar (raw Ed25519 pubkey for trust bootstrap) to be committed alongside each claim.
+  - Pre-deploy sanity: `drift trust check` (read-only) validates claims, signatures, SCI equality, and grants.
+
+### Version bump
+
+- Patch-bumped both published artifacts in `drift/manifest.json` (rebuild-only adoption, no API or behavior change — matches the net-tls `0.5.1 → 0.5.2` pattern for this toolchain):
+  - `mariadb-wire-proto` to `0.3.3`
+  - `mariadb-rpc` to `0.5.2`
+- Co-artifact dependency range `mariadb-wire-proto@0.3` is unchanged (already covers `0.3.3`).
+- Author-claims to be re-minted against the bumped versions before deploy (owner runs `just author-claim`).
