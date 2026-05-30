@@ -54,6 +54,14 @@ BEGIN
         MESSAGE_TEXT = 'sp_error forced failure';
 END//
 
+-- Blocking proc for pool regression tests: a call with a short client-side
+-- read timeout will time out mid-read, which marks the wire session dead
+-- (is_alive() -> false). Used by pool_release_discard_wakeup_regression_test.
+CREATE PROCEDURE sp_sleep(IN secs INT)
+BEGIN
+  DO SLEEP(secs);
+END//
+
 -- Binary column regression test (mariadb-rpc-binary-column-utf8 defect).
 CREATE TABLE tb_binary_test (
   id INT PRIMARY KEY,

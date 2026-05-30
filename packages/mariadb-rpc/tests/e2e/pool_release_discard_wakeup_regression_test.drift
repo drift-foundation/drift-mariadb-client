@@ -1,0 +1,251 @@
+// Regression: discarding an unhealthy conn must wake a parked acquirer.
+//
+// Found during the "no socket I/O under the pool mutex" lock-discipline fix.
+// This pins a SEPARATE, adjacent bug surfaced by that review: the release
+// path's discard branch (unhealthy conn or closed pool) decremented
+// total_count but did NOT signal the Condvar. A waiter already parked on pool
+// exhaustion would therefore never learn the freed slot and could open a
+// replacement — a lost-wakeup / liveness bug.
+//
+// NOTE ON SCOPE: this does NOT prove the rpc.close()-under-lock fix. The
+// poisoned conn here is killed via a client read timeout, which calls
+// wire _mark_dead (is_closed = true); the later rpc.close() then short-
+// circuits without socket teardown. So this test exercises the discard
+// signal, not the unlocked-close. The lock/I/O move is covered by review.
+//
+// Harness needs two VTs: the bug is a missed wakeup of an ALREADY-parked
+// waiter, and a parked VT cannot also perform the release that would wake it.
+// So the pool is shared (Arc<Mutex<ConnectionPool>>) and a second VT parks in
+// acquire() while main poisons + releases the sole conn.
+//
+// On the FIXED code the discard signals the waiter; it opens a replacement and
+// joins fast (exit 0). On the PRE-FIX code the waiter is never signalled and,
+// with no acquire deadline yet, parks forever: main's join_timeout fires and we
+// return failure (exit 51) — though a leftover parked VT may make the process
+// hang until the harness/CI timeout. Verified by hand: removing the discard
+// signal_one makes this test report the lost-wakeup failure. Once Step-1 timed
+// acquire lands, give the waiter a finite deadline for a clean failure exit.
+
+module mariadb.rpc.tests.e2e.pool_release_discard_wakeup_regression_test;
+
+import std.core as core;
+import std.console as console;
+import std.concurrent as conc;
+import std.sync as sync;
+import std.format as format;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+import mariadb.rpc.pool as pool;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const CONNECT_TIMEOUT_MS: Int = 1000;
+// Short read timeout so a sp_sleep(5) call times out client-side mid-read,
+// marking the wire session dead (is_alive() -> false).
+const READ_TIMEOUT_MS: Int = 250;
+const SLEEP_SECS: Int = 5;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(CONNECT_TIMEOUT_MS);
+	b.with_read_timeout_ms(READ_TIMEOUT_MS);
+	b.with_write_timeout_ms(CONNECT_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+// Consume + drop a lease at a precise point, firing its release callback.
+fn _release_lease(lease: managed.LeasedConn) nothrow -> Void {
+	val _ = move lease;
+	return;
+}
+
+// Waiter VT: park in acquire() until the parked-on slot frees, then prove the
+// replacement conn is usable. Holds the wrapper mutex for its whole run; on
+// success it releases it before returning so main can close the pool.
+fn _waiter(shared: conc.Arc<conc.Mutex<pool.ConnectionPool> >, ready: conc.Arc<conc.AtomicBool>) nothrow -> Int {
+	val mu: &conc.Mutex<pool.ConnectionPool> = shared.get();
+	var guard = conc.lock(mu);
+	val p = guard.get_mut();
+	// Handshake: signal main we have reached the acquire() call. Main waits for
+	// this then settles briefly, so the poisoned release very likely lands after
+	// we have parked in cv.wait — not before, which would let pre-fix code pass
+	// by observing total_count < max_conns and opening without needing the
+	// signal. (Best-effort ordering, not a hard parked-proof — see main.)
+	val flag: &conc.AtomicBool = ready.get();
+	flag.store(true, sync.MemoryOrder::Release());
+	console.println("[waiter] calling acquire (expect to park on exhaustion)");
+	match p.acquire() {
+		core.Result::Err(e) => {
+			console.println("[waiter] acquire err: " + e.tag);
+			return 20;
+		},
+		core.Result::Ok(lv) => {
+			var lease = move lv;
+			console.println("[waiter] woke + acquired a replacement conn");
+			match lease.conn() {
+				core.Result::Err(_) => { return 21; },
+				core.Result::Ok(c) => {
+					match rpc.ping(c) {
+						core.Result::Ok(_) => { console.println("[waiter] replacement ping ok"); return 0; },
+						core.Result::Err(e) => { console.println("[waiter] replacement ping err: " + e.tag); return 22; }
+					}
+				}
+			}
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	console.println("=== pool_release_discard_wakeup_regression_test ===");
+	match _build_cfg() {
+		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },
+		core.Result::Ok(cfg) => {
+			var pc = pool.default_pool_config();
+			pc.min_idle = 0;
+			pc.max_conns = 1;          // exactly one conn -> trivially saturable
+			pc.keepalive_interval_ms = 0;  // no keepalive interference
+			pc.idle_timeout_ms = 60000;
+			match pool.open(move cfg, move pc) {
+				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
+				core.Result::Ok(v) => {
+					var p = move v;
+					// Take the sole conn -> pool is now saturated.
+					match p.acquire() {
+						core.Result::Err(e) => { console.println("[main] initial acquire failed: " + e.tag); val _ = p.close(); return 3; },
+						core.Result::Ok(lv1) => {
+							var lease1 = move lv1;
+							console.println("[main] holding sole lease; pool saturated at max_conns=1");
+
+							// Share the pool so a second VT can park in acquire().
+							var shared: conc.Arc<conc.Mutex<pool.ConnectionPool> > = conc.arc(conc.mutex(move p));
+							var ready: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
+							var w: conc.Arc<conc.Mutex<pool.ConnectionPool> > = shared.clone();
+							var w_ready: conc.Arc<conc.AtomicBool> = ready.clone();
+							var cb: core.Callback0<Int> = core.callback0(| | captures(move w, move w_ready) => { return _waiter(move w, move w_ready); });
+							var vt: conc.VirtualThread<Int> = conc.spawn(move cb);
+
+							// Wait for the waiter's handshake (it has reached the acquire() call).
+							// If it never arrives, the waiter VT failed/stalled before acquire;
+							// that's a SETUP failure — fail out rather than proceed, since
+							// releasing now would test the wrong ordering and could false-pass.
+							val ready_flag: &conc.AtomicBool = ready.get();
+							var waited_ms = 0;
+							var handshaken = false;
+							while not handshaken {
+								if ready_flag.load(sync.MemoryOrder::Acquire()) {
+									handshaken = true;
+								} else {
+									if waited_ms >= 2000 {
+										console.println("[main] SETUP FAIL: waiter handshake not seen within 2000ms");
+										_release_lease(move lease1);
+										return 42;
+									}
+									val _ = conc.sleep(conc.Duration(millis = 5));
+									waited_ms = waited_ms + 5;
+								}
+							}
+							// Short settle to cover the brief gap between the handshake (set just
+							// before acquire()) and the waiter actually parking in cv.wait. This is
+							// best-effort, NOT a hard parked-proof: a true proof needs the pool to
+							// expose a waiter counter/event. Acceptable for a practical regression.
+							val _ = conc.sleep(conc.Duration(millis = 100));
+
+							// Poison the held conn: sp_sleep(5) outlives the 250ms read
+							// timeout, so the call errors and the session is marked dead.
+							var setup_rc = 0;
+							match lease1.conn() {
+								core.Result::Err(_) => { console.println("[main] lease1.conn() empty"); setup_rc = 30; },
+								core.Result::Ok(c) => {
+									var args: Array<rpc.RpcArg> = [];
+									args.push(rpc.arg_int(SLEEP_SECS));
+									match c.call(&"sp_sleep", &args) {
+										core.Result::Ok(s) => {
+											// Unexpected: returned before the read timeout. Drop the
+											// statement (drains) and fail as an invalid setup, else the
+											// healthy conn would requeue and mask the discard path.
+											val _ = move s;
+											console.println("[main] SETUP FAIL: sp_sleep returned before timeout");
+											setup_rc = 40;
+										},
+										core.Result::Err(e) => { console.println("[main] sp_sleep timed out (expected): " + e.tag); }
+									}
+								}
+							}
+							if setup_rc != 0 {
+								_release_lease(move lease1);
+								vt.cancel();
+								val _ = vt.join();
+								var g0 = conc.lock(shared.get());
+								val _ = g0.get_mut().close();
+								return setup_rc;
+							}
+
+							// Confirm the conn is unhealthy so release will DISCARD (not requeue).
+							var dead = false;
+							match lease1.conn() {
+								core.Result::Err(_) => {},
+								core.Result::Ok(c) => {
+									if rpc.is_alive(c) {
+										console.println("[main] SETUP FAIL: conn still alive after timeout");
+									} else {
+										dead = true;
+										console.println("[main] conn is_alive=false (will be discarded)");
+									}
+								}
+							}
+							if not dead {
+								_release_lease(move lease1);
+								vt.cancel();
+								val _ = vt.join();
+								var g1 = conc.lock(shared.get());
+								val _ = g1.get_mut().close();
+								return 41;
+							}
+
+							// Drop the poisoned lease -> _release discards it -> signal_one()
+							// must wake the parked waiter.
+							console.println("[main] dropping poisoned lease (triggers discard + signal)");
+							_release_lease(move lease1);
+
+							match vt.join_timeout(conc.Duration(millis = 5000)) {
+								core.Result::Ok(code) => {
+									console.println("[main] waiter joined, code=" + format.format_int(code));
+									// Waiter released the wrapper mutex; safe to close.
+									var g = conc.lock(shared.get());
+									val _ = g.get_mut().close();
+									if code != 0 { return code; }
+								},
+								core.Result::Err(e) => {
+									// PRE-FIX REGRESSION PATH. The waiter was never signalled and
+									// is still parked in cv.wait holding the wrapper mutex. We can
+									// neither close (mutex is held) nor unpark it (Condvar.wait
+									// ignores cancel; only close()/signal wake it). So we just
+									// return failure and leave the parked VT behind as the signal.
+									// NOTE: depending on runtime VT-shutdown semantics this may exit
+									// 51 or hang until the harness/CI job timeout — pre-Step-1 there
+									// is no acquire deadline to bail the waiter cleanly. Once timed
+									// acquire lands, give the waiter a finite deadline so this path
+									// fails deterministically with a clean exit instead.
+									console.println("[main] FAIL: waiter never woke (lost wakeup regression): " + e.kind);
+									return 51;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	console.println("=== pool_release_discard_wakeup_regression_test: passed ===");
+	return 0;
+}

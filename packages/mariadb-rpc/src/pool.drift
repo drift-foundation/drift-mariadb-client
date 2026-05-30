@@ -140,23 +140,10 @@ implement managed.ConnectionSource for ConnectionPool {
 			}
 		}
 
-		// Drain and close all available conns; flip closed flag.
-		val mu_ref: &conc.Mutex<PoolSlot> = &inner_ref.slot;
-		var guard = conc.lock(mu_ref);
-		val slot = guard.get_mut();
-		slot.closed = true;
-		var done = false;
-		while not done {
-			val popped = slot.available.pop_back();
-			match popped {
-				Optional::None => { done = true; },
-				Optional::Some(entry) => {
-					var e = move entry;
-					_close_entry_conn(&mut e);
-					slot.total_count = slot.total_count - 1;
-				}
-			}
-		}
+		// Flip closed + drain conns OUT under the lock (no I/O), then close
+		// them after the guard drops — never tear down sockets under the mutex.
+		val doomed = _drain_conns_locked(&self.inner);
+		_close_all(move doomed);
 		return core.Result::Ok(core.void_value());
 	}
 }
@@ -354,9 +341,12 @@ fn _do_open(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Res
 			return core.Result::Err(_pool_error("pool-open-failed", e.tag));
 		},
 		core.Result::Ok(c) => {
-			// NOTE: _acquire is still holding the slot mutex when this returns.
-			// Do NOT call any helper that re-locks the slot (e.g. _pool_total_count).
-			// The spin Mutex isn't reentrant — re-locking from the same VT deadlocks.
+			// We hold no lock here: _acquire_decide() dropped the slot guard
+			// before returning ShouldOpen, and rpc.connect ran unlocked. The
+			// opened_total = -1 is a legacy placeholder from when this path was
+			// believed to run under the lock; a real _pool_total_count()
+			// snapshot could now be emitted (left as-is to keep this change
+			// scoped to the lock-discipline fix).
 			_emit_event_unlocked(inner, PoolEvent::ConnOpened(opened_total = -1));
 			var inner_for_release: conc.Arc<PoolInner> = inner.clone();
 			val ts = _now_ms(inner);
@@ -381,14 +371,37 @@ fn _build_release_cb(inner_for_release: conc.Arc<PoolInner>, is_keepalive: Bool,
 fn _release(inner: conc.Arc<PoolInner>, conn: rpc.RpcConnection, is_keepalive: Bool, preserved_ts_ms: Int) nothrow -> Void {
 	var c = move conn;
 	val healthy = rpc.is_alive(&c);
+	// Decide requeue-vs-discard under the lock; a discarded conn is handed back
+	// so its socket teardown (rpc.close) runs OUTSIDE the slot mutex — holding
+	// the lock across network I/O would block every concurrent acquire/release.
+	val to_close = _release_decide(&inner, move c, healthy, is_keepalive, preserved_ts_ms);
+	match to_close {
+		Optional::Some(doomed) => { var d = move doomed; val _ = rpc.close(&mut d); },
+		Optional::None => {}
+	}
+	return;
+}
+
+// Lock-holding decide phase for release. Updates counters and either requeues
+// the conn (timestamped) or, for an unhealthy/closed-pool conn, decrements
+// total_count and returns it for the caller to close after the guard drops.
+// NO socket I/O happens here. Guard drops at function return.
+fn _release_decide(inner: &conc.Arc<PoolInner>, conn: rpc.RpcConnection, healthy: Bool, is_keepalive: Bool, preserved_ts_ms: Int) nothrow -> Optional<rpc.RpcConnection> {
+	var c = move conn;
 	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
 	var guard = conc.lock(mu_ref);
 	val s = guard.get_mut();
 	s.active_count = s.active_count - 1;
 
 	if not healthy or s.closed {
-		val _ = rpc.close(&mut c);
+		// Count it out now; close it unlocked. Discarding frees a total_count
+		// slot, so signal a parked waiter — with total_count < max it can now
+		// open a replacement. (Omitting this is a missed-wakeup/liveness bug: a
+		// saturated waiter would otherwise never learn the slot freed up. On a
+		// closed pool the cv is already closed, so this is a harmless no-op.)
 		s.total_count = s.total_count - 1;
+		inner.get().cv.signal_one();
+		return Optional::Some(move c);
 	} else {
 		// User release updates the timestamp; keepalive release preserves it
 		// so idle-reap sees the original idle window.
@@ -397,8 +410,8 @@ fn _release(inner: conc.Arc<PoolInner>, conn: rpc.RpcConnection, is_keepalive: B
 		val entry = ConnEntry(conn = Optional::Some(move c), last_user_release_ms = ts);
 		s.available.push_back(move entry);
 		inner.get().cv.signal_one();
+		return Optional<rpc.RpcConnection>::None();
 	}
-	return;
 }
 
 // -----------------------------------------------------------------------
@@ -444,10 +457,18 @@ fn _keepalive_tick(inner: &conc.Arc<PoolInner>) nothrow -> Void {
 	return;
 }
 
-fn _idle_reap(inner: &conc.Arc<PoolInner>) nothrow -> Void {
-	val idle_timeout_ms = _pool_idle_timeout_ms(inner);
-	val min_idle = _pool_min_idle(inner);
-	val now_ms = _now_ms(inner);
+// Conn evicted by idle-reap, carried out from under the lock so its socket
+// teardown (rpc.close) AND the observability emit happen unlocked.
+struct ReapedConn {
+	conn: Optional<rpc.RpcConnection>,
+	total_after: Int  // total_count snapshot right after this conn was removed
+}
+
+// Lock-holding reap-decide phase: walk the available deque oldest-first, move
+// out conns past idle_timeout (keeping >= min_idle live), decrement
+// total_count. NO socket I/O under the lock. Guard drops at function return.
+fn _reap_aged_locked(inner: &conc.Arc<PoolInner>, idle_timeout_ms: Int, min_idle: Int, now_ms: Int) nothrow -> containers.Deque<ReapedConn> {
+	var doomed: containers.Deque<ReapedConn> = containers.deque<type ReapedConn>();
 	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
 	var guard = conc.lock(mu_ref);
 	val s = guard.get_mut();
@@ -465,11 +486,40 @@ fn _idle_reap(inner: &conc.Arc<PoolInner>) nothrow -> Void {
 						s.available.push_front(move e);
 						done = true;
 					} else {
-						_close_entry_conn(&mut e);
+						val taken = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
 						s.total_count = s.total_count - 1;
-						_emit_event_unlocked(inner, PoolEvent::ConnClosedByReap(closed_total = s.total_count));
+						match taken {
+							Optional::Some(c) => { doomed.push_back(ReapedConn(conn = Optional::Some(move c), total_after = s.total_count)); },
+							Optional::None => {}
+						}
 					}
 				}
+			}
+		}
+	}
+	return move doomed;
+}
+
+fn _idle_reap(inner: &conc.Arc<PoolInner>) nothrow -> Void {
+	val idle_timeout_ms = _pool_idle_timeout_ms(inner);
+	val min_idle = _pool_min_idle(inner);
+	val now_ms = _now_ms(inner);
+	var doomed = _reap_aged_locked(inner, idle_timeout_ms, min_idle, now_ms);
+	// Close evicted conns + emit reap events OUTSIDE the lock. (The emit runs a
+	// consumer callback, which must never fire under the slot mutex either.)
+	var done = false;
+	while not done {
+		val popped = doomed.pop_front();
+		match popped {
+			Optional::None => { done = true; },
+			Optional::Some(rc) => {
+				var r = move rc;
+				val taken = mem.replace(&mut r.conn, Optional<rpc.RpcConnection>::None());
+				match taken {
+					Optional::Some(c) => { var conn = move c; val _ = rpc.close(&mut conn); },
+					Optional::None => {}
+				}
+				_emit_event_unlocked(inner, PoolEvent::ConnClosedByReap(closed_total = r.total_after));
 			}
 		}
 	}
@@ -484,11 +534,44 @@ fn _pool_error(tag: String, message: String) nothrow -> managed.ManagedError {
 	return managed.ManagedError(tag = tag, message = message);
 }
 
-fn _close_entry_conn(e: &mut ConnEntry) nothrow -> Void {
-	val taken = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
-	match taken {
-		Optional::Some(c) => { var conn = move c; val _ = rpc.close(&mut conn); },
-		Optional::None => {}
+// Lock-holding drain: flip closed, move every available conn out of the slot
+// (NO I/O), decrement total_count. Returns the conns for the caller to close
+// once the guard has dropped. Guard drops at function return.
+fn _drain_conns_locked(inner: &conc.Arc<PoolInner>) nothrow -> containers.Deque<rpc.RpcConnection> {
+	var doomed: containers.Deque<rpc.RpcConnection> = containers.deque<type rpc.RpcConnection>();
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	s.closed = true;
+	var done = false;
+	while not done {
+		val popped = s.available.pop_back();
+		match popped {
+			Optional::None => { done = true; },
+			Optional::Some(entry) => {
+				var e = move entry;
+				val taken = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
+				match taken {
+					Optional::Some(c) => { doomed.push_back(move c); },
+					Optional::None => {}
+				}
+				s.total_count = s.total_count - 1;
+			}
+		}
+	}
+	return move doomed;
+}
+
+// Close a batch of conns with NO lock held.
+fn _close_all(doomed: containers.Deque<rpc.RpcConnection>) nothrow -> Void {
+	var d = move doomed;
+	var done = false;
+	while not done {
+		val popped = d.pop_back();
+		match popped {
+			Optional::None => { done = true; },
+			Optional::Some(c) => { var conn = move c; val _ = rpc.close(&mut conn); }
+		}
 	}
 	return;
 }
@@ -536,22 +619,8 @@ fn _pool_stop_flag(inner: &conc.Arc<PoolInner>) nothrow -> Bool {
 }
 
 fn _drain_close(inner: &conc.Arc<PoolInner>) nothrow -> Void {
-	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
-	var guard = conc.lock(mu_ref);
-	val s = guard.get_mut();
-	s.closed = true;
-	var done = false;
-	while not done {
-		val popped = s.available.pop_back();
-		match popped {
-			Optional::None => { done = true; },
-			Optional::Some(entry) => {
-				var e = move entry;
-				_close_entry_conn(&mut e);
-				s.total_count = s.total_count - 1;
-			}
-		}
-	}
+	val doomed = _drain_conns_locked(inner);
+	_close_all(move doomed);
 	return;
 }
 

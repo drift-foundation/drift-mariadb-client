@@ -227,6 +227,8 @@ test-live:
 	@just rpc-live-connect-state-stage
 	@just rpc-live-connect-state-regression
 	@just rpc-live
+	@just rpc-live-pool
+	@just rpc-live-pool-discard-wakeup
 
 # --- Wire-proto tests ---
 
@@ -338,6 +340,12 @@ rpc-live-pool:
 	@tools/drift_test_parallel_runner.sh run-one \
 	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
 	  --test-file packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift \
+	  --target-word-bits 64
+
+rpc-live-pool-discard-wakeup:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift \
 	  --target-word-bits 64
 
 # --- Local MariaDB dev instances ---
