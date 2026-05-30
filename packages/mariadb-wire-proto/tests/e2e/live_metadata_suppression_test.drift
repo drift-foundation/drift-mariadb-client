@@ -34,7 +34,7 @@ fn _opts() nothrow -> proto.WireConnectOptions {
 // Scenario 1: single resultset with metadata suppressed.
 fn scenario_single_resultset_metadata_suppressed() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -111,7 +111,7 @@ fn scenario_single_resultset_metadata_suppressed() nothrow -> Int {
 // Scenario 2: multi-resultset SP with metadata suppressed.
 fn scenario_multi_resultset_metadata_suppressed() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 2000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -172,7 +172,7 @@ fn scenario_multi_resultset_metadata_suppressed() nothrow -> Int {
 // the metadata flag only affects resultset packets.
 fn scenario_ok_response_unaffected() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 3000; },
 		core.Result::Ok(session) => {
 			var conn = move session;

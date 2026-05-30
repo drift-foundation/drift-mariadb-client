@@ -18,13 +18,14 @@
 // So the pool is shared (Arc<Mutex<ConnectionPool>>) and a second VT parks in
 // acquire() while main poisons + releases the sole conn.
 //
-// On the FIXED code the discard signals the waiter; it opens a replacement and
-// joins fast (exit 0). On the PRE-FIX code the waiter is never signalled and,
-// with no acquire deadline yet, parks forever: main's join_timeout fires and we
-// return failure (exit 51) — though a leftover parked VT may make the process
-// hang until the harness/CI timeout. Verified by hand: removing the discard
-// signal_one makes this test report the lost-wakeup failure. Once Step-1 timed
-// acquire lands, give the waiter a finite deadline for a clean failure exit.
+// On the FIXED code the discard signals the parked waiter well within its
+// acquire deadline; it wakes, opens a replacement, and returns 0 (exit 0).
+// On the PRE-FIX code (discard frees total_count but omits signal_one) the
+// waiter is never signalled, so its own acquire(3000ms) deadline elapses and it
+// returns acquire-timeout (waiter code 20) — a clean failure, no hang. Verified
+// by hand: removing the discard signal_one flips this test from pass to a
+// waiter-code-20 failure. The waiter deadline (3000ms) is kept well below main's
+// join_timeout (5000ms) so main always observes the waiter's outcome.
 
 module mariadb.rpc.tests.e2e.pool_release_discard_wakeup_regression_test;
 
@@ -84,7 +85,7 @@ fn _waiter(shared: conc.Arc<conc.Mutex<pool.ConnectionPool> >, ready: conc.Arc<c
 	val flag: &conc.AtomicBool = ready.get();
 	flag.store(true, sync.MemoryOrder::Release());
 	console.println("[waiter] calling acquire (expect to park on exhaustion)");
-	match p.acquire() {
+	match p.acquire(conc.Duration(millis = 3000)) {
 		core.Result::Err(e) => {
 			console.println("[waiter] acquire err: " + e.tag);
 			return 20;
@@ -120,7 +121,7 @@ fn main() nothrow -> Int {
 				core.Result::Ok(v) => {
 					var p = move v;
 					// Take the sole conn -> pool is now saturated.
-					match p.acquire() {
+					match p.acquire(conc.Duration(millis = 2000)) {
 						core.Result::Err(e) => { console.println("[main] initial acquire failed: " + e.tag); val _ = p.close(); return 3; },
 						core.Result::Ok(lv1) => {
 							var lease1 = move lv1;
@@ -217,26 +218,25 @@ fn main() nothrow -> Int {
 							console.println("[main] dropping poisoned lease (triggers discard + signal)");
 							_release_lease(move lease1);
 
+							// The waiter self-bounds via its own acquire(3000ms): on FIXED code
+							// it wakes from the discard signal and returns 0; on PRE-FIX code it
+							// is never signalled, times out, and returns 20. Either way it
+							// completes well before this join deadline, so the Ok arm carries the
+							// verdict; the Err arm is only a defensive net for an unexpected stall.
 							match vt.join_timeout(conc.Duration(millis = 5000)) {
 								core.Result::Ok(code) => {
 									console.println("[main] waiter joined, code=" + format.format_int(code));
 									// Waiter released the wrapper mutex; safe to close.
 									var g = conc.lock(shared.get());
 									val _ = g.get_mut().close();
+									// code 0 = woken by discard signal; code 20 = acquire-timeout
+									// (the lost-wakeup regression); other non-zero = setup/ping issue.
 									if code != 0 { return code; }
 								},
 								core.Result::Err(e) => {
-									// PRE-FIX REGRESSION PATH. The waiter was never signalled and
-									// is still parked in cv.wait holding the wrapper mutex. We can
-									// neither close (mutex is held) nor unpark it (Condvar.wait
-									// ignores cancel; only close()/signal wake it). So we just
-									// return failure and leave the parked VT behind as the signal.
-									// NOTE: depending on runtime VT-shutdown semantics this may exit
-									// 51 or hang until the harness/CI job timeout — pre-Step-1 there
-									// is no acquire deadline to bail the waiter cleanly. Once timed
-									// acquire lands, give the waiter a finite deadline so this path
-									// fails deterministically with a clean exit instead.
-									console.println("[main] FAIL: waiter never woke (lost wakeup regression): " + e.kind);
+									// Defensive: waiter did not return within the join deadline even
+									// though its own acquire deadline (3000ms) should have bailed it.
+									console.println("[main] FAIL: waiter did not return within join deadline: " + e.kind);
 									return 51;
 								}
 							}

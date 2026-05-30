@@ -229,6 +229,10 @@ test-live:
 	@just rpc-live
 	@just rpc-live-pool
 	@just rpc-live-pool-discard-wakeup
+	@just rpc-live-pool-acquire-timeout
+	@just rpc-live-managed
+	@just rpc-live-managed-acquire-timeout
+	@just rpc-live-managed-release-wakeup
 
 # --- Wire-proto tests ---
 
@@ -336,6 +340,18 @@ rpc-live-managed:
 	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
 	  --target-word-bits 64
 
+rpc-live-managed-acquire-timeout:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/managed_acquire_timeout_test.drift \
+	  --target-word-bits 64
+
+rpc-live-managed-release-wakeup:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/managed_release_wakeup_test.drift \
+	  --target-word-bits 64
+
 rpc-live-pool:
 	@tools/drift_test_parallel_runner.sh run-one \
 	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
@@ -346,6 +362,12 @@ rpc-live-pool-discard-wakeup:
 	@tools/drift_test_parallel_runner.sh run-one \
 	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
 	  --test-file packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift \
+	  --target-word-bits 64
+
+rpc-live-pool-acquire-timeout:
+	@tools/drift_test_parallel_runner.sh run-one \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/pool_acquire_timeout_test.drift \
 	  --target-word-bits 64
 
 # --- Local MariaDB dev instances ---

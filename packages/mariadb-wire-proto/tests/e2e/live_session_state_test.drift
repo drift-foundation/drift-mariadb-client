@@ -18,7 +18,7 @@ fn _opts() nothrow -> proto.WireConnectOptions {
 // After close(), query() must return "session-closed".
 fn scenario_guard_session_closed() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -48,7 +48,7 @@ fn scenario_guard_session_closed() nothrow -> Int {
 // While a statement is active, ping() must return "active-statement-present".
 fn scenario_guard_active_statement() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1100; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -103,7 +103,7 @@ fn scenario_guard_active_statement() nothrow -> Int {
 // Setting reusable=false directly, then query() must return "session-not-reusable".
 fn scenario_guard_not_reusable() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1200; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -135,7 +135,7 @@ fn scenario_guard_not_reusable() nothrow -> Int {
 // After consuming a statement to StatementEnd, ping() should succeed.
 fn scenario_busy_to_ready() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1300; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -181,7 +181,7 @@ fn scenario_busy_to_ready() nothrow -> Int {
 // then ping() should succeed.
 fn scenario_drop_autodrain_to_ready() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1400; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -218,7 +218,7 @@ fn scenario_drop_autodrain_to_ready() nothrow -> Int {
 // Explicit session_is_reusable() assertions before and after.
 fn scenario_reset_reusability() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1500; },
 		core.Result::Ok(session) => {
 			var conn = move session;

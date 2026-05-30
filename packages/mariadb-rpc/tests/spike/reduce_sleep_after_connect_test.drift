@@ -119,7 +119,7 @@ fn l2b_net_connect_read_write() nothrow -> Int {
 fn l2w_wire_connect() nothrow -> Int {
 	console.println("--- L2w: wire.connect (no SET NAMES / autocommit) ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(e) => { console.println("[L2w] wire.connect failed " + e.tag); return 221; },
 		core.Result::Ok(s) => {
 			var session = move s;
@@ -138,7 +138,7 @@ fn l2w_wire_connect() nothrow -> Int {
 fn l2q_wire_connect_plus_one_query() nothrow -> Int {
 	console.println("--- L2q: wire.connect + 1 wire.query (drain to end) ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(e) => { console.println("[L2q] wire.connect failed " + e.tag); return 231; },
 		core.Result::Ok(s) => {
 			var session = move s;
@@ -198,7 +198,7 @@ fn _drain(stmt: &mut wire.Statement) nothrow -> Void {
 fn l3a_set_names_only() nothrow -> Int {
 	console.println("--- L3a: wire.connect + ONE 'SET NAMES utf8mb4' query ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 341; },
 		core.Result::Ok(s) => {
 			var session = move s;
@@ -222,7 +222,7 @@ fn l3a_set_names_only() nothrow -> Int {
 fn l3b_set_autocommit_only() nothrow -> Int {
 	console.println("--- L3b: wire.connect + set_autocommit(false), no prior query ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 351; },
 		core.Result::Ok(s) => {
 			var session = move s;
@@ -245,7 +245,7 @@ fn l3b_set_autocommit_only() nothrow -> Int {
 fn l3c_two_queries() nothrow -> Int {
 	console.println("--- L3c: wire.connect + 'SELECT 1' x 2 ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 361; },
 		core.Result::Ok(s) => {
 			var session = move s;

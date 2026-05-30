@@ -1,0 +1,117 @@
+// Step 2 headline: ManagedConnection.acquire(timeout) on a busy slot parks for
+// the budget then returns the shared `acquire-timeout` tag — it no longer
+// returns managed-acquire-busy instantly, and does not block forever.
+//
+// Single VT: the managed conn has one slot. Hold it via L1, then acquire again
+// with a short deadline. The slot is busy (no keepalive, nothing releases), so
+// the second acquire parks on the Condvar for ~the budget and times out.
+
+module mariadb.rpc.tests.e2e.managed_acquire_timeout_test;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const TIMEOUT_MS: Int = 1000;
+const ACQUIRE_BUDGET_MS: Int = 300;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _release_lease(lease: managed.LeasedConn) nothrow -> Void {
+	val _ = move lease;
+	return;
+}
+
+fn main() nothrow -> Int {
+	console.println("=== managed_acquire_timeout_test ===");
+	match _build_cfg() {
+		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },
+		core.Result::Ok(cfg) => {
+			var mcfg = managed.default_managed_config();
+			mcfg.keepalive_interval_ms = 0;  // no keepalive contention for the slot
+			match managed.open(move cfg, move mcfg) {
+				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
+				core.Result::Ok(v) => {
+					var mc = move v;
+					match mc.acquire(conc.Duration(millis = 2000)) {
+						core.Result::Err(e) => { console.println("[main] first acquire failed: " + e.tag); val _ = mc.close(); return 3; },
+						core.Result::Ok(lv1) => {
+							var lease1 = move lv1;
+							console.println("[main] holding the sole managed conn; slot busy");
+							val t0 = time.now_monotonic();
+							var rc = 0;
+							match mc.acquire(conc.Duration(millis = ACQUIRE_BUDGET_MS)) {
+								core.Result::Ok(_lv2) => {
+									console.println("[main] FAIL: second acquire unexpectedly succeeded on a busy slot");
+									rc = 4;
+								},
+								core.Result::Err(e) => {
+									val elapsed = time.elapsed_ms(&t0);
+									console.println("[main] second acquire returned tag=" + e.tag + " after " + format.format_int(elapsed) + "ms");
+									if e.tag != "acquire-timeout" {
+										console.println("[main] FAIL: expected acquire-timeout tag");
+										rc = 5;
+									} else {
+										if elapsed < 200 {
+											console.println("[main] FAIL: returned too fast (" + format.format_int(elapsed) + "ms) — deadline not honored as a wait");
+											rc = 6;
+										}
+									}
+								}
+							}
+							// Release so the conn returns to the slot (now AVAILABLE).
+							_release_lease(move lease1);
+							// Scenario B: with the slot available, an already-expired budget
+							// (timeout=0) must STILL time out — the deadline is checked before
+							// taking the slot, matching the pool contract.
+							if rc == 0 {
+								match mc.acquire(conc.Duration(millis = 0)) {
+									core.Result::Ok(_lv3) => {
+										console.println("[main] FAIL: acquire(0) returned the conn despite an expired budget");
+										rc = 8;
+									},
+									core.Result::Err(e) => {
+										console.println("[main] acquire(0) with available slot returned tag=" + e.tag);
+										if e.tag != "acquire-timeout" {
+											console.println("[main] FAIL: expected acquire-timeout for expired budget");
+											rc = 9;
+										}
+									}
+								}
+							}
+							match mc.close() {
+								core.Result::Err(_) => { if rc == 0 { rc = 7; } },
+								core.Result::Ok(_) => {}
+							}
+							if rc != 0 { return rc; }
+						}
+					}
+				}
+			}
+		}
+	}
+	console.println("=== managed_acquire_timeout_test: passed ===");
+	return 0;
+}

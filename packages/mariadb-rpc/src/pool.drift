@@ -116,14 +116,23 @@ pub struct ConnectionPool {
 // -----------------------------------------------------------------------
 
 implement managed.ConnectionSource for ConnectionPool {
-	pub fn acquire(self: &mut ConnectionPool) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
-		return _acquire(&self.inner, false);
+	// &self (not &mut): acquire only reads self.inner and is internally
+	// synchronized, so callers can share via Arc<ConnectionPool> and acquire
+	// concurrently without an outer mutex serializing them.
+	pub fn acquire(self: &ConnectionPool, timeout: conc.Duration) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
+		return _acquire(&self.inner, false, timeout.millis);
 	}
 
 	pub fn close(self: &mut ConnectionPool) nothrow -> core.Result<Void, managed.ManagedError> {
 		val inner_ref: &PoolInner = self.inner.get();
 		val flag_ref: &conc.AtomicBool = &inner_ref.stop_flag;
 		flag_ref.store(true, sync.MemoryOrder::Release());
+
+		// Mark the slot closed under lock FIRST — before cv.close(), the keepalive
+		// join, and the drain. _rollback_reservation / _open_raced_close test
+		// s.closed, so an open completing in this window must observe closed and
+		// yield pool-closed. (Draining happens later, still under lock.)
+		_mark_pool_closed(&self.inner);
 
 		// Wake all waiters with CLOSED.
 		val cv_ref: &conc.Condvar = &inner_ref.cv;
@@ -140,8 +149,8 @@ implement managed.ConnectionSource for ConnectionPool {
 			}
 		}
 
-		// Flip closed + drain conns OUT under the lock (no I/O), then close
-		// them after the guard drops — never tear down sockets under the mutex.
+		// Drain conns OUT under the lock (no I/O; closed already flipped above),
+		// then close them after the guard drops — never tear down under the mutex.
 		val doomed = _drain_conns_locked(&self.inner);
 		_close_all(move doomed);
 		return core.Result::Ok(core.void_value());
@@ -238,7 +247,7 @@ pub variant AcquireDecision {
 // Runs the lock-holding decide phase. Returns when one of GotConn /
 // ShouldOpen / WasError is reached. Guard is dropped at function return so
 // the post-decision dispatch can do network I/O safely.
-fn _acquire_decide(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> AcquireDecision {
+fn _acquire_decide(inner: &conc.Arc<PoolInner>, is_keepalive: Bool, start: &time.Instant, budget_ms: Int) nothrow -> AcquireDecision {
 	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
 	var guard = conc.lock(mu_ref);
 
@@ -250,52 +259,73 @@ fn _acquire_decide(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> A
 			decision = AcquireDecision::WasError(msg_tag = "pool-closed", msg_detail = "pool is shutting down");
 			done = true;
 		} else {
-			val popped = s.available.pop_back();
-			match popped {
-				Optional::Some(entry) => {
-					var e = move entry;
-					s.active_count = s.active_count + 1;
-					val ts = e.last_user_release_ms;
-					val conn_out = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
-					match conn_out {
-						Optional::Some(c) => {
-							decision = AcquireDecision::GotConn(conn = move c, ts = ts);
-							done = true;
-						},
-						Optional::None => {
-							// shouldn't happen — entry's conn was None
-							decision = AcquireDecision::WasError(msg_tag = "pool-internal", msg_detail = "empty entry");
-							done = true;
-						}
-					}
-				},
-				Optional::None => {
-					val max = inner.get().pool_config.max_conns;
-					if s.total_count < max and not is_keepalive {
+			// Mandatory finite deadline: an expired budget times out BEFORE any
+			// success path (idle pop, on-demand open, or park). Re-checked each
+			// iteration so a post-wake expiry also times out, and computed before
+			// popping so timeout<=0 cannot hand back an idle conn. Keepalive
+			// (budget 0) is exempt — a non-parking try-acquire, not a user deadline.
+			val remaining = budget_ms - time.elapsed_ms(start);
+			if (not is_keepalive) and remaining <= 0 {
+				decision = AcquireDecision::WasError(msg_tag = "acquire-timeout", msg_detail = "deadline elapsed before acquiring a connection");
+				done = true;
+			} else {
+				val popped = s.available.pop_back();
+				match popped {
+					Optional::Some(entry) => {
+						var e = move entry;
 						s.active_count = s.active_count + 1;
-						s.total_count = s.total_count + 1;
-						decision = AcquireDecision::ShouldOpen();
-						done = true;
-					} else {
-						if is_keepalive {
-							decision = AcquireDecision::WasError(msg_tag = "pool-busy-keepalive", msg_detail = "no idle conn");
+						val ts = e.last_user_release_ms;
+						val conn_out = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
+						match conn_out {
+							Optional::Some(c) => {
+								decision = AcquireDecision::GotConn(conn = move c, ts = ts);
+								done = true;
+							},
+							Optional::None => {
+								// shouldn't happen — entry's conn was None
+								decision = AcquireDecision::WasError(msg_tag = "pool-internal", msg_detail = "empty entry");
+								done = true;
+							}
+						}
+					},
+					Optional::None => {
+						val max = inner.get().pool_config.max_conns;
+						if s.total_count < max and not is_keepalive {
+							// remaining > 0 here (guarded above); open with the budget.
+							s.active_count = s.active_count + 1;
+							s.total_count = s.total_count + 1;
+							decision = AcquireDecision::ShouldOpen();
 							done = true;
 						} else {
-							s.waiters = s.waiters + 1;
-							match inner.get().cv.wait(&mut guard) {
-								core.Result::Err(e) => {
-									val s2 = guard.get_mut();
-									s2.waiters = s2.waiters - 1;
-									if e.kind == conc.CONCURRENCY_KIND_CLOSED {
-										decision = AcquireDecision::WasError(msg_tag = "pool-closed", msg_detail = "pool closed during wait");
-									} else {
-										decision = AcquireDecision::WasError(msg_tag = "pool-wait-failed", msg_detail = e.kind);
+							if is_keepalive {
+								decision = AcquireDecision::WasError(msg_tag = "pool-busy-keepalive", msg_detail = "no idle conn");
+								done = true;
+							} else {
+								// remaining > 0 here (guarded above). Park for the
+								// REMAINING budget only, so spurious/stolen wakeups don't
+								// reset the deadline (we loop + recompute each wake).
+								s.waiters = s.waiters + 1;
+								// Explicit <type PoolSlot>: wait_timeout's generic T is not
+								// inferred from the guard here (unlike wait), so pin it.
+								match inner.get().cv.wait_timeout<type PoolSlot>(&mut guard, conc.Duration(millis = remaining)) {
+									core.Result::Err(e) => {
+										val s2 = guard.get_mut();
+										s2.waiters = s2.waiters - 1;
+										if e.kind == conc.CONCURRENCY_KIND_CLOSED {
+											decision = AcquireDecision::WasError(msg_tag = "pool-closed", msg_detail = "pool closed during wait");
+										} else {
+											if e.kind == conc.CONCURRENCY_KIND_TIMEOUT {
+												decision = AcquireDecision::WasError(msg_tag = "acquire-timeout", msg_detail = "deadline elapsed while waiting for a pool slot");
+											} else {
+												decision = AcquireDecision::WasError(msg_tag = "pool-wait-failed", msg_detail = e.kind);
+											}
+										}
+										done = true;
+									},
+									core.Result::Ok(_) => {
+										val s2 = guard.get_mut();
+										s2.waiters = s2.waiters - 1;
 									}
-									done = true;
-								},
-								core.Result::Ok(_) => {
-									val s2 = guard.get_mut();
-									s2.waiters = s2.waiters - 1;
 								}
 							}
 						}
@@ -307,9 +337,14 @@ fn _acquire_decide(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> A
 	return move decision;
 }
 
-fn _acquire(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
+// budget_ms is the overall acquire deadline (ms). It bounds the WHOLE acquire:
+// the Condvar wait AND the on-demand open (which forwards the remaining budget
+// to connect_with_budget). is_keepalive=true is a non-parking try-acquire and
+// passes an already-expired budget. A local monotonic start anchors the budget.
+fn _acquire(inner: &conc.Arc<PoolInner>, is_keepalive: Bool, budget_ms: Int) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
+	val start = time.now_monotonic();
 	// Lock-holding decide phase isolated; guard drops at its return.
-	val decision = _acquire_decide(inner, is_keepalive);
+	val decision = _acquire_decide(inner, is_keepalive, &start, budget_ms);
 	match decision {
 		AcquireDecision::GotConn(c, ts) => {
 			var conn = move c;
@@ -319,7 +354,7 @@ fn _acquire(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Res
 			return core.Result::Ok(managed.new_leased_conn(move conn, move release_cb));
 		},
 		AcquireDecision::ShouldOpen => {
-			return _do_open(inner, is_keepalive);
+			return _do_open(inner, is_keepalive, &start, budget_ms);
 		},
 		AcquireDecision::WasError(tag, detail) => {
 			return core.Result<managed.LeasedConn, managed.ManagedError>::Err(_pool_error(tag, detail));
@@ -327,20 +362,86 @@ fn _acquire(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Res
 	}
 }
 
-fn _do_open(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
+// Flip the slot's closed flag under the lock. Called at the very start of
+// close() so any concurrent open (success or failure) observes closed and
+// resolves to pool-closed, before cv.close()/keepalive-join/drain run.
+fn _mark_pool_closed(inner: &conc.Arc<PoolInner>) nothrow -> Void {
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	s.closed = true;
+	return;
+}
+
+// Roll back a reservation made by _acquire_decide (ShouldOpen) when the open
+// fails/times out: free the active+total slot and wake a waiter to retry.
+// Returns whether the pool was already closed at rollback time, so callers can
+// let pool-closed win over open-failed/timeout once close() has begun.
+fn _rollback_reservation(inner: &conc.Arc<PoolInner>) nothrow -> Bool {
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	s.active_count = s.active_count - 1;
+	s.total_count = s.total_count - 1;
+	val was_closed = s.closed;
+	inner.get().cv.signal_one();
+	return was_closed;
+}
+
+// Post-open close-race check: if the pool closed while we were connecting,
+// roll back the open reservation under the lock and tell the caller to discard
+// the fresh conn (closed OUTSIDE the lock). Returns true = raced/closed.
+fn _open_raced_close(inner: &conc.Arc<PoolInner>) nothrow -> Bool {
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	if s.closed {
+		s.active_count = s.active_count - 1;
+		s.total_count = s.total_count - 1;
+		return true;
+	} else {
+		return false;
+	}
+}
+
+fn _do_open(inner: &conc.Arc<PoolInner>, is_keepalive: Bool, start: &time.Instant, budget_ms: Int) nothrow -> core.Result<managed.LeasedConn, managed.ManagedError> {
+	// Forward the remaining acquire budget so the connect (TCP + handshake +
+	// setup) is bounded end-to-end, not by its own per-phase timeouts.
+	val remaining = budget_ms - time.elapsed_ms(start);
+	if remaining <= 0 {
+		val was_closed = _rollback_reservation(inner);
+		if was_closed {
+			return core.Result::Err(_pool_error("pool-closed", "pool closed before opening a new connection"));
+		} else {
+			return core.Result::Err(_pool_error("acquire-timeout", "deadline elapsed before opening a new connection"));
+		}
+	}
 	val cfg = _clone_pool_cfg(inner);
-	match rpc.connect(move cfg) {
+	match rpc.connect_with_budget(move cfg, Optional<Int>::Some(remaining)) {
 		core.Result::Err(e) => {
-			// Roll back reservation.
-			val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
-			var guard = conc.lock(mu_ref);
-			val s = guard.get_mut();
-			s.active_count = s.active_count - 1;
-			s.total_count = s.total_count - 1;
-			inner.get().cv.signal_one();
-			return core.Result::Err(_pool_error("pool-open-failed", e.tag));
+			val was_closed = _rollback_reservation(inner);
+			// pool-closed wins once close() has begun; else disambiguate deadline
+			// (during open, or the connect-path budget tag) vs transport failure.
+			if was_closed {
+				return core.Result::Err(_pool_error("pool-closed", "pool closed during connection open"));
+			} else {
+				if (e.tag == "rpc-connect-deadline-exceeded") or ((budget_ms - time.elapsed_ms(start)) <= 0) {
+					return core.Result::Err(_pool_error("acquire-timeout", "deadline elapsed while opening a new connection"));
+				} else {
+					return core.Result::Err(_pool_error("pool-open-failed", e.tag));
+				}
+			}
 		},
 		core.Result::Ok(c) => {
+			var conn = move c;
+			// close() may have begun while rpc.connect_with_budget ran unlocked.
+			// pool-closed wins: don't hand out the fresh conn — roll back the
+			// reservation under lock, then close the conn OUTSIDE the lock.
+			if _open_raced_close(inner) {
+				var doomed = move conn;
+				val _ = rpc.close(&mut doomed);
+				return core.Result::Err(_pool_error("pool-closed", "pool closed during connection open"));
+			}
 			// We hold no lock here: _acquire_decide() dropped the slot guard
 			// before returning ShouldOpen, and rpc.connect ran unlocked. The
 			// opened_total = -1 is a legacy placeholder from when this path was
@@ -351,7 +452,7 @@ fn _do_open(inner: &conc.Arc<PoolInner>, is_keepalive: Bool) nothrow -> core.Res
 			var inner_for_release: conc.Arc<PoolInner> = inner.clone();
 			val ts = _now_ms(inner);
 			var release_cb: core.Callback1<rpc.RpcConnection, Void> = _build_release_cb(move inner_for_release, is_keepalive, ts);
-			return core.Result::Ok(managed.new_leased_conn(move c, move release_cb));
+			return core.Result::Ok(managed.new_leased_conn(move conn, move release_cb));
 		}
 	}
 }
@@ -433,8 +534,9 @@ fn _keepalive_loop(inner: conc.Arc<PoolInner>) nothrow -> Int {
 }
 
 fn _keepalive_tick(inner: &conc.Arc<PoolInner>) nothrow -> Void {
-	// Try-acquire one idle conn for ping. If none idle, skip (no wait).
-	val acquired = _acquire(inner, true);
+	// Try-acquire one idle conn for ping. If none idle, skip (no wait). Budget 0
+	// keeps it non-parking; the keepalive branch never opens or waits anyway.
+	val acquired = _acquire(inner, true, 0);
 	match acquired {
 		core.Result::Err(_) => { return; },  // skipped: no idle conn (or pool closing)
 		core.Result::Ok(lv) => {

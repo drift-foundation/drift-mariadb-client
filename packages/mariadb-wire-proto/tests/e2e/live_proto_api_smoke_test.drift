@@ -32,7 +32,7 @@ fn _drain_expect_statement_end(statement: &mut proto.Statement, err_base: Int) n
 
 fn scenario_query_skip_and_commit() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -80,7 +80,7 @@ fn scenario_query_skip_and_commit() nothrow -> Int {
 
 fn scenario_drop_auto_drain() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1100; },
 		core.Result::Ok(session) => {
 			var conn = move session;
@@ -111,7 +111,7 @@ fn scenario_drop_auto_drain() nothrow -> Int {
 
 fn scenario_tx_roundtrip() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s) {
+	match proto.connect(&s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1200; },
 		core.Result::Ok(session) => {
 			var conn = move session;

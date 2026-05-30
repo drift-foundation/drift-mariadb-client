@@ -13,10 +13,13 @@
 //     call. The wrapper never inspects or replays calls.
 //
 // Concurrency model:
-//   - `slot: conc.Mutex<Optional<RpcConnection>>` is the storage cell.
+//   - `slot: conc.Mutex<ManagedSlot>` holds the conn cell + a closed flag.
 //   - The conn MOVES out of the slot on acquire (slot becomes None), and
 //     MOVES BACK on release (LeasedConn::destroy). The mutex is held only
-//     for the moment of transition — never for the duration of a lease.
+//     for the moment of transition — never for the duration of a lease, and
+//     never across socket I/O (close tears down the conn outside the lock).
+//   - `cv` pairs with the slot mutex: acquire parks on it for its deadline
+//     when the slot is busy; release/reconnect signal it; close() wakes all.
 //   - Background keepalive runs on a virtual thread parked on `conc.sleep`.
 //     `close()` calls `vt.cancel()` to unpark immediately rather than
 //     waiting for the next tick.
@@ -31,6 +34,7 @@ import std.core as core;
 import std.concurrent as conc;
 import std.sync as sync;
 import std.mem as mem;
+import std.time as time;
 import mariadb.rpc as rpc;
 
 export {
@@ -83,8 +87,17 @@ pub fn default_managed_config() nothrow -> ManagedConfig {
 // Internal shared state
 // -----------------------------------------------------------------------
 
+// Mutex-guarded slot: the live conn (or None while leased / reconnecting) plus
+// a closed flag so acquire() can distinguish shutdown from a busy slot and
+// close() can wake parked waiters. Pairs with ManagedInner.cv.
+pub struct ManagedSlot {
+	pub conn: Optional<rpc.RpcConnection>,
+	pub closed: Bool
+}
+
 pub struct ManagedInner {
-	pub slot: conc.Mutex<Optional<rpc.RpcConnection> >,
+	pub slot: conc.Mutex<ManagedSlot>,
+	pub cv: conc.Condvar,
 	pub config: rpc.RpcConnectionConfig,
 	pub mc_config: ManagedConfig,
 	pub stop_flag: conc.AtomicBool
@@ -151,7 +164,11 @@ implement core.Destructible for LeasedConn {
 // -----------------------------------------------------------------------
 
 pub interface ConnectionSource {
-	fn acquire(self: &mut Self) nothrow -> core.Result<LeasedConn, ManagedError>;
+	// acquire takes &Self (not &mut): it only reads self.inner and is internally
+	// synchronized, so callers can share via Arc<Source> and acquire concurrently
+	// without an outer mutex serializing them. close stays &mut (it joins the
+	// keepalive VT / tears down).
+	fn acquire(self: &Self, timeout: conc.Duration) nothrow -> core.Result<LeasedConn, ManagedError>;
 	fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
 }
 
@@ -165,24 +182,71 @@ pub struct ManagedConnection {
 }
 
 implement ConnectionSource for ManagedConnection {
-	pub fn acquire(self: &mut ManagedConnection) nothrow -> core.Result<LeasedConn, ManagedError> {
+	// acquire bounds the wait for the slot by `timeout` end-to-end. The slot
+	// already holds a live conn (no network I/O here), so the deadline bounds
+	// the park while the slot is busy (lease out / keepalive in flight /
+	// reconnect gap). Wakes on release/reconnect refill (signal) or close
+	// (CLOSED). Returns the shared `acquire-timeout` tag on deadline,
+	// `managed-closed` once closed. timeout <= 0 → immediate acquire-timeout if
+	// the slot is busy (checked via remaining before parking).
+	pub fn acquire(self: &ManagedConnection, timeout: conc.Duration) nothrow -> core.Result<LeasedConn, ManagedError> {
+		val budget_ms = timeout.millis;
+		val start = time.now_monotonic();
 		val inner_ref: &ManagedInner = self.inner.get();
-		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+		val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
 		var guard = conc.lock(mu_ref);
-		val taken = mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
-		match taken {
-			Optional::None => {
-				return core.Result::Err(_mgr_error("managed-acquire-busy", "slot empty (keepalive in flight or no live conn)"));
-			},
-			Optional::Some(c) => {
-				var inner_for_release: conc.Arc<ManagedInner> = self.inner.clone();
-				var release_cb: core.Callback1<rpc.RpcConnection, Void> = core.callback1(|returned: rpc.RpcConnection| captures(move inner_for_release) => {
-					_slot_put(&inner_for_release, Optional::Some(move returned));
-					return;
-				});
-				return core.Result::Ok(new_leased_conn(move c, move release_cb));
+		var result: core.Result<LeasedConn, ManagedError> = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-internal", "unset"));
+		var done = false;
+		while not done {
+			val s = guard.get_mut();
+			if s.closed {
+				result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection is shutting down"));
+				done = true;
+			} else {
+				// Expired deadline times out BEFORE taking the slot, so timeout<=0
+				// never hands back an available conn (matches the pool contract).
+				// Re-checked each iteration so a post-wake expiry also times out.
+				val remaining = budget_ms - time.elapsed_ms(&start);
+				if remaining <= 0 {
+					result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed before acquiring the managed connection"));
+					done = true;
+				} else {
+					val taken = mem.replace(&mut s.conn, Optional<rpc.RpcConnection>::None());
+					match taken {
+						Optional::Some(c) => {
+							var inner_for_release: conc.Arc<ManagedInner> = self.inner.clone();
+							var release_cb: core.Callback1<rpc.RpcConnection, Void> = core.callback1(|returned: rpc.RpcConnection| captures(move inner_for_release) => {
+								_slot_put(&inner_for_release, move returned);
+								return;
+							});
+							result = core.Result<LeasedConn, ManagedError>::Ok(new_leased_conn(move c, move release_cb));
+							done = true;
+						},
+						Optional::None => {
+							// Slot busy. remaining > 0 here. Park for the REMAINING budget
+							// only (recomputed each wake so spurious/stolen wakeups don't
+							// reset the deadline).
+							match inner_ref.cv.wait_timeout<type ManagedSlot>(&mut guard, conc.Duration(millis = remaining)) {
+								core.Result::Err(e) => {
+									if e.kind == conc.CONCURRENCY_KIND_CLOSED {
+										result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection closed during wait"));
+									} else {
+										if e.kind == conc.CONCURRENCY_KIND_TIMEOUT {
+											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed waiting for the managed connection slot"));
+										} else {
+											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-wait-failed", e.kind));
+										}
+									}
+									done = true;
+								},
+								core.Result::Ok(_) => {}
+							}
+						}
+					}
+				}
 			}
 		}
+		return move result;
 	}
 
 	pub fn close(self: &mut ManagedConnection) nothrow -> core.Result<Void, ManagedError> {
@@ -190,7 +254,12 @@ implement ConnectionSource for ManagedConnection {
 		val inner_ref: &ManagedInner = self.inner.get();
 		val flag_ref: &conc.AtomicBool = &inner_ref.stop_flag;
 		flag_ref.store(true, sync.MemoryOrder::Release());
-		// Suspenders: cancel the sleeping VT so it unparks immediately.
+		// Mark closed + wake any parked acquirers (they return managed-closed)
+		// BEFORE joining keepalive, so the join can't deadlock behind a waiter.
+		_mark_closed(&self.inner);
+		inner_ref.cv.close();
+		// Suspenders: cancel the sleeping VT so it unparks immediately, then join
+		// so no keepalive _slot_put races the drain below.
 		val vt_taken = mem.replace(&mut self.keepalive_vt, Optional<conc.VirtualThread<Int> >::None());
 		match vt_taken {
 			Optional::None => {},
@@ -200,11 +269,9 @@ implement ConnectionSource for ManagedConnection {
 				val _ = vt.join();
 			}
 		}
-		// Close any conn left in the slot.
-		val inner_ref2: &ManagedInner = self.inner.get();
-		val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref2.slot;
-		var guard = conc.lock(mu_ref);
-		val taken = mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
+		// Take any conn left in the slot OUT under the lock, then close it
+		// OUTSIDE the lock — never tear down a socket under the slot mutex.
+		val taken = _slot_take(&self.inner);
 		match taken {
 			Optional::None => {},
 			Optional::Some(c) => {
@@ -227,10 +294,11 @@ pub fn open(rpc_config: rpc.RpcConnectionConfig, mc_config: ManagedConfig) nothr
 		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag)); },
 		core.Result::Ok(c) => {
 			val seeded: Optional<rpc.RpcConnection> = Optional::Some(move c);
-			val slot: conc.Mutex<Optional<rpc.RpcConnection> > = conc.mutex(move seeded);
+			val slot: conc.Mutex<ManagedSlot> = conc.mutex(ManagedSlot(conn = move seeded, closed = false));
 			val stop: conc.AtomicBool = conc.atomic_bool(false);
 			val inner = ManagedInner(
 				slot = move slot,
+				cv = conc.condvar(),
 				config = move rpc_config,
 				mc_config = move mc_config,
 				stop_flag = move stop
@@ -286,7 +354,7 @@ fn _keepalive_loop(inner: conc.Arc<ManagedInner>) nothrow -> Int {
 				match rpc.ping(&mut conn) {
 					core.Result::Ok(_) => {
 						_emit(&inner, ManagedEvent::KeepalivePingOk());
-						_slot_put(&inner, Optional::Some(move conn));
+						_slot_put(&inner, move conn);
 					},
 					core.Result::Err(e) => {
 						_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag));
@@ -313,7 +381,7 @@ fn _reconnect_with_backoff(inner: &conc.Arc<ManagedInner>, prior_attempts: Int) 
 		match rpc.connect(move fresh_cfg) {
 			core.Result::Ok(new_conn) => {
 				_emit(inner, ManagedEvent::ReconnectSucceeded(succeeded_attempt = attempt));
-				_slot_put(inner, Optional::Some(move new_conn));
+				_slot_put(inner, move new_conn);
 				return attempt;
 			},
 			core.Result::Err(e) => {
@@ -385,19 +453,49 @@ fn _inner_clone_config(inner: &conc.Arc<ManagedInner>) nothrow -> rpc.RpcConnect
 	return _clone_cfg(cfg_ref);
 }
 
-fn _slot_take(inner: &conc.Arc<ManagedInner>) nothrow -> Optional<rpc.RpcConnection> {
+fn _mark_closed(inner: &conc.Arc<ManagedInner>) nothrow -> Void {
 	val inner_ref: &ManagedInner = inner.get();
-	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+	val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
 	var guard = conc.lock(mu_ref);
-	return mem.replace(guard.get_mut(), Optional<rpc.RpcConnection>::None());
+	val s = guard.get_mut();
+	s.closed = true;
+	return;
 }
 
-fn _slot_put(inner: &conc.Arc<ManagedInner>, value: Optional<rpc.RpcConnection>) nothrow -> Void {
+fn _slot_take(inner: &conc.Arc<ManagedInner>) nothrow -> Optional<rpc.RpcConnection> {
 	val inner_ref: &ManagedInner = inner.get();
-	val mu_ref: &conc.Mutex<Optional<rpc.RpcConnection> > = &inner_ref.slot;
+	val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
 	var guard = conc.lock(mu_ref);
-	val _old = mem.replace(guard.get_mut(), move value);
+	return mem.replace(&mut guard.get_mut().conn, Optional<rpc.RpcConnection>::None());
+}
+
+// Return a conn to the slot and wake one parked acquirer. If the managed conn
+// has been closed, the conn is handed back to the caller to close OUTSIDE the
+// lock (never store into / tear down under a closed slot).
+fn _slot_put(inner: &conc.Arc<ManagedInner>, conn: rpc.RpcConnection) nothrow -> Void {
+	var c = move conn;
+	val to_close = _slot_put_decide(inner, move c);
+	match to_close {
+		Optional::Some(doomed) => { var d = move doomed; val _ = rpc.close(&mut d); },
+		Optional::None => {}
+	}
 	return;
+}
+
+fn _slot_put_decide(inner: &conc.Arc<ManagedInner>, conn: rpc.RpcConnection) nothrow -> Optional<rpc.RpcConnection> {
+	var c = move conn;
+	val inner_ref: &ManagedInner = inner.get();
+	val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	if s.closed {
+		// Closed: don't store; caller closes it unlocked.
+		return Optional::Some(move c);
+	} else {
+		val _old = mem.replace(&mut s.conn, Optional::Some(move c));
+		inner_ref.cv.signal_one();
+		return Optional<rpc.RpcConnection>::None();
+	}
 }
 
 // Manual clone of RpcConnectionConfig — required for reconnect since

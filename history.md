@@ -613,3 +613,84 @@ Phase 3 (transport extraction): moved packet I/O to `src/transport.drift`. `lib.
   - `mariadb-rpc` to `0.5.2`
 - Co-artifact dependency range `mariadb-wire-proto@0.3` is unchanged (already covers `0.3.3`).
 - Author-claims to be re-minted against the bumped versions before deploy (owner runs `just author-claim`).
+
+## 2026-05-30
+
+### Pool release lock discipline + discard missed-wakeup (committed `b514da9`)
+
+Prompted by an app-team (bookkeeper/singular) request for bounded acquire; this
+landed first as a correctness pre-fix.
+
+- **No socket I/O under the `PoolSlot` mutex.** `rpc.close()` (wire teardown,
+  bounded by `io_timeout_ms`) was being called while the slot mutex was held in
+  four places — `_release`, `close()`'s drain, `_drain_close`, and `_idle_reap`
+  — blocking every concurrent acquire/release/drain behind socket teardown. All
+  four now decide under the lock, move the doomed conn(s) out, drop the guard,
+  then `rpc.close()` outside. `_idle_reap`'s event-sink callback also moved
+  outside the lock (a consumer callback must never fire under the slot mutex).
+- **Discard missed-wakeup.** The release discard branch decremented
+  `total_count` but did not `signal_one()`, so a parked acquirer never learned
+  the freed slot — a lost-wakeup/liveness bug. Now signals on discard.
+- Regression: `pool_release_discard_wakeup_test` (two-VT, handshake-synced;
+  needs the new `sp_sleep` fixture proc) wired into `test-live`. Full gate green
+  (`just test` plain+ASAN+memcheck, `just stress`, `just perf` — zero on-wire
+  change).
+
+### acquire-timeout — mandatory end-to-end deadline on `ConnectionSource.acquire`
+
+App-facing contract: a user-visible deadline bounds the **whole logical
+operation**, not per-socket timers. `acquire(timeout)` means "a usable
+connection within ~timeout total" — pool wait + DNS/TCP + handshake + auth +
+SET NAMES + autocommit — or a structured timeout. Per-op `read_timeout_ms`
+stays a low-level guardrail, capped by the remaining deadline.
+
+- **Interface:** `acquire(self: &Self, timeout: conc.Duration)` — mandatory
+  finite `Duration`, no `0 = forever` sentinel; `timeout <= 0` → immediate
+  `acquire-timeout` (checked before any success path, even an idle conn).
+  Changed from `&mut Self` to `&Self`: acquire only reads `self.inner` and is
+  internally synchronized, so callers share via `Arc<Source>` and acquire
+  **concurrently** without an outer mutex serializing them. `close` stays
+  `&mut`. Shared `acquire-timeout` tag is interface-level (both impls);
+  `pool-closed` / `pool-open-failed` stay impl-specific.
+- **Wire (`mariadb-wire-proto`):** `connect(opts, budget_ms: Optional<Int>)` is
+  deadline-aware — a local monotonic start, and every blocking phase (TCP
+  connect, hello read, auth write, auth read, auth-switch) is bounded by
+  `min(phase_timeout, remaining)`; exhaustion → new `connect-deadline-exceeded`.
+  `None` = per-phase-only (direct connect; behavior unchanged). No exported
+  `0`-sentinel — `Optional<Int>` keeps the API honest at the lower layer.
+- **RPC (`mariadb-rpc`):** `connect(config)` delegates to
+  `connect_with_budget(config, Optional<Int>)`, which bounds ALL connect I/O —
+  including the post-handshake `SET NAMES` / autocommit round-trips, via
+  clamp-and-restore of `wire_session.io_timeout_ms` — and self-classifies a
+  budget overrun as `rpc-connect-deadline-exceeded`.
+- **Pool:** `acquire` threads the budget through `_acquire`/`_acquire_decide`/
+  `_do_open` from a local monotonic start; exhausted → `wait_timeout(remaining)`
+  loop (recomputed each wake so spurious wakeups don't reset the deadline);
+  on-demand open forwards the remaining budget; failed/expired open
+  disambiguates `acquire-timeout` vs `pool-open-failed`. Post-open and
+  failed-open close-race rechecks make `pool-closed` win once `close()` begins.
+- **Managed:** real deadline-wait — added `ManagedSlot{conn, closed}` + Condvar
+  to `ManagedInner`; acquire parks for the deadline when the slot is busy and
+  wakes on release/reconnect (signal) or close (CLOSED). `close()` marks closed,
+  wakes parked waiters, and tears the conn down OUTSIDE the lock (fixing
+  managed's own no-I/O-under-mutex violation); `_slot_put` discards-on-closed.
+- **Tests (all wired into `test-live`):** `pool_acquire_timeout_test`,
+  `managed_acquire_timeout_test` (both: saturated→timeout after ~budget, and
+  expired-budget-with-conn-available→timeout), `managed_release_wakeup_test`
+  (two-VT Condvar wakeup), plus the previously-unwired `rpc-live-managed` and
+  `rpc-live-pool`.
+- **Toolchain note (certified 0.33.9):** `conc.Condvar.wait_timeout<T>` does not
+  infer `T` from the guard (unlike `wait`) — pinned with `<type PoolSlot>` /
+  `<type ManagedSlot>`. `core.Result::Err/Ok` constructors whose other arm type
+  isn't in the arg also need explicit `core.Result<T, E>::`. Bare-literal
+  `match` patterns (Int/Bool) are rejected — used `if`/`else`.
+
+### Version bump
+
+- Minor-bumped both published artifacts in `drift/manifest.json` for the
+  breaking API change (`connect` and `acquire` signatures):
+  - `mariadb-wire-proto` to `0.4.0`
+  - `mariadb-rpc` to `0.6.0`
+- Co-artifact dependency range bumped `mariadb-wire-proto@0.3` → `@0.4`.
+- Author-claims to be re-minted against the bumped versions before deploy
+  (owner runs `just author-claim`); `drift prepare` to re-resolve `lock.json`.

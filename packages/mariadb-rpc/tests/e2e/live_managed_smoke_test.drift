@@ -52,7 +52,7 @@ fn scenario_lifecycle() nothrow -> Int {
 				core.Result::Ok(v) => {
 					var mc = move v;
 					console.println("[lifecycle] opened");
-					match mc.acquire() {
+					match mc.acquire(conc.Duration(millis = 5000)) {
 						core.Result::Err(e) => {
 							console.println("[lifecycle] acquire failed: " + e.tag);
 							val _ = mc.close();
@@ -76,7 +76,7 @@ fn scenario_lifecycle() nothrow -> Int {
 							}
 						}
 					}
-					match mc.acquire() {
+					match mc.acquire(conc.Duration(millis = 5000)) {
 						core.Result::Err(e) => {
 							console.println("[lifecycle] re-acquire failed: " + e.tag);
 							val _ = mc.close();

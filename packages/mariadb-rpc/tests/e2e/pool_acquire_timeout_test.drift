@@ -1,0 +1,125 @@
+// Step 1 (acquire-timeout) headline behavior: acquire(timeout) on a saturated
+// pool parks for the budget, then returns the shared `acquire-timeout` tag —
+// it does NOT block indefinitely and does NOT return instantly.
+//
+// Single VT: hold the only conn (max_conns=1), then acquire again with a short
+// deadline. The pool is saturated and nothing releases, so the second acquire
+// parks on the Condvar for ~the budget and times out. We assert (a) the error
+// tag is acquire-timeout and (b) it actually waited ~the budget (so the deadline
+// is honored, not an instant-fail).
+
+module mariadb.rpc.tests.e2e.pool_acquire_timeout_test;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.time as time;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+import mariadb.rpc.pool as pool;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const TIMEOUT_MS: Int = 1000;
+const ACQUIRE_BUDGET_MS: Int = 300;
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _release_lease(lease: managed.LeasedConn) nothrow -> Void {
+	val _ = move lease;
+	return;
+}
+
+fn main() nothrow -> Int {
+	console.println("=== pool_acquire_timeout_test ===");
+	match _build_cfg() {
+		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },
+		core.Result::Ok(cfg) => {
+			var pc = pool.default_pool_config();
+			pc.min_idle = 0;
+			pc.max_conns = 1;
+			pc.keepalive_interval_ms = 0;
+			pc.idle_timeout_ms = 60000;
+			match pool.open(move cfg, move pc) {
+				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
+				core.Result::Ok(v) => {
+					var p = move v;
+					match p.acquire(conc.Duration(millis = 2000)) {
+						core.Result::Err(e) => { console.println("[main] first acquire failed: " + e.tag); val _ = p.close(); return 3; },
+						core.Result::Ok(lv1) => {
+							var lease1 = move lv1;
+							console.println("[main] holding sole lease; pool saturated");
+							// Second acquire must park for ~ACQUIRE_BUDGET_MS then time out.
+							val t0 = time.now_monotonic();
+							var rc = 0;
+							match p.acquire(conc.Duration(millis = ACQUIRE_BUDGET_MS)) {
+								core.Result::Ok(_lv2) => {
+									console.println("[main] FAIL: second acquire unexpectedly succeeded on a saturated pool");
+									rc = 4;
+								},
+								core.Result::Err(e) => {
+									val elapsed = time.elapsed_ms(&t0);
+									console.println("[main] second acquire returned tag=" + e.tag + " after " + format.format_int(elapsed) + "ms");
+									if e.tag != "acquire-timeout" {
+										console.println("[main] FAIL: expected acquire-timeout tag");
+										rc = 5;
+									} else {
+										// Must have actually waited ~the budget, not failed instantly.
+										if elapsed < 200 {
+											console.println("[main] FAIL: returned too fast (" + format.format_int(elapsed) + "ms) — deadline not honored as a wait");
+											rc = 6;
+										}
+									}
+								}
+							}
+							// Release the lease so the conn returns to the pool as IDLE.
+							_release_lease(move lease1);
+							// Scenario B: with an idle conn AVAILABLE, an already-expired
+							// budget (timeout=0) must STILL time out — the deadline is checked
+							// before the idle pop, so timeout<=0 never hands back a conn.
+							if rc == 0 {
+								match p.acquire(conc.Duration(millis = 0)) {
+									core.Result::Ok(_lv3) => {
+										console.println("[main] FAIL: acquire(0) returned an idle conn despite an expired budget");
+										rc = 8;
+									},
+									core.Result::Err(e) => {
+										console.println("[main] acquire(0) with idle conn returned tag=" + e.tag);
+										if e.tag != "acquire-timeout" {
+											console.println("[main] FAIL: expected acquire-timeout for expired budget");
+											rc = 9;
+										}
+									}
+								}
+							}
+							match p.close() {
+								core.Result::Err(_) => { if rc == 0 { rc = 7; } },
+								core.Result::Ok(_) => {}
+							}
+							if rc != 0 { return rc; }
+						}
+					}
+				}
+			}
+		}
+	}
+	console.println("=== pool_acquire_timeout_test: passed ===");
+	return 0;
+}

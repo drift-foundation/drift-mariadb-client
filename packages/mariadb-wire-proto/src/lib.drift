@@ -40,6 +40,7 @@ import std.io as io;
 import std.mem as mem;
 import std.net as net;
 import std.concurrent as conc;
+import std.time as time;
 import std.crypto as crypto;
 import mariadb.wire.proto.types as types;
 import mariadb.wire.proto.errors as errors;
@@ -208,7 +209,7 @@ fn _find_nul(input: &Array<Byte>, start: Int) nothrow -> Int {
 // a different auth plugin than the one we proposed. We extract the plugin
 // name and new scramble, re-compute the token, and send it on seq=3.
 // Only mysql_native_password is supported; other plugins are rejected.
-fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: &String, timeout_ms: Int) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
+fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: &String, timeout_ms: Int, budget_ms: Optional<Int>, start: &time.Instant) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
 	if payload.len < 2 {
 		return core.Result::Err(_error("auth-switch-truncated", 0));
 	}
@@ -242,11 +243,15 @@ fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: 
 		return core.Result::Err(_error("auth-switch-unsupported-plugin", 0));
 	}
 	var token = _sha1_native_password_token(password, &scramble);
-	match transport.write_packet(stream, &token, cast<Byte>(3), timeout_ms) {
+	val t_w = _connect_phase_timeout(budget_ms, start, timeout_ms);
+	if t_w <= 0 { return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+	match transport.write_packet(stream, &token, cast<Byte>(3), t_w) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	return transport.read_packet_payload(stream, timeout_ms);
+	val t_r = _connect_phase_timeout(budget_ms, start, timeout_ms);
+	if t_r <= 0 { return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+	return transport.read_packet_payload(stream, t_r);
 }
 
 fn _dup_string_from_bytes(bytes: &Array<Byte>) nothrow -> String {
@@ -513,13 +518,40 @@ implement core.Destructible for Statement {
 	}
 }
 
-pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, PacketDecodeError> {
+// Effective timeout for the next blocking connect phase: min(phase_ms,
+// remaining overall budget). Returns <= 0 ONLY when an active overall budget is
+// exhausted (caller must treat that as connect-deadline-exceeded). With no
+// budget (None) it returns phase_ms unchanged. phase_ms is always > 0
+// (connect/io timeouts are validated positive), so a <= 0 result unambiguously
+// signals budget exhaustion.
+fn _connect_phase_timeout(budget_ms: Optional<Int>, start: &time.Instant, phase_ms: Int) nothrow -> Int {
+	match budget_ms {
+		Optional::None => { return phase_ms; },
+		Optional::Some(b) => {
+			val remaining = b - time.elapsed_ms(start);
+			if remaining < phase_ms { return remaining; }
+			return phase_ms;
+		}
+	}
+}
+
+// budget_ms bounds the WHOLE connect (TCP connect + every handshake read/write),
+// recomputed per phase from a local monotonic start, so a caller-supplied
+// deadline (e.g. the pool's remaining acquire budget) is honored end-to-end.
+// Pass Some(ms) for a deadline-bounded connect; None for per-phase-only timeouts
+// (direct connect).
+pub fn connect(opts: &WireConnectOptions, budget_ms: Optional<Int>) nothrow -> core.Result<WireSession, PacketDecodeError> {
+	val start = time.now_monotonic();
 	val addr = net.socket_addr(opts.host, opts.port);
-	match net.connect(&addr, transport.duration_ms(opts.connect_timeout_ms)) {
+	val t_conn = _connect_phase_timeout(budget_ms, &start, opts.connect_timeout_ms);
+	if t_conn <= 0 { return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+	match net.connect(&addr, transport.duration_ms(t_conn)) {
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var hello_payload: Array<Byte> = [];
-			match transport.read_packet_payload(&stream, opts.io_timeout_ms) {
+			val t_hello = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			if t_hello <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+			match transport.read_packet_payload(&stream, t_hello) {
 				core.Result::Ok(v) => { hello_payload = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
@@ -542,17 +574,21 @@ pub fn connect(opts: &WireConnectOptions) nothrow -> core.Result<WireSession, Pa
 				core.Result::Ok(v) => { auth_payload = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			match transport.write_packet(&stream, &auth_payload, cast<Byte>(1), opts.io_timeout_ms) {
+			val t_write = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			if t_write <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+			match transport.write_packet(&stream, &auth_payload, cast<Byte>(1), t_write) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var auth_first: Array<Byte> = [];
-			match transport.read_packet_payload(&stream, opts.io_timeout_ms) {
+			val t_authread = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			if t_authread <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
+			match transport.read_packet_payload(&stream, t_authread) {
 				core.Result::Ok(v) => { auth_first = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			if auth_first.len > 0 and auth_first[0] == AUTH_SWITCH_HEADER {
-				match _handle_auth_switch(&stream, &auth_first, &opts.password, opts.io_timeout_ms) {
+				match _handle_auth_switch(&stream, &auth_first, &opts.password, opts.io_timeout_ms, budget_ms, &start) {
 					core.Result::Ok(v) => { auth_first = move v; },
 					core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 				}

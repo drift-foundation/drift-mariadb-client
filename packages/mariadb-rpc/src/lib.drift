@@ -35,6 +35,7 @@ import std.format as format;
 import std.io as io;
 import std.parse as parse;
 import std.text as text;
+import std.time as time;
 import mariadb.wire.proto as wire;
 
 export {
@@ -60,6 +61,7 @@ export {
 	arg_bytes,
 	arg_binary_fixed,
 	connect,
+	connect_with_budget,
 	close,
 	next_event,
 	skip_result,
@@ -415,32 +417,103 @@ fn _row_cell_ref(row: &RpcRow, idx: Int) nothrow -> core.Result<&wire.ResultSetC
 // Note: read_timeout_ms maps to wire io_timeout_ms; write_timeout_ms
 // is validated but not consumed (see RpcConnectionConfig doc).
 pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection, RpcError> {
+	return connect_with_budget(config, Optional<Int>::None());
+}
+
+// As connect, but when budget_ms is Some(ms) it bounds ALL connect I/O by that
+// overall budget end-to-end: the TCP connect + handshake (via wire.connect) AND
+// the post-handshake SET NAMES / autocommit setup round-trips. The setup
+// queries are bounded by clamping the session io timeout to the remaining
+// budget, then restoring it to config.read_timeout_ms before the usable conn is
+// returned. With None, each phase uses its configured timeout (direct connect).
+// The pool passes its remaining acquire budget so acquire(timeout) is honored
+// end-to-end. A budget overrun surfaces as rpc-connect-deadline-exceeded.
+pub fn connect_with_budget(config: RpcConnectionConfig, budget_ms: Optional<Int>) nothrow -> core.Result<RpcConnection, RpcError> {
+	val start = time.now_monotonic();
 	val host = _dup_string(&config.host);
 	val user = _dup_string(&config.user);
 	val password = _dup_string(&config.password);
 	val database = _dup_string(&config.database);
 	val opts = wire.create_connect_options(host, config.port, user, password, database, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), config.connect_timeout_ms, config.read_timeout_ms);
-	match wire.connect(&opts) {
+	match wire.connect(&opts, budget_ms) {
 		core.Result::Ok(v) => {
 			var session = move v;
 			var conn = RpcConnection(wire_session = move session, strict_reuse = config.strict_reuse);
+			// SET NAMES — clamp the session io timeout to the remaining budget first.
+			match _clamp_setup_io(&mut conn, &start, budget_ms, config.read_timeout_ms) {
+				core.Result::Ok(_) => {},
+				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(&mut conn.wire_session); return core.Result::Err(e); }
+			}
 			val set_names_sql = "SET NAMES " + config.charset + " COLLATE " + config.collation;
 			match _exec_expect_ok(&mut conn, &set_names_sql) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(e) => {
+					// Restore the configured timeout for a clean cleanup close, then
+					// classify: budget spent during setup -> deadline; else the
+					// underlying query error.
+					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
 					val _ = wire.close(&mut conn.wire_session);
-					return core.Result::Err(e);
+					if _budget_exhausted(&start, budget_ms) {
+						return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", "acquire budget exhausted during SET NAMES"));
+					} else {
+						return core.Result::Err(e);
+					}
 				}
 			}
+			// autocommit — re-clamp (time elapsed during SET NAMES).
+			match _clamp_setup_io(&mut conn, &start, budget_ms, config.read_timeout_ms) {
+				core.Result::Ok(_) => {},
+				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(&mut conn.wire_session); return core.Result::Err(e); }
+			}
 			match wire.set_autocommit(&mut conn.wire_session, config.autocommit) {
-				core.Result::Ok(_) => { return core.Result::Ok(move conn); },
+				core.Result::Ok(_) => {
+					// Restore the configured read timeout for normal post-acquire use.
+					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
+					return core.Result::Ok(move conn);
+				},
 				core.Result::Err(e) => {
+					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
 					val _ = wire.close(&mut conn.wire_session);
-					return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));
+					if _budget_exhausted(&start, budget_ms) {
+						return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", "acquire budget exhausted during SET autocommit"));
+					} else {
+						return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));
+					}
 				}
 			}
 		},
-		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(&e.tag))); }
+		core.Result::Err(e) => {
+			if e.tag == "connect-deadline-exceeded" {
+				return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", _dup_string(&e.tag)));
+			} else {
+				return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(&e.tag)));
+			}
+		}
+	}
+}
+
+// True iff an active overall budget has elapsed. None = no budget = never.
+fn _budget_exhausted(start: &time.Instant, budget_ms: Optional<Int>) nothrow -> Bool {
+	match budget_ms {
+		Optional::None => { return false; },
+		Optional::Some(b) => { return (b - time.elapsed_ms(start)) <= 0; }
+	}
+}
+
+// Clamp the session io timeout to the remaining overall connect budget for the
+// next setup round-trip. No-op when budget is None. Returns
+// rpc-connect-deadline-exceeded if the budget is already spent.
+fn _clamp_setup_io(conn: &mut RpcConnection, start: &time.Instant, budget_ms: Optional<Int>, read_timeout_ms: Int) nothrow -> core.Result<Void, RpcError> {
+	match budget_ms {
+		Optional::None => { return core.Result::Ok(core.void_value()); },
+		Optional::Some(b) => {
+			val remaining = b - time.elapsed_ms(start);
+			if remaining <= 0 { return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", "acquire budget exhausted before connection setup")); }
+			var eff = read_timeout_ms;
+			if remaining < read_timeout_ms { eff = remaining; }
+			conn.wire_session.io_timeout_ms = eff;
+			return core.Result::Ok(core.void_value());
+		}
 	}
 }
 
