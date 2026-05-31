@@ -55,14 +55,14 @@ fn main() nothrow -> Int {
 				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
 				core.Result::Ok(v) => {
 					var mc = move v;
-					match mc.acquire(conc.Duration(millis = 2000)) {
+					match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 2000))) {
 						core.Result::Err(e) => { console.println("[main] first acquire failed: " + e.tag); val _ = mc.close(); return 3; },
 						core.Result::Ok(lv1) => {
 							var lease1 = move lv1;
 							console.println("[main] holding the sole managed conn; slot busy");
 							val t0 = time.now_monotonic();
 							var rc = 0;
-							match mc.acquire(conc.Duration(millis = ACQUIRE_BUDGET_MS)) {
+							match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = ACQUIRE_BUDGET_MS))) {
 								core.Result::Ok(_lv2) => {
 									console.println("[main] FAIL: second acquire unexpectedly succeeded on a busy slot");
 									rc = 4;
@@ -87,7 +87,7 @@ fn main() nothrow -> Int {
 							// (timeout=0) must STILL time out — the deadline is checked before
 							// taking the slot, matching the pool contract.
 							if rc == 0 {
-								match mc.acquire(conc.Duration(millis = 0)) {
+								match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 0))) {
 									core.Result::Ok(_lv3) => {
 										console.println("[main] FAIL: acquire(0) returned the conn despite an expired budget");
 										rc = 8;

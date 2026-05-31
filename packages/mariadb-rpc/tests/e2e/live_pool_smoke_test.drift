@@ -50,7 +50,7 @@ fn main() nothrow -> Int {
 				core.Result::Ok(v) => {
 					var p = move v;
 					console.println("[step] pool open returned");
-					match p.acquire(conc.Duration(millis = 5000)) {
+					match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 5000))) {
 						core.Result::Err(e) => { console.println("[step] acquire failed: " + e.tag); val _ = p.close(); return 4; },
 						core.Result::Ok(lv) => {
 							var lease = move lv;

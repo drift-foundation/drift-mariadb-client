@@ -85,7 +85,7 @@ fn _waiter(shared: conc.Arc<conc.Mutex<pool.ConnectionPool> >, ready: conc.Arc<c
 	val flag: &conc.AtomicBool = ready.get();
 	flag.store(true, sync.MemoryOrder::Release());
 	console.println("[waiter] calling acquire (expect to park on exhaustion)");
-	match p.acquire(conc.Duration(millis = 3000)) {
+	match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 3000))) {
 		core.Result::Err(e) => {
 			console.println("[waiter] acquire err: " + e.tag);
 			return 20;
@@ -121,7 +121,7 @@ fn main() nothrow -> Int {
 				core.Result::Ok(v) => {
 					var p = move v;
 					// Take the sole conn -> pool is now saturated.
-					match p.acquire(conc.Duration(millis = 2000)) {
+					match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 2000))) {
 						core.Result::Err(e) => { console.println("[main] initial acquire failed: " + e.tag); val _ = p.close(); return 3; },
 						core.Result::Ok(lv1) => {
 							var lease1 = move lv1;

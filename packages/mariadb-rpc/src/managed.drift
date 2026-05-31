@@ -44,6 +44,7 @@ export {
 	ManagedConnection,
 	LeasedConn,
 	ConnectionSource,
+	AcquireWait,
 	default_managed_config,
 	open
 };
@@ -55,6 +56,18 @@ export {
 pub error ManagedError {
 	tag: String,
 	message: String
+}
+
+// How long acquire() should wait for a connection.
+//   UseDefault — use the source's configured default (PoolConfig/ManagedConfig
+//                `acquire_timeout`: None there = block forever, Some(d) = cap).
+//   Forever    — block until a conn is available (per-call override).
+//   For(d)     — strict finite cap; acquire-timeout on elapse (per-call override).
+// Per-call always wins over the configured default.
+pub variant AcquireWait {
+	UseDefault,
+	Forever,
+	For(timeout: conc.Duration)
 }
 
 pub variant ManagedEvent {
@@ -70,6 +83,9 @@ pub struct ManagedConfig {
 	pub reconnect_backoff_initial_ms: Int,
 	pub reconnect_backoff_max_ms: Int,
 	pub reconnect_backoff_jitter_pct: Int,
+	// Default acquire wait used by acquire(AcquireWait::UseDefault) / the no-arg
+	// acquire(). None = block forever; Some(d) = finite cap.
+	pub acquire_timeout: Optional<conc.Duration>,
 	pub event_sink: Optional<core.Callback1<ManagedEvent, Void> >
 }
 
@@ -79,6 +95,7 @@ pub fn default_managed_config() nothrow -> ManagedConfig {
 		reconnect_backoff_initial_ms = 1000,
 		reconnect_backoff_max_ms = 16000,
 		reconnect_backoff_jitter_pct = 25,
+		acquire_timeout = Optional::None<type conc.Duration>(),
 		event_sink = Optional::None<type core.Callback1<ManagedEvent, Void> >()
 	);
 }
@@ -168,7 +185,12 @@ pub interface ConnectionSource {
 	// synchronized, so callers can share via Arc<Source> and acquire concurrently
 	// without an outer mutex serializing them. close stays &mut (it joins the
 	// keepalive VT / tears down).
-	fn acquire(self: &Self, timeout: conc.Duration) nothrow -> core.Result<LeasedConn, ManagedError>;
+	//
+	// `wait` selects the deadline: UseDefault (the source's configured default),
+	// Forever, or For(d). Concrete impls also expose a no-arg acquire() ==
+	// acquire(AcquireWait::UseDefault) — interface method names can't be
+	// overloaded, so the no-arg form lives on the concrete types.
+	fn acquire(self: &Self, wait: AcquireWait) nothrow -> core.Result<LeasedConn, ManagedError>;
 	fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
 }
 
@@ -182,17 +204,17 @@ pub struct ManagedConnection {
 }
 
 implement ConnectionSource for ManagedConnection {
-	// acquire bounds the wait for the slot by `timeout` end-to-end. The slot
-	// already holds a live conn (no network I/O here), so the deadline bounds
-	// the park while the slot is busy (lease out / keepalive in flight /
-	// reconnect gap). Wakes on release/reconnect refill (signal) or close
-	// (CLOSED). Returns the shared `acquire-timeout` tag on deadline,
-	// `managed-closed` once closed. timeout <= 0 → immediate acquire-timeout if
-	// the slot is busy (checked via remaining before parking).
-	pub fn acquire(self: &ManagedConnection, timeout: conc.Duration) nothrow -> core.Result<LeasedConn, ManagedError> {
-		val budget_ms = timeout.millis;
-		val start = time.now_monotonic();
+	// acquire bounds the wait for the slot by `wait`. The slot already holds a
+	// live conn (no network I/O here), so the deadline bounds the park while the
+	// slot is busy (lease out / keepalive in flight / reconnect gap). Wakes on
+	// release/reconnect refill (signal) or close (CLOSED). A finite budget that
+	// elapses → shared `acquire-timeout`; `Forever` parks until a conn frees or
+	// close. `managed-closed` once closed. A finite budget <= 0 → immediate
+	// acquire-timeout if the slot is busy (checked before parking).
+	pub fn acquire(self: &ManagedConnection, wait: AcquireWait) nothrow -> core.Result<LeasedConn, ManagedError> {
 		val inner_ref: &ManagedInner = self.inner.get();
+		val budget_ms: Optional<Int> = _resolve_budget(wait, &inner_ref.mc_config.acquire_timeout);
+		val start = time.now_monotonic();
 		val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
 		var guard = conc.lock(mu_ref);
 		var result: core.Result<LeasedConn, ManagedError> = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-internal", "unset"));
@@ -203,48 +225,64 @@ implement ConnectionSource for ManagedConnection {
 				result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection is shutting down"));
 				done = true;
 			} else {
-				// Expired deadline times out BEFORE taking the slot, so timeout<=0
-				// never hands back an available conn (matches the pool contract).
-				// Re-checked each iteration so a post-wake expiry also times out.
-				val remaining = budget_ms - time.elapsed_ms(&start);
-				if remaining <= 0 {
-					result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed before acquiring the managed connection"));
-					done = true;
-				} else {
-					val taken = mem.replace(&mut s.conn, Optional<rpc.RpcConnection>::None());
-					match taken {
-						Optional::Some(c) => {
-							var inner_for_release: conc.Arc<ManagedInner> = self.inner.clone();
-							var release_cb: core.Callback1<rpc.RpcConnection, Void> = core.callback1(|returned: rpc.RpcConnection| captures(move inner_for_release) => {
-								_slot_put(&inner_for_release, move returned);
-								return;
-							});
-							result = core.Result<LeasedConn, ManagedError>::Ok(new_leased_conn(move c, move release_cb));
-							done = true;
-						},
-						Optional::None => {
-							// Slot busy. remaining > 0 here. Park for the REMAINING budget
-							// only (recomputed each wake so spurious/stolen wakeups don't
-							// reset the deadline).
-							match inner_ref.cv.wait_timeout<type ManagedSlot>(&mut guard, conc.Duration(millis = remaining)) {
-								core.Result::Err(e) => {
-									if e.kind == conc.CONCURRENCY_KIND_CLOSED {
-										result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection closed during wait"));
-									} else {
-										if e.kind == conc.CONCURRENCY_KIND_TIMEOUT {
-											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed waiting for the managed connection slot"));
+			  if _budget_expired(&budget_ms, &start) {
+				// Finite deadline elapsed — time out BEFORE taking the slot, so a
+				// finite <= 0 budget never hands back an available conn.
+				result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed before acquiring the managed connection"));
+				done = true;
+			  } else {
+				val taken = mem.replace(&mut s.conn, Optional<rpc.RpcConnection>::None());
+				match taken {
+					Optional::Some(c) => {
+						var inner_for_release: conc.Arc<ManagedInner> = self.inner.clone();
+						var release_cb: core.Callback1<rpc.RpcConnection, Void> = core.callback1(|returned: rpc.RpcConnection| captures(move inner_for_release) => {
+							_slot_put(&inner_for_release, move returned);
+							return;
+						});
+						result = core.Result<LeasedConn, ManagedError>::Ok(new_leased_conn(move c, move release_cb));
+						done = true;
+					},
+					Optional::None => {
+						// Slot busy. Finite budget → park for the REMAINING budget only
+						// (recomputed each wake, so spurious/stolen wakeups don't reset
+						// the deadline). Forever → park indefinitely on cv.wait.
+						match budget_ms {
+							Optional::Some(b) => {
+								val remaining = b - time.elapsed_ms(&start);
+								match inner_ref.cv.wait_timeout<type ManagedSlot>(&mut guard, conc.Duration(millis = remaining)) {
+									core.Result::Err(e) => {
+										if e.kind == conc.CONCURRENCY_KIND_CLOSED {
+											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection closed during wait"));
+										} else {
+											if e.kind == conc.CONCURRENCY_KIND_TIMEOUT {
+												result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("acquire-timeout", "deadline elapsed waiting for the managed connection slot"));
+											} else {
+												result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-wait-failed", e.kind));
+											}
+										}
+										done = true;
+									},
+									core.Result::Ok(_) => {}
+								}
+							},
+							Optional::None => {
+								match inner_ref.cv.wait(&mut guard) {
+									core.Result::Err(e) => {
+										if e.kind == conc.CONCURRENCY_KIND_CLOSED {
+											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-closed", "connection closed during wait"));
 										} else {
 											result = core.Result<LeasedConn, ManagedError>::Err(_mgr_error("managed-wait-failed", e.kind));
 										}
-									}
-									done = true;
-								},
-								core.Result::Ok(_) => {}
+										done = true;
+									},
+									core.Result::Ok(_) => {}
+								}
 							}
 						}
 					}
 				}
 			}
+		  }
 		}
 		return move result;
 	}
@@ -280,6 +318,14 @@ implement ConnectionSource for ManagedConnection {
 			}
 		}
 		return core.Result::Ok(core.void_value());
+	}
+}
+
+// No-arg convenience overload (interface method names can't be overloaded, so
+// this lives on the concrete type): acquire() == acquire(AcquireWait::UseDefault).
+implement ManagedConnection {
+	pub fn acquire(self: &ManagedConnection) nothrow -> core.Result<LeasedConn, ManagedError> {
+		return self.acquire(AcquireWait::UseDefault());
 	}
 }
 
@@ -404,6 +450,29 @@ fn _reconnect_with_backoff(inner: &conc.Arc<ManagedInner>, prior_attempts: Int) 
 
 fn _mgr_error(tag: String, message: String) nothrow -> ManagedError {
 	return ManagedError(tag = tag, message = message);
+}
+
+// Resolve an AcquireWait + the configured default into an acquire budget in ms.
+// None = block forever (cv.wait); Some(ms) = finite deadline (wait_timeout).
+fn _resolve_budget(wait: AcquireWait, config_default: &Optional<conc.Duration>) nothrow -> Optional<Int> {
+	match wait {
+		AcquireWait::UseDefault => {
+			match config_default {
+				Optional::None => { return Optional<Int>::None(); },
+				Optional::Some(d) => { return Optional<Int>::Some(d.millis); }
+			}
+		},
+		AcquireWait::Forever => { return Optional<Int>::None(); },
+		AcquireWait::For(d) => { return Optional<Int>::Some(d.millis); }
+	}
+}
+
+// True iff a finite budget has elapsed. None (forever) never expires.
+fn _budget_expired(budget_ms: &Optional<Int>, start: &time.Instant) nothrow -> Bool {
+	match budget_ms {
+		Optional::None => { return false; },
+		Optional::Some(b) => { return (*b - time.elapsed_ms(start)) <= 0; }
+	}
 }
 
 fn _emit(inner: &conc.Arc<ManagedInner>, event: ManagedEvent) nothrow -> Void {

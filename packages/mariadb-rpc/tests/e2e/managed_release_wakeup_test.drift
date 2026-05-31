@@ -58,7 +58,7 @@ fn _waiter(shared: conc.Arc<conc.Mutex<managed.ManagedConnection> >, ready: conc
 	val flag: &conc.AtomicBool = ready.get();
 	flag.store(true, sync.MemoryOrder::Release());
 	console.println("[waiter] calling acquire (expect to park on busy slot)");
-	match mc.acquire(conc.Duration(millis = 5000)) {
+	match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 5000))) {
 		core.Result::Err(e) => { console.println("[waiter] acquire err: " + e.tag); return 20; },
 		core.Result::Ok(lv) => {
 			var lease = move lv;
@@ -87,7 +87,7 @@ fn main() nothrow -> Int {
 				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
 				core.Result::Ok(v) => {
 					var mc = move v;
-					match mc.acquire(conc.Duration(millis = 2000)) {
+					match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 2000))) {
 						core.Result::Err(e) => { console.println("[main] first acquire failed: " + e.tag); val _ = mc.close(); return 3; },
 						core.Result::Ok(lv1) => {
 							var lease1 = move lv1;

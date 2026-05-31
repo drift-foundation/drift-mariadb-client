@@ -50,6 +50,32 @@ author-claim:
 	    --overwrite
 	done
 
+# Read-only trust preflight: validates author claims, SCI equality, and trust
+# grants against drift/manifest.json (what `drift deploy` will check). Run it to
+# confirm the repo is deploy-ready without actually deploying.
+trust-check:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	if [[ -n "${DRIFT_TOOLCHAIN_ROOT:-}" ]]; then
+	  DRIFT="${DRIFT_TOOLCHAIN_ROOT}/bin/drift"
+	  [[ -x "$DRIFT" ]] || { echo "error: drift not found at $DRIFT" >&2; exit 1; }
+	else
+	  DRIFT="drift"
+	fi
+	"$DRIFT" trust check
+
+# Always runs both author-claim + prepare: `prepare` is idempotent (a no-op when
+# deps are unchanged) and `author-claim --overwrite` is deterministic (a no-op
+# for an artifact whose source didn't change), so over-running is free and
+# removes the guesswork. Run `just test` separately first — reseal does not test.
+#
+# Re-mint author-claims + re-resolve lock + trust-check; run before committing a version bump.
+reseal:
+	@just author-claim
+	@just prepare
+	@just trust-check
+	@echo "[reseal] done — review & commit: drift/manifest.json, drift/lock.json, drift/*.author-claim"
+
 # Build, sign, and publish both packages to DEPLOY_DEST.
 # When called from certification gates, DRIFT_TOOLCHAIN_ROOT is set and drift
 # is resolved from it. For standalone dev use, falls back to drift on PATH.
@@ -98,7 +124,7 @@ deploy *ARGS:
 #   so all 3 lanes share one N-slot pool on this host. Total concurrent
 #   driftc processes are bounded by DRIFT_TEST_JOBS regardless of lane count,
 #   preventing OOM cascades (driftc 0.32.x peaks ~500-800 MB RSS per process).
-#   Defaults to nproc/3; override via env.
+#   Defaults to ceil(nproc/2); override via env (DRIFT_TEST_JOBS=N).
 # Phase 2 (test-live, shared mdb114-a): three passes serial — the DB is a
 #   shared resource and live tests mutate session/tx/metadata state.
 # Requires DRIFT_TOOLCHAIN_ROOT. Resolves driftc exclusively from the toolchain root.
@@ -108,7 +134,7 @@ test:
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
 	export DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
 	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	: "${DRIFT_TEST_JOBS:=$(( $(nproc) / 3 ))}"
+	: "${DRIFT_TEST_JOBS:=$(( ( $(nproc) + 1 ) / 2 ))}"
 	export DRIFT_TEST_JOBS
 	LOG_DIR="$(mktemp -d -t drift-mdb-test-XXXXXX)"
 	HB_PID=""
@@ -215,24 +241,41 @@ test-unit:
 	@just wire-check
 	@just rpc-check
 
-# Live/e2e tests only (needs running MariaDB instance).
+# Live/e2e tests only (needs running MariaDB instance). Two batches (wire, rpc):
+# each compiles its tests in PARALLEL (the slow, DB-free part) then runs them
+# SERIALLY against the shared MariaDB instance. The individual rpc-live-* /
+# wire-live-* targets below still exist for ad-hoc single-test runs.
 test-live:
-	@just wire-smoke
-	@just wire-live
-	@just wire-live-api
-	@just wire-live-state
-	@just wire-live-tx
-	@just wire-live-load
-	@just wire-live-metadata
-	@just rpc-live-connect-state-stage
-	@just rpc-live-connect-state-regression
-	@just rpc-live
-	@just rpc-live-pool
-	@just rpc-live-pool-discard-wakeup
-	@just rpc-live-pool-acquire-timeout
-	@just rpc-live-managed
-	@just rpc-live-managed-acquire-timeout
-	@just rpc-live-managed-release-wakeup
+	@just wire-live-batch
+	@just rpc-live-batch
+
+# Wire e2e batch — parallel compile, serial run.
+wire-live-batch:
+	@tools/drift_test_parallel_runner.sh run-batch \
+	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift \
+	  --test-file packages/mariadb-wire-proto/tests/e2e/live_metadata_suppression_test.drift \
+	  --target-word-bits 64
+
+# RPC e2e batch — parallel compile, serial run.
+rpc-live-batch:
+	@tools/drift_test_parallel_runner.sh run-batch \
+	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
+	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/pool_acquire_timeout_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/managed_acquire_timeout_test.drift \
+	  --test-file packages/mariadb-rpc/tests/e2e/managed_release_wakeup_test.drift \
+	  --target-word-bits 64
 
 # --- Wire-proto tests ---
 

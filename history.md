@@ -644,14 +644,20 @@ connection within ~timeout total" — pool wait + DNS/TCP + handshake + auth +
 SET NAMES + autocommit — or a structured timeout. Per-op `read_timeout_ms`
 stays a low-level guardrail, capped by the remaining deadline.
 
-- **Interface:** `acquire(self: &Self, timeout: conc.Duration)` — mandatory
-  finite `Duration`, no `0 = forever` sentinel; `timeout <= 0` → immediate
-  `acquire-timeout` (checked before any success path, even an idle conn).
-  Changed from `&mut Self` to `&Self`: acquire only reads `self.inner` and is
-  internally synchronized, so callers share via `Arc<Source>` and acquire
-  **concurrently** without an outer mutex serializing them. `close` stays
-  `&mut`. Shared `acquire-timeout` tag is interface-level (both impls);
-  `pool-closed` / `pool-open-failed` stay impl-specific.
+- **Interface:** `acquire(self: &Self, wait: AcquireWait)` where
+  `AcquireWait { UseDefault, Forever, For(conc.Duration) }`. Configurable default
+  via `PoolConfig`/`ManagedConfig.acquire_timeout` (`Optional<Duration>`; default
+  `None` = block forever), overridable per call (per-call wins). Concrete types
+  also expose a no-arg `acquire()` == `acquire(UseDefault)` (interface methods
+  can't be overloaded, so it lives on the concrete impls). A finite `For` budget
+  `<= 0` → immediate `acquire-timeout` (checked before any success path, even an
+  idle conn); `Forever` blocks on `cv.wait`. Changed from `&mut Self` to `&Self`:
+  acquire only reads `self.inner` and is internally synchronized, so callers
+  share via `Arc<Source>` and acquire **concurrently** without an outer mutex.
+  `close` stays `&mut`. Shared `acquire-timeout` tag is interface-level (both
+  impls); `pool-closed` / `pool-open-failed` stay impl-specific. Internally the
+  budget is `Optional<Int>` end-to-end (`None` → `cv.wait`; `Some` →
+  `wait_timeout` loop; forwarded to `connect_with_budget`).
 - **Wire (`mariadb-wire-proto`):** `connect(opts, budget_ms: Optional<Int>)` is
   deadline-aware — a local monotonic start, and every blocking phase (TCP
   connect, hello read, auth write, auth read, auth-switch) is bounded by

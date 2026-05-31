@@ -61,7 +61,7 @@ fn main() nothrow -> Int {
 				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
 				core.Result::Ok(v) => {
 					var p = move v;
-					match p.acquire(conc.Duration(millis = 2000)) {
+					match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 2000))) {
 						core.Result::Err(e) => { console.println("[main] first acquire failed: " + e.tag); val _ = p.close(); return 3; },
 						core.Result::Ok(lv1) => {
 							var lease1 = move lv1;
@@ -69,7 +69,7 @@ fn main() nothrow -> Int {
 							// Second acquire must park for ~ACQUIRE_BUDGET_MS then time out.
 							val t0 = time.now_monotonic();
 							var rc = 0;
-							match p.acquire(conc.Duration(millis = ACQUIRE_BUDGET_MS)) {
+							match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = ACQUIRE_BUDGET_MS))) {
 								core.Result::Ok(_lv2) => {
 									console.println("[main] FAIL: second acquire unexpectedly succeeded on a saturated pool");
 									rc = 4;
@@ -95,7 +95,7 @@ fn main() nothrow -> Int {
 							// budget (timeout=0) must STILL time out — the deadline is checked
 							// before the idle pop, so timeout<=0 never hands back a conn.
 							if rc == 0 {
-								match p.acquire(conc.Duration(millis = 0)) {
+								match p.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 0))) {
 									core.Result::Ok(_lv3) => {
 										console.println("[main] FAIL: acquire(0) returned an idle conn despite an expired budget");
 										rc = 8;

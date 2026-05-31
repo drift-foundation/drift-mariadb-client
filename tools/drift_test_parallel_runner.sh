@@ -2,7 +2,8 @@
 set -euo pipefail
 
 usage() {
-	echo "usage: $0 <run-all|run-one|compile|compile-one> [--manifest FILE --artifact NAME] [--src-root DIR] [--test-root DIR] [--test-file FILE] [--file FILE] [--target-word-bits N] [--jobs N]" >&2
+	echo "usage: $0 <run-all|run-one|run-batch|compile|compile-one> [--manifest FILE --artifact NAME] [--src-root DIR] [--test-root DIR] [--test-file FILE]... [--file FILE] [--target-word-bits N] [--jobs N]" >&2
+	echo "  run-batch: compile all --test-file entries in parallel, then run them serially (live/e2e on a shared DB)" >&2
 	exit 2
 }
 
@@ -16,6 +17,7 @@ SRC_ROOTS=()
 SRC_ROOTS_OVERRIDDEN=0
 TEST_ROOT=""
 TEST_FILE=""
+TEST_FILE_LIST=()
 CHECK_FILE=""
 TARGET_WORD_BITS="64"
 PACKAGE_ROOTS=()
@@ -54,6 +56,7 @@ while [[ $# -gt 0 ]]; do
 			;;
 		--test-file)
 			TEST_FILE="${2:-}"
+			TEST_FILE_LIST+=("${2:-}")
 			shift 2
 			;;
 		--file)
@@ -335,9 +338,9 @@ compile_all_parallel() {
 }
 
 run_compiled_parallel() {
-	# Parallel execution is only used by run-all (unit suites — DB-free).
-	# Live/e2e tests are invoked via run-one from the justfile and stay serial
-	# because they share a single MariaDB instance and fixture schema.
+	# Parallel run is for run-all (unit suites — DB-free). Live/e2e suites use
+	# run-batch instead (parallel compile, serial run) since they share a single
+	# MariaDB instance + fixture schema and must not run concurrently.
 	local out_dir="$1"
 	mkdir -p "${out_dir}/run-logs"
 	local RUN_PIDS=()
@@ -366,6 +369,50 @@ run_compiled_parallel() {
 	if [[ "${failed}" -ne 0 ]]; then
 		exit 1
 	fi
+}
+
+# Serial run of pre-compiled binaries, in COMPILE_BINS order. Fail-fast: stops
+# at the first failing test (matches the old per-target `@just X` chain, which
+# aborted on the first failure). Used by run-batch for live/e2e suites that
+# share one MariaDB instance + fixture schema and must NOT run concurrently.
+run_compiled_serial() {
+	local out_dir="$1"
+	mkdir -p "${out_dir}/run-logs"
+	local i
+	for i in "${!COMPILE_BINS[@]}"; do
+		local name="${COMPILE_NAMES[$i]}"
+		local bin="${COMPILE_BINS[$i]}"
+		local log="${out_dir}/run-logs/${name}.log"
+		echo "run ${name}"
+		if ! ( run_binary "${bin}" ) >"${log}" 2>&1; then
+			echo "error: test failed: ${name}" >&2
+			sed -n '1,400p' "${log}" >&2 || true
+			exit 1
+		fi
+	done
+}
+
+# Compile an explicit list of test files in PARALLEL (DB-free), then run the
+# binaries SERIALLY (DB-shared). The win for live/e2e suites: the slow part is
+# the per-test compile, which is independent and parallelizable; only the runs
+# need to be serialized against the shared MariaDB instance.
+run_batch_tests() {
+	[[ "${#TEST_FILE_LIST[@]}" -gt 0 ]] || { echo "error: run-batch requires at least one --test-file" >&2; exit 2; }
+	TEST_FILES=()
+	local f
+	for f in "${TEST_FILE_LIST[@]}"; do
+		[[ -f "${f}" ]] || { echo "error: missing test file ${f}" >&2; exit 2; }
+		is_executable_test_entry "${f}" || { echo "error: ${f} is not an executable test entry (requires module + fn main)" >&2; exit 2; }
+		TEST_FILES+=("${f}")
+	done
+	local out_dir
+	out_dir="$(mktemp -d /tmp/drift-test-par-runner-batch.XXXXXX)"
+	trap "rm -rf '${out_dir}'" EXIT
+	mkdir -p "${out_dir}/bins" "${out_dir}/logs"
+	echo "parallel compile: ${#TEST_FILES[@]} tests with jobs=${JOBS}"
+	compile_all_parallel "${out_dir}"
+	echo "serial run: ${#TEST_FILES[@]} tests (shared DB)"
+	run_compiled_serial "${out_dir}"
 }
 
 run_all_tests() {
@@ -429,6 +476,10 @@ case "${MODE}" in
 	[[ -n "${TEST_FILE}" ]] || { echo "error: --test-file is required for run-one mode" >&2; exit 2; }
 	set_asan_defaults_for_run
 	run_one_test
+	;;
+	run-batch)
+	set_asan_defaults_for_run
+	run_batch_tests
 	;;
 	*)
 	usage

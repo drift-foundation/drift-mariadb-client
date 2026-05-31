@@ -226,10 +226,11 @@ match managed.open(rpc_config, move mc_cfg) {
     core.Result::Err(e) => { /* handle open failure */ },
     core.Result::Ok(v) => {
         var mc = move v;
-        // acquire bounds the WHOLE wait by the deadline. A busy slot (lease in
-        // flight / keepalive ticking) parks up to the timeout, then returns the
-        // `acquire-timeout` tag. The deadline is mandatory and finite.
-        match mc.acquire(conc.Duration(millis = 5000)) {
+        // No-arg acquire() uses the source's configured default wait
+        // (ManagedConfig.acquire_timeout; default None = block forever). Override
+        // per call: mc.acquire(AcquireWait::For(timeout = conc.Duration(millis = 5000)))
+        // for a strict cap, or mc.acquire(AcquireWait::Forever()) to block.
+        match mc.acquire() {
             core.Result::Ok(lv) => {
                 var lease = move lv;
                 match lease.conn() {
@@ -252,8 +253,8 @@ match managed.open(rpc_config, move mc_cfg) {
 
 ### Model
 
-- **Lease-based borrow.** `mc.acquire(timeout)` returns a `LeasedConn` that owns the underlying `RpcConnection` for the duration of the lease. Multiple sequential calls can run on the same lease — the single-active-statement rule still applies per call.
-- **Mandatory finite deadline.** `acquire` takes a `conc.Duration` that bounds the whole call. If the slot is busy (lease in flight / keepalive / reconnect gap) it parks on a Condvar up to the deadline, waking on release/reconnect; on the deadline it returns the shared `acquire-timeout` tag. There is no "0 = forever" — `timeout <= 0` returns `acquire-timeout` immediately even if the slot is free. `acquire` takes `&Self`, so callers may share via `Arc<...>` and acquire concurrently.
+- **Lease-based borrow.** `mc.acquire(...)` returns a `LeasedConn` that owns the underlying `RpcConnection` for the duration of the lease. Multiple sequential calls can run on the same lease — the single-active-statement rule still applies per call.
+- **Configurable wait, per-call override.** `acquire` takes an `AcquireWait`: `UseDefault` (the configured `acquire_timeout` default), `Forever` (block), or `For(d)` (strict finite cap). The no-arg `acquire()` overload == `acquire(AcquireWait::UseDefault())`. Per-call always wins over the config default. A busy slot parks on a Condvar; `Forever` blocks until a conn frees or close, `For(d)` returns the shared `acquire-timeout` tag on elapse (a finite `<= 0` returns it immediately, even if the slot is free). `acquire` takes `&Self`, so callers may share via `Arc<...>` and acquire concurrently.
 - **RAII release only.** `LeasedConn` has no `release()` method. The only way to return the conn is to let the value go out of scope; `Destructible::destroy` puts it back in the wrapper's slot. You can't forget to release.
 - **Mutex protects the storage slot, not the lease.** The internal `Mutex<ManagedSlot>` (the conn cell + a closed flag, paired with a Condvar) is held only at acquire/release transition points — milliseconds, not the lease duration — and never across socket I/O (teardown happens outside the lock). A streaming statement that runs for minutes does not monopolize any lock.
 - **Autonomous keepalive thread.** When `keepalive_interval_ms > 0`, `managed.open()` spawns a virtual thread that periodically tries to take the conn from the slot, `ping`s it, and puts it back. On ping failure it drops the dead conn and calls `rpc.connect(config)` again — which **re-resolves DNS**, so a DB host migrated to a new IP during maintenance is recovered without app involvement. Keepalive ticks fire `ManagedEvent::KeepalivePingOk` / `KeepalivePingFailed` events through the optional `event_sink`.
@@ -265,12 +266,16 @@ match managed.open(rpc_config, move mc_cfg) {
 
 ```drift
 pub interface ConnectionSource {
-    fn acquire(self: &Self, timeout: conc.Duration) nothrow -> core.Result<LeasedConn, ManagedError>;
+    fn acquire(self: &Self, wait: AcquireWait) nothrow -> core.Result<LeasedConn, ManagedError>;
     fn close(self: &mut Self) nothrow -> core.Result<Void, ManagedError>;
 }
+
+pub variant AcquireWait { UseDefault, Forever, For(timeout: conc.Duration) }
 ```
 
-`acquire` takes `&Self` (not `&mut`): it only reads internal state and is internally synchronized, so callers can share a source via `Arc<ConnectionSource impl>` and acquire **concurrently** without an outer mutex serializing them. `close` takes `&mut Self`. The `timeout` is mandatory and bounds the whole acquire end-to-end; on the deadline both implementations return the shared `acquire-timeout` tag, so a caller branching on timeout need not know whether it holds a `ManagedConnection` or a `ConnectionPool`.
+`acquire` takes `&Self` (not `&mut`): it only reads internal state and is internally synchronized, so callers can share a source via `Arc<ConnectionSource impl>` and acquire **concurrently** without an outer mutex serializing them. `close` takes `&mut Self`.
+
+`wait` bounds the whole acquire end-to-end: `UseDefault` uses the source's configured `acquire_timeout` (`None` = block forever, `Some(d)` = finite); `Forever` blocks; `For(d)` caps. Per-call wins over the config default. On a finite deadline both implementations return the shared `acquire-timeout` tag, so a caller branching on timeout need not know whether it holds a `ManagedConnection` or a `ConnectionPool`. Interface method names can't be overloaded, so the ergonomic **no-arg `acquire()` == `acquire(AcquireWait::UseDefault())` lives on each concrete type**, not the interface.
 
 Callers can depend on `ConnectionSource` rather than the concrete `ManagedConnection` type. `ConnectionPool` (`mariadb.rpc.pool`) implements the same interface — switching from one connection to N is a constructor-line change at the call site, not a refactor.
 
@@ -337,9 +342,9 @@ val p = pool.open(rpc_config, move pc).or_throw();
 ### Model
 
 - **Elastic sizing.** Starts with `min_idle` pre-opened conns. `acquire()` opens new conns on demand up to `max_conns`. Idle conns are reaped after `idle_timeout_ms` of no user lease (keepalive activity does NOT count as use).
-- **Deadline-bounded wait on exhaustion.** When the pool is at `max_conns` and all conns are leased, `acquire(timeout)` parks the calling VT on an internal Condvar for up to the remaining budget. The next `LeasedConn::destroy` (release) signals one waiter; on the deadline the waiter returns `acquire-timeout`. The budget bounds the whole call — including an on-demand `rpc.connect` (TCP + handshake + setup), not just the park. `pool.close()` wakes all waiters with `pool-closed`, which wins over timeout/open-failed once close begins.
-- **Concurrent acquire.** `acquire` takes `&Self`, so share the pool via `Arc<ConnectionPool>` and acquire from many VTs concurrently — no outer mutex, so the internal Condvar/waiter model is actually exercised.
-- **Lease shape identical to `ManagedConnection`.** `acquire(timeout)` returns the same `LeasedConn` type. RAII release via destructor; no `release()` method.
+- **Configurable wait on exhaustion.** When the pool is at `max_conns` and all conns are leased, `acquire` parks the calling VT on an internal Condvar per its `AcquireWait`: `For(d)`/finite-default → up to the remaining budget then `acquire-timeout`; `Forever`/`None`-default → until a release or close. The next `LeasedConn::destroy` (release) signals one waiter. A finite budget bounds the whole call — including an on-demand `rpc.connect` (TCP + handshake + setup), not just the park. `pool.close()` wakes all waiters with `pool-closed`, which wins over timeout/open-failed once close begins.
+- **Concurrent acquire.** `acquire` takes `&Self`, so share the pool via `Arc<ConnectionPool>` and acquire from many VTs concurrently — no outer mutex, so the internal Condvar/waiter model is actually exercised. No-arg `acquire()` == `acquire(AcquireWait::UseDefault())`.
+- **Lease shape identical to `ManagedConnection`.** `acquire` returns the same `LeasedConn` type. RAII release via destructor; no `release()` method.
 - **Sequential calls per lease.** Single-active-statement rule applies per lease. To run two statements at once, hold two leases.
 - **One keepalive thread.** Periodically pings idle conns and reaps those beyond `idle_timeout_ms`. Same DNS-re-resolve-on-reconnect behavior as `ManagedConnection`.
 - **Lock discipline.** Never holds the internal slot mutex across network I/O. `rpc.connect`, `rpc.ping`, and `rpc.close` all run with the lock released. Idle reap, push-back, and counter updates are the only critical sections.
@@ -355,6 +360,7 @@ PoolConfig(
     reconnect_backoff_initial_ms = 1000,
     reconnect_backoff_max_ms = 16000,
     reconnect_backoff_jitter_pct = 25,
+    acquire_timeout = None,   // default wait for acquire(): None = block forever, Some(d) = finite cap
     event_sink = None
 )
 ```
