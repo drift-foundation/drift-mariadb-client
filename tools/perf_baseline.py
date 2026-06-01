@@ -90,8 +90,29 @@ def _module_of(path: Path) -> str:
     raise SystemExit(f"error: missing module declaration in {path}")
 
 
-def _compile_scenario(driftc: str, versions: dict[str, str], scenario: Scenario, out_dir: Path) -> Path:
-    """Compile a perf scenario against deployed signed .zdmp packages."""
+def _resolve_flocker() -> str | None:
+    """Resolve the toolchain's flocker (host-global slot pool). None if absent."""
+    root = os.environ.get("DRIFT_TOOLCHAIN_ROOT", "")
+    if root:
+        path = os.path.join(root, "bin", "flocker")
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _compile_jobs() -> int:
+    """Compile-slot pool size: shared cert contract (DRIFT_TEST_JOBS) > legacy > nproc."""
+    for var in ("DRIFT_TEST_JOBS", "DRIFT_BUILD_JOBS"):
+        v = os.environ.get(var, "")
+        if v.isdigit() and int(v) > 0:
+            return int(v)
+    return os.cpu_count() or 4
+
+
+def _compile_cmd(driftc: str, versions: dict[str, str], scenario: Scenario, out_dir: Path) -> tuple[list[str], Path]:
+    """Build the driftc command for one perf scenario (deployed .zdmp packages),
+    wrapped in the shared flocker pool when available so parallel compiles never
+    oversubscribe the host across callers or cert lanes."""
     bin_path = out_dir / scenario.name
     entry = f"{_module_of(scenario.file)}::main"
     cmd = [
@@ -103,8 +124,31 @@ def _compile_scenario(driftc: str, versions: dict[str, str], scenario: Scenario,
         str(scenario.file),
         "-o", str(bin_path),
     ]
-    subprocess.run(cmd, check=True, cwd=ROOT)
-    return bin_path
+    flocker = _resolve_flocker()
+    if flocker:
+        cmd = [flocker, "--key", "drift-jobs", "-j", str(_compile_jobs()), "--"] + cmd
+    return cmd, bin_path
+
+
+def _compile_all(driftc: str, versions: dict[str, str], out_dir: Path) -> dict[str, Path]:
+    """Compile EVERY measured binary up front, in PARALLEL. Compilation is
+    isolation-agnostic (never needs an idle host), so it saturates the machine;
+    flocker bounds total concurrency. Returns {scenario_name: bin_path}."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    procs: list[tuple[Scenario, Path, subprocess.Popen[bytes]]] = []
+    for scenario in SCENARIOS:
+        cmd, bin_path = _compile_cmd(driftc, versions, scenario, out_dir)
+        procs.append((scenario, bin_path, subprocess.Popen(cmd, cwd=ROOT)))
+    binaries: dict[str, Path] = {}
+    failures: list[str] = []
+    for scenario, bin_path, proc in procs:
+        if proc.wait() != 0:
+            failures.append(scenario.name)
+        else:
+            binaries[scenario.name] = bin_path
+    if failures:
+        raise SystemExit(f"error: perf compile failed: {', '.join(sorted(failures))}")
+    return binaries
 
 
 def _start_proxy(scenario: Scenario) -> tuple[subprocess.Popen[str], Path]:
@@ -278,24 +322,65 @@ def _check_baseline(machine_id: str, results: list[dict[str, object]]) -> int:
     return 1 if failed else 0
 
 
+def _arg_value(flag: str) -> str | None:
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        raise SystemExit(f"error: {flag} requires a value")
+    return None
+
+
 def main() -> int:
+    # Phase split (certifiable-test-gates methodology): the perf gate compiles
+    # every measured binary in PARALLEL, then measures SERIALLY on an exclusive
+    # key. The just recipe drives the two as separate steps so the measurement
+    # runs under `flocker -j1 --key` (idle-resource) while compilation saturates
+    # the shared pool. --compile-only / --measure-only select a single phase;
+    # absent both, this runs the whole flow in one process (dev convenience).
     record_mode = "--record-baseline" in sys.argv
+    compile_only = "--compile-only" in sys.argv
+    measure_only = "--measure-only" in sys.argv
+    if compile_only and measure_only:
+        raise SystemExit("error: --compile-only and --measure-only are mutually exclusive")
+    bin_dir_arg = _arg_value("--bin-dir")
 
     driftc = _resolve_driftc()
+    versions = _read_manifest_versions()
+
+    # ---- Compile-only phase: parallel build into a persistent --bin-dir ----
+    if compile_only:
+        if bin_dir_arg is None:
+            raise SystemExit("error: --compile-only requires --bin-dir DIR")
+        _verify_deploy(versions)
+        binaries = _compile_all(driftc, versions, Path(bin_dir_arg))
+        print(f"[perf] compiled {len(binaries)} scenarios -> {bin_dir_arg}")
+        return 0
+
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
     CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
-
-    versions = _read_manifest_versions()
-    _verify_deploy(versions)
     machine_id = _get_machine_id()
-
     version = subprocess.run([driftc, "--version"], check=True, cwd=ROOT, capture_output=True, text=True).stdout.strip()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
 
-    with tempfile.TemporaryDirectory(prefix="drift-perf-bin-") as tmp_dir:
-        out_dir = Path(tmp_dir)
-        binaries = {scenario.name: _compile_scenario(driftc, versions, scenario, out_dir) for scenario in SCENARIOS}
+    # ---- Measure-only phase: run prebuilt binaries from --bin-dir, serial ----
+    if measure_only:
+        if bin_dir_arg is None:
+            raise SystemExit("error: --measure-only requires --bin-dir DIR")
+        bin_dir = Path(bin_dir_arg)
+        binaries = {}
+        for scenario in SCENARIOS:
+            bp = bin_dir / scenario.name
+            if not bp.exists():
+                raise SystemExit(f"error: prebuilt perf binary not found: {bp} (run --compile-only first)")
+            binaries[scenario.name] = bp
         results = [_run_scenario(binaries[scenario.name], scenario) for scenario in SCENARIOS]
+    else:
+        # ---- Combined (dev): parallel compile + serial measure in one process ----
+        _verify_deploy(versions)
+        with tempfile.TemporaryDirectory(prefix="drift-perf-bin-") as tmp_dir:
+            binaries = _compile_all(driftc, versions, Path(tmp_dir))
+            results = [_run_scenario(binaries[scenario.name], scenario) for scenario in SCENARIOS]
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "toolchain": {

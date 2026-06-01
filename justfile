@@ -11,6 +11,23 @@ DEPLOY_DEST := env("DRIFT_PKG_ROOT", "build/deploy")
 RPC_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-rpc'))"`
 WIRE_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-wire-proto'))"`
 
+# Cert gates run on the toolchain's shared scenario-agnostic executor
+# (`$DRIFT_TOOLCHAIN_ROOT/lib/tools/drift_test_run.py`) driven by our plan emitter
+# (`tools/emit_test_plan.py`). The executor owns the mechanism (parallel compile
+# under the flocker pool, dedup, valgrind wrap, heartbeat, host concurrency
+# budget); the emitter owns policy (which files/deps/lanes); the gate harness
+# below owns resource bracketing (DB must be up; `deploy`; perf measurement).
+# Test roots, live-test lists, and the DB resource key all live in the emitter now
+# (its `UNIT_ROOTS` / `LIVE_TESTS` / `DB_GROUP`) — single source of truth.
+#
+# Budget: do NOT set DRIFT_TEST_JOBS to raise the pool — on 0.33.17 the executor's
+# budget helper auto-detects full physical cores. Set it only to TRIM a
+# RAM-constrained box (or mark a lane serial in the plan).
+#
+# Heartbeat cadence (seconds) for the executor's `--heartbeat` watchdog feed (and
+# the perf gate's monitor, which must span its harness measurement step too).
+HEARTBEAT_SECS := "30"
+
 # --- Package lifecycle ---
 
 # Resolve dependencies and write drift/lock.json.
@@ -117,301 +134,129 @@ deploy *ARGS:
 # `stress` and `perf` depend on `deploy` — they compile against signed
 # .zdmp packages, not local source roots. A deploy failure is a gate failure.
 
-# Certification gate: correctness and memory safety (plain + ASAN + memcheck).
-# Phase 1 (test-unit, no DB): plain + ASAN + memcheck run concurrently.
-#   DRIFT_TEST_JOBS is a GLOBAL compile-slot count: the runner wraps each
-#   driftc invocation with the toolchain's `flocker --key drift-jobs -j N`,
-#   so all 3 lanes share one N-slot pool on this host. Total concurrent
-#   driftc processes are bounded by DRIFT_TEST_JOBS regardless of lane count,
-#   preventing OOM cascades (driftc 0.32.x peaks ~500-800 MB RSS per process).
-#   Defaults to ceil(nproc/2); override via env (DRIFT_TEST_JOBS=N).
-# Phase 2 (test-live, shared mdb114-a): three passes serial — the DB is a
-#   shared resource and live tests mutate session/tx/metadata state.
-# Requires DRIFT_TOOLCHAIN_ROOT. Resolves driftc exclusively from the toolchain root.
+# Certification gate: correctness and memory safety (base + sanitizer + memcheck).
+# Runs on the toolchain's shared `drift_test_run` executor (mechanism), driven by
+# `tools/emit_test_plan.py` (policy). The emitted plan has three phases:
+#   build    — every unit + live test x {base (--sanitize none), asan
+#              (--sanitize address)}, compiled in PARALLEL under the flocker pool;
+#              memcheck needs no build (it reuses the base binary via wrap).
+#   run-unit — base / memcheck (valgrind-wrapped base) / asan, in PARALLEL.
+#   run-live — base / asan / memcheck, all in ONE `mode:serial` group on the DB
+#              resource key, so the shared mdb114-a is accessed one-at-a-time
+#              across this gate AND any concurrent cert lane.
+# The executor's `--heartbeat` feeds a stdout-inactivity watchdog through the
+# silent compile / valgrind stretches; its budget auto-detects full physical
+# cores (we do NOT set DRIFT_TEST_JOBS). Requires DRIFT_TOOLCHAIN_ROOT (the
+# executor resolves driftc/flocker from its own toolchain root); mdb114-a up.
 test:
 	#!/usr/bin/env bash
 	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
-	export DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
-	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	: "${DRIFT_TEST_JOBS:=$(( ( $(nproc) + 1 ) / 2 ))}"
-	export DRIFT_TEST_JOBS
-	LOG_DIR="$(mktemp -d -t drift-mdb-test-XXXXXX)"
-	HB_PID=""
-	cleanup() {
-		[[ -n "${HB_PID}" ]] && kill "${HB_PID}" 2>/dev/null
-		rm -rf "${LOG_DIR}"
-	}
-	trap cleanup EXIT
-	echo "=== phase 1: test-unit — plain + asan + memcheck concurrent (DRIFT_TEST_JOBS=${DRIFT_TEST_JOBS} global flocker slots, logs in ${LOG_DIR}) ==="
-	( just test-unit                    > "${LOG_DIR}/unit-plain.log"    2>&1 ) & pid_plain=$!
-	( DRIFT_ASAN=1     just test-unit   > "${LOG_DIR}/unit-asan.log"     2>&1 ) & pid_asan=$!
-	( DRIFT_MEMCHECK=1 just test-unit   > "${LOG_DIR}/unit-memcheck.log" 2>&1 ) & pid_memcheck=$!
-	(
-		t=0
-		while true; do
-			sleep 10
-			t=$((t+10))
-			line="[hb ${t}s]"
-			for pass in plain asan memcheck; do
-				log="${LOG_DIR}/unit-${pass}.log"
-				ran=$(grep -c '^run ' "${log}" 2>/dev/null); ran=${ran:-0}
-				last=$(tail -n 1 "${log}" 2>/dev/null)
-				line+=" ${pass}(ran=${ran}; ${last:-starting})"
-			done
-			echo "${line}"
-		done
-	) & HB_PID=$!
-	status=0
-	report() {
-		local name="$1" pid="$2"
-		if wait "${pid}"; then
-			echo "=== unit-${name} — PASS ==="
-		else
-			echo "=== unit-${name} — FAIL ==="
-			sed 's/^/[unit-'"${name}"'] /' "${LOG_DIR}/unit-${name}.log"
-			status=1
-		fi
-	}
-	report plain    "${pid_plain}"
-	report asan     "${pid_asan}"
-	report memcheck "${pid_memcheck}"
-	kill "${HB_PID}" 2>/dev/null || true
-	wait "${HB_PID}" 2>/dev/null || true
-	[[ "${status}" -ne 0 ]] && exit "${status}"
-	echo ""
-	echo "=== phase 2: test-live — serial (shared DB at 127.0.0.1:34114) ==="
-	echo "--- live: plain ---";    just test-live                    || exit 1
-	echo "--- live: asan ---";     DRIFT_ASAN=1     just test-live   || exit 1
-	echo "--- live: memcheck ---"; DRIFT_MEMCHECK=1 just test-live   || exit 1
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d -t drift-mdb-test-XXXXXX)"
+	trap 'rm -rf "$WORK"' EXIT
+	python3 tools/emit_test_plan.py test --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" --heartbeat {{HEARTBEAT_SECS}}
 
 # Certification gate: RPC-level protocol contamination stress (needs DB).
-# Requires DRIFT_TOOLCHAIN_ROOT. Compiles against deployed signed .zdmp packages.
+# `deploy` (harness) publishes the signed .zdmp packages; the emitted plan then
+# compiles the stress scenario against them under the flocker pool (build phase)
+# and runs it in a `mode:serial` group on the DB resource key — shared with the
+# test gate's live phase, so they never hit mdb114-a concurrently. The executor's
+# `--heartbeat` covers the silent compile/run. Requires DRIFT_TOOLCHAIN_ROOT.
 stress: deploy
 	#!/usr/bin/env bash
-	set -euo pipefail
+	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
-	DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
-	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	tmp="$(mktemp -d /tmp/drift-stress.XXXXXX)"
-	trap "rm -rf '$tmp'" EXIT
-	echo "compile rpc_stress_test.drift (from packages)"
-	"$DRIFTC" --target-word-bits 64 \
-	  --package-root "{{DEPLOY_DEST}}" \
-	  --dep "mariadb-rpc@{{RPC_VERSION}}" \
-	  --dep "mariadb-wire-proto@{{WIRE_VERSION}}" \
-	  --entry "tests.stress.rpc_stress_test::main" \
-	  tests/stress/rpc_stress_test.drift \
-	  -o "$tmp/stress-test"
-	echo "run rpc_stress_test.drift"
-	if [[ "${DRIFT_MEMCHECK:-0}" == "1" ]]; then
-	  valgrind --tool=memcheck --error-exitcode=97 --leak-check=full "$tmp/stress-test"
-	elif [[ "${DRIFT_MASSIF:-0}" == "1" ]]; then
-	  valgrind --tool=massif --error-exitcode=97 "$tmp/stress-test"
-	else
-	  "$tmp/stress-test"
-	fi
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d /tmp/drift-stress.XXXXXX)"
+	trap 'rm -rf "$WORK"' EXIT
+	python3 tools/emit_test_plan.py stress --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" --heartbeat {{HEARTBEAT_SECS}}
 
 # Certification gate: performance regression check against machine-keyed baseline.
-# Requires DRIFT_TOOLCHAIN_ROOT. Compiles against deployed signed .zdmp packages.
+# `deploy` (harness) publishes the packages; the emitted BUILD-ONLY plan compiles
+# the perf scenarios against them in PARALLEL under the executor's flocker pool
+# (phase 1). Measurement (phase 2) is HARNESS — perf_baseline.py --measure-only
+# runs the prebuilt binaries SERIALLY under an exclusive `flocker -j1 --key
+# mariadb-perf-measure` (the wire-capture proxy port / measured host), threading
+# the baseline gate (which the executor deliberately won't do). A recipe-level
+# `flocker --heartbeat` monitor spans BOTH the executor build and the harness
+# measurement on live stdout. Only bytes/packets are gated (elapsed_ms excluded),
+# so a busy machine's slower timings won't regress the gate.
 perf *ARGS: deploy
 	#!/usr/bin/env bash
-	set -euo pipefail
+	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
 	export DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
-	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	python3 tools/perf_baseline.py {{ARGS}}
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	FLK="${DRIFT_TOOLCHAIN_ROOT}/bin/flocker"
+	[[ -f "$RUNNER" && -x "$FLK" ]] || { echo "error: executor/flocker not found under $DRIFT_TOOLCHAIN_ROOT (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d /tmp/drift-perf.XXXXXX)"
+	HB_PID=""
+	cleanup() { [[ -n "$HB_PID" ]] && kill "$HB_PID" 2>/dev/null; rm -rf "$WORK"; }
+	trap cleanup EXIT
+	"$FLK" --key mdb-perf-hb -j 1 --heartbeat {{HEARTBEAT_SECS}} -- sleep 86400 & HB_PID=$!
+	echo "=== perf phase 1: compile scenarios (parallel, executor flocker pool) ==="
+	python3 tools/emit_test_plan.py perf --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" || exit 1
+	echo "=== perf phase 2: measure (serial, exclusive flocker -j1 --key mariadb-perf-measure) ==="
+	"$FLK" --key mariadb-perf-measure -j 1 -- python3 tools/perf_baseline.py --measure-only --bin-dir "$WORK" {{ARGS}} || exit 1
 
 # Record a new perf baseline for this machine (keyed by /etc/machine-id).
-# Requires DRIFT_TOOLCHAIN_ROOT.
+# Same executor-build / exclusive-harness-measure split as `perf`, but records.
 perf-record-baseline: deploy
 	#!/usr/bin/env bash
-	set -euo pipefail
+	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
 	export DRIFTC="${DRIFT_TOOLCHAIN_ROOT}/bin/driftc"
-	[[ -x "$DRIFTC" ]] || { echo "error: driftc not found at $DRIFTC" >&2; exit 1; }
-	python3 tools/perf_baseline.py --record-baseline
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	FLK="${DRIFT_TOOLCHAIN_ROOT}/bin/flocker"
+	[[ -f "$RUNNER" && -x "$FLK" ]] || { echo "error: executor/flocker not found under $DRIFT_TOOLCHAIN_ROOT (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d /tmp/drift-perf.XXXXXX)"
+	HB_PID=""
+	cleanup() { [[ -n "$HB_PID" ]] && kill "$HB_PID" 2>/dev/null; rm -rf "$WORK"; }
+	trap cleanup EXIT
+	"$FLK" --key mdb-perf-hb -j 1 --heartbeat {{HEARTBEAT_SECS}} -- sleep 86400 & HB_PID=$!
+	echo "=== perf-record phase 1: compile scenarios (parallel, executor flocker pool) ==="
+	python3 tools/emit_test_plan.py perf --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" || exit 1
+	echo "=== perf-record phase 2: measure + record (serial, exclusive flocker -j1 --key mariadb-perf-measure) ==="
+	"$FLK" --key mariadb-perf-measure -j 1 -- python3 tools/perf_baseline.py --measure-only --bin-dir "$WORK" --record-baseline || exit 1
 
 # --- Dev workflows (not certification gates) ---
-# Lighter-weight, source-level workflows for the inner dev loop.
-# Compile from local source roots via the manifest (no deploy required).
+# The shared executor runs these too — a one-test or compile-check plan from the
+# same emitter (tools/emit_test_plan.py). The old per-suite / per-test recipes
+# (test-unit, test-live, wire-check, rpc-live-*, build-*, run-*-prebuilt, …) are
+# retired: emit a one-test plan for any file instead.
 
-# Unit tests only (no DB required).
-test-unit:
-	@just wire-check
-	@just rpc-check
+# Build + run a single test through the executor (fast inner-loop iteration).
+#   just check-one packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift
+check-one FILE:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	: "${DRIFT_TOOLCHAIN_ROOT:?set DRIFT_TOOLCHAIN_ROOT to a toolchain >= 0.33.17}"
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d /tmp/drift-mdb-one.XXXXXX)"
+	trap 'rm -rf "$WORK"' EXIT
+	python3 tools/emit_test_plan.py one --file "{{FILE}}" --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK"
 
-# Live/e2e tests only (needs running MariaDB instance). Two batches (wire, rpc):
-# each compiles its tests in PARALLEL (the slow, DB-free part) then runs them
-# SERIALLY against the shared MariaDB instance. The individual rpc-live-* /
-# wire-live-* targets below still exist for ad-hoc single-test runs.
-test-live:
-	@just wire-live-batch
-	@just rpc-live-batch
-
-# Wire e2e batch — parallel compile, serial run.
-wire-live-batch:
-	@tools/drift_test_parallel_runner.sh run-batch \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_metadata_suppression_test.drift \
-	  --target-word-bits 64
-
-# RPC e2e batch — parallel compile, serial run.
-rpc-live-batch:
-	@tools/drift_test_parallel_runner.sh run-batch \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/pool_acquire_timeout_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/managed_acquire_timeout_test.drift \
-	  --test-file packages/mariadb-rpc/tests/e2e/managed_release_wakeup_test.drift \
-	  --target-word-bits 64
-
-# --- Wire-proto tests ---
-
-wire-check:
-	@tools/drift_test_parallel_runner.sh run-all \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-root packages/mariadb-wire-proto/tests/unit \
-	  --target-word-bits 64
-
-wire-check-unit FILE:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file "{{FILE}}" \
-	  --target-word-bits 64
-
-wire-compile-check FILE="packages/mariadb-wire-proto/src/lib.drift":
-	@tools/drift_test_parallel_runner.sh compile \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --file "{{FILE}}" \
-	  --target-word-bits 64
-
-wire-smoke:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/com_query_smoke_test.drift \
-	  --target-word-bits 64
-
-wire-live:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_smoke_test.drift \
-	  --target-word-bits 64
-
-wire-live-api:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_proto_api_smoke_test.drift \
-	  --target-word-bits 64
-
-wire-live-state:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_session_state_test.drift \
-	  --target-word-bits 64
-
-wire-live-tx:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_tx_test.drift \
-	  --target-word-bits 64
-
-wire-live-load:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_tcp_load_test.drift \
-	  --target-word-bits 64
-
-wire-live-metadata:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-wire-proto \
-	  --test-file packages/mariadb-wire-proto/tests/e2e/live_metadata_suppression_test.drift \
-	  --target-word-bits 64
-
-# --- RPC tests ---
-
-rpc-check:
-	@tools/drift_test_parallel_runner.sh run-all \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-root packages/mariadb-rpc/tests/unit \
-	  --target-word-bits 64
-
-rpc-check-unit FILE:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file "{{FILE}}" \
-	  --target-word-bits 64
-
-rpc-check-config:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/unit/rpc_config_validation_test.drift \
-	  --target-word-bits 64
-
-rpc-live:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_rpc_smoke_test.drift \
-	  --target-word-bits 64
-
-rpc-live-connect-state-regression:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_regression_test.drift \
-	  --target-word-bits 64
-
-rpc-live-connect-state-stage:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/connect_state_handoff_stage_isolation_test.drift \
-	  --target-word-bits 64
-
-rpc-live-managed:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift \
-	  --target-word-bits 64
-
-rpc-live-managed-acquire-timeout:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/managed_acquire_timeout_test.drift \
-	  --target-word-bits 64
-
-rpc-live-managed-release-wakeup:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/managed_release_wakeup_test.drift \
-	  --target-word-bits 64
-
-rpc-live-pool:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift \
-	  --target-word-bits 64
-
-rpc-live-pool-discard-wakeup:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift \
-	  --target-word-bits 64
-
-rpc-live-pool-acquire-timeout:
-	@tools/drift_test_parallel_runner.sh run-one \
-	  --manifest {{MANIFEST}} --artifact mariadb-rpc \
-	  --test-file packages/mariadb-rpc/tests/e2e/pool_acquire_timeout_test.drift \
-	  --target-word-bits 64
+# Type-check a single file against its artifact's sources (no entry, no run).
+#   just compile-check packages/mariadb-rpc/src/lib.drift
+compile-check FILE:
+	#!/usr/bin/env bash
+	set -uo pipefail
+	: "${DRIFT_TOOLCHAIN_ROOT:?set DRIFT_TOOLCHAIN_ROOT to a toolchain >= 0.33.17}"
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	WORK="$(mktemp -d /tmp/drift-mdb-compile.XXXXXX)"
+	trap 'rm -rf "$WORK"' EXIT
+	python3 tools/emit_test_plan.py compile --file "{{FILE}}" --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK"
 
 # --- Local MariaDB dev instances ---
 
