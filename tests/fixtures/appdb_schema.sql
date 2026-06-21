@@ -77,4 +77,15 @@ BEGIN
   SELECT id, raw_key FROM tb_binary_test WHERE id = arg_id;
 END//
 
+-- Keepalive poll_many tests: shrink the CALLING session's idle timeout so the
+-- server autonomously closes the connection after it sits idle `secs` seconds.
+-- The pool/managed poll_many service fiber then observes the fd as readable/
+-- hangup and recycles it. SET SESSION inside a proc affects the caller's
+-- session and persists after the proc returns. Used by the poll_many idle-close
+-- recycle regression tests.
+CREATE PROCEDURE sp_set_wait_timeout(IN secs INT)
+BEGIN
+  SET SESSION wait_timeout = secs;
+END//
+
 DELIMITER ;

@@ -77,9 +77,11 @@ LIVE_TESTS = [
         "packages/mariadb-rpc/tests/e2e/live_pool_smoke_test.drift",
         "packages/mariadb-rpc/tests/e2e/pool_release_discard_wakeup_regression_test.drift",
         "packages/mariadb-rpc/tests/e2e/pool_acquire_timeout_test.drift",
+        "packages/mariadb-rpc/tests/e2e/pool_idle_close_recycle_test.drift",
         "packages/mariadb-rpc/tests/e2e/live_managed_smoke_test.drift",
         "packages/mariadb-rpc/tests/e2e/managed_acquire_timeout_test.drift",
         "packages/mariadb-rpc/tests/e2e/managed_release_wakeup_test.drift",
+        "packages/mariadb-rpc/tests/e2e/managed_idle_close_recycle_test.drift",
     ]),
 ]
 

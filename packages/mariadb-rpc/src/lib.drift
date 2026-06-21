@@ -72,6 +72,7 @@ export {
 	reset_for_pool_reuse,
 	ping,
 	is_alive,
+	raw_fd,
 	is_transport_error
 };
 
@@ -587,6 +588,12 @@ implement RpcConnection {
 	pub fn is_alive(self: &RpcConnection) nothrow -> Bool {
 		return wire.session_is_reusable(&self.wire_session);
 	}
+
+	// Raw OS fd of the underlying TCP stream, for poll_many-based idle-watch in
+	// the pool/managed service fiber. No I/O; valid only while the conn is open.
+	pub fn raw_fd(self: &RpcConnection) nothrow -> Int {
+		return wire.session_raw_fd(&self.wire_session);
+	}
 }
 
 implement RpcRow {
@@ -711,6 +718,7 @@ pub fn reset_for_pool_reuse(conn: &mut RpcConnection) nothrow -> core.Result<Voi
 pub fn close(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.close(); }
 pub fn ping(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.ping(); }
 pub fn is_alive(conn: &RpcConnection) nothrow -> Bool { return conn.is_alive(); }
+pub fn raw_fd(conn: &RpcConnection) nothrow -> Int { return conn.raw_fd(); }
 
 // Classifies an RpcError as a transport/protocol failure (rpc-wire-*) for
 // which the conn may be dead and a reconnect+retry is the right response.

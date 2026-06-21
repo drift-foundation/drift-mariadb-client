@@ -35,7 +35,15 @@ import std.concurrent as conc;
 import std.sync as sync;
 import std.mem as mem;
 import std.time as time;
+import std.io as io;
 import mariadb.rpc as rpc;
+
+// Keepalive service-fiber tuning (mirrors mariadb.rpc.pool). IDLE_WATCH_CAP_MS
+// bounds a single poll_many wait so the idle conn is re-watched promptly after
+// a lease returns it; the spin guard bounds re-snapshot churn on a raced fd.
+const IDLE_WATCH_CAP_MS: Int = 1000;
+const POLL_SPIN_GUARD: Int = 8;
+const POLL_ERR_BACKOFF_MS: Int = 50;
 
 export {
 	ManagedConfig,
@@ -109,7 +117,12 @@ pub fn default_managed_config() nothrow -> ManagedConfig {
 // close() can wake parked waiters. Pairs with ManagedInner.cv.
 pub struct ManagedSlot {
 	pub conn: Optional<rpc.RpcConnection>,
-	pub closed: Bool
+	pub closed: Bool,
+	// Bumped every time a conn enters the slot (seed / reconnect / lease return).
+	// The poll_many watcher recycles the idle conn only if the slot still holds
+	// the exact incarnation it snapshotted, so a stale readiness edge from a
+	// prior conn can't trigger a needless reconnect. See _take_idle_if_token.
+	pub watch_token: Int
 }
 
 pub struct ManagedInner {
@@ -340,7 +353,7 @@ pub fn open(rpc_config: rpc.RpcConnectionConfig, mc_config: ManagedConfig) nothr
 		core.Result::Err(e) => { return core.Result::Err(_mgr_error("managed-open-connect-failed", e.tag)); },
 		core.Result::Ok(c) => {
 			val seeded: Optional<rpc.RpcConnection> = Optional::Some(move c);
-			val slot: conc.Mutex<ManagedSlot> = conc.mutex(ManagedSlot(conn = move seeded, closed = false));
+			val slot: conc.Mutex<ManagedSlot> = conc.mutex(ManagedSlot(conn = move seeded, closed = false, watch_token = 0));
 			val stop: conc.AtomicBool = conc.atomic_bool(false);
 			val inner = ManagedInner(
 				slot = move slot,
@@ -373,45 +386,172 @@ fn _spawn_keepalive(inner_for_thread: conc.Arc<ManagedInner>) nothrow -> conc.Vi
 }
 
 // -----------------------------------------------------------------------
-// Keepalive loop — virtual thread parked on conc.sleep between ticks.
+// Keepalive service fiber — single poll_many-driven loop (replaces the former
+// bare conc.sleep timer). Each pass watches the idle conn's fd in poll_many for
+// up to (time-until-next-ping, capped); a readable/hangup/err edge means the
+// server spoke first or closed, so we recycle the conn and reconnect promptly
+// instead of waiting for the next ping tick. The periodic active ping is still
+// run on the interval deadline — poll readiness can't detect a silent half-open
+// death (no FIN), only an active ping can.
 // -----------------------------------------------------------------------
 
 fn _keepalive_loop(inner: conc.Arc<ManagedInner>) nothrow -> Int {
 	val interval_ms = _inner_keepalive_ms(&inner);
 	if interval_ms <= 0 { return 0; }  // caller opted out of keepalive
 	var attempt_num = 0;
+	var last_tick = time.now_monotonic();
+	var consec_err = 0;
 	while not _inner_stop_flag(&inner) {
-		// Park until the timer fires OR close() cancels us.
-		match conc.sleep(conc.Duration(millis = interval_ms)) {
-			core.Result::Err(_) => { return 0; },
-			core.Result::Ok(_) => {}
-		}
-		if _inner_stop_flag(&inner) {
-			return 0;
-		}
-		// Try to take the conn for a ping. Skip if currently leased.
-		val taken = _slot_take(&inner);
-		match taken {
-			Optional::None => {
-				// Lease holds the conn — skip this tick.
-			},
-			Optional::Some(c) => {
-				var conn = move c;
-				match rpc.ping(&mut conn) {
-					core.Result::Ok(_) => {
-						_emit(&inner, ManagedEvent::KeepalivePingOk());
-						_slot_put(&inner, move conn);
-					},
-					core.Result::Err(e) => {
-						_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag));
-						val _ = rpc.close(&mut conn);
-						attempt_num = _reconnect_with_backoff(&inner, attempt_num);
+		val entries = _snapshot_managed_entry(&inner);
+		var wait_ms = interval_ms - time.elapsed_ms(&last_tick);
+		if wait_ms < 1 { wait_ms = 1; }
+		if wait_ms > IDLE_WATCH_CAP_MS { wait_ms = IDLE_WATCH_CAP_MS; }
+
+		if entries.len == 0 {
+			// Conn is leased (or gone) — nothing to watch; sleep until the tick.
+			match conc.sleep(conc.Duration(millis = wait_ms)) {
+				core.Result::Err(_) => { return 0; },  // cancelled by close()
+				core.Result::Ok(_) => {}
+			}
+		} else {
+			match io.poll_many(&entries, conc.Duration(millis = wait_ms)) {
+				core.Result::Ok(ready) => {
+					consec_err = 0;
+					if _ready_has_any(&ready) {
+						// Idle conn misbehaving: recycle THIS incarnation (token
+						// match) and reconnect. A leased/returned conn won't match.
+						val tok = entries[0].token;
+						match _take_idle_if_token(&inner, tok) {
+							Optional::Some(c) => {
+								var bad = move c;
+								_emit(&inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = "idle-readiness-close"));
+								val _ = rpc.close(&mut bad);
+								attempt_num = _reconnect_with_backoff(&inner, attempt_num);
+							},
+							Optional::None => {}
+						}
+					}
+				},
+				core.Result::Err(e) => {
+					if e.kind == io.IO_ERROR_KIND_CANCELLED {
+						return 0;
+					} else {
+						if e.kind == io.IO_ERROR_KIND_TIMEOUT {
+							consec_err = 0;
+						} else {
+							// invalid-argument: the single watched fd is unregistrable
+							// (closed/invalid under us). Recycle it (token-checked) and
+							// reconnect — the same path as a readiness edge — instead of
+							// spinning on an identical bad snapshot. If the conn was
+							// already leased/replaced the take is a no-op and the next
+							// snapshot watches a different fd; either way we made
+							// progress, so the spin guard resets.
+							attempt_num = _managed_recycle_idle(&inner, entries[0].token, "idle-fd-unregistrable", attempt_num);
+							consec_err = 0;
+						}
 					}
 				}
 			}
 		}
+
+		if _inner_stop_flag(&inner) { return 0; }
+		if time.elapsed_ms(&last_tick) >= interval_ms {
+			attempt_num = _managed_ping_tick(&inner, attempt_num);
+			last_tick = time.now_monotonic();
+		}
 	}
 	return 0;
+}
+
+// Periodic active ping: take the idle conn (skip if leased), ping, and on
+// failure close + reconnect. Returns the updated reconnect-attempt counter.
+fn _managed_ping_tick(inner: &conc.Arc<ManagedInner>, prior_attempts: Int) nothrow -> Int {
+	var attempt_num = prior_attempts;
+	val taken = _slot_take(inner);
+	match taken {
+		Optional::None => {},  // leased — skip this tick
+		Optional::Some(c) => {
+			var conn = move c;
+			match rpc.ping(&mut conn) {
+				core.Result::Ok(_) => {
+					_emit(inner, ManagedEvent::KeepalivePingOk());
+					_slot_put(inner, move conn);
+				},
+				core.Result::Err(e) => {
+					_emit(inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = e.tag));
+					val _ = rpc.close(&mut conn);
+					attempt_num = _reconnect_with_backoff(inner, attempt_num);
+				}
+			}
+		}
+	}
+	return attempt_num;
+}
+
+// Build the poll set for the single idle conn: one PollEntry if a conn is in the
+// slot, empty if it is leased / absent. token = the slot's current watch_token.
+fn _snapshot_managed_entry(inner: &conc.Arc<ManagedInner>) nothrow -> Array<io.PollEntry> {
+	var entries: Array<io.PollEntry> = [];
+	val inner_ref: &ManagedInner = inner.get();
+	val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	match &s.conn {
+		Optional::Some(c) => {
+			entries.push(io.PollEntry(
+				fd = rpc.raw_fd(c),
+				token = s.watch_token,
+				want_read = true,
+				want_write = false
+			));
+		},
+		Optional::None => {}
+	}
+	return move entries;
+}
+
+// True iff any reported fd is readable / hangup / err. (We never request write.)
+fn _ready_has_any(ready: &Array<io.PollReady>) nothrow -> Bool {
+	var i = 0;
+	while i < ready.len {
+		if ready[i].readable or ready[i].hangup or ready[i].err {
+			return true;
+		}
+		i = i + 1;
+	}
+	return false;
+}
+
+// Take the idle conn out of the slot ONLY IF it is still the incarnation we
+// snapshotted (watch_token match). Returns None if the conn was leased, or if a
+// lease/reconnect replaced it (new token) in the race window — so we never tear
+// down a leased fd nor needlessly reconnect a conn that was already refreshed.
+fn _take_idle_if_token(inner: &conc.Arc<ManagedInner>, token: Int) nothrow -> Optional<rpc.RpcConnection> {
+	val inner_ref: &ManagedInner = inner.get();
+	val mu_ref: &conc.Mutex<ManagedSlot> = &inner_ref.slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	if s.watch_token == token {
+		return mem.replace(&mut s.conn, Optional<rpc.RpcConnection>::None());
+	} else {
+		return Optional<rpc.RpcConnection>::None();
+	}
+}
+
+// Recycle the idle conn identified by `token` (if it is still that incarnation):
+// close it outside the lock and reconnect. Used by both the readiness path and
+// the invalid-argument self-heal path. A token mismatch (conn leased/replaced in
+// the race window) is a safe no-op. Returns the updated reconnect-attempt count.
+fn _managed_recycle_idle(inner: &conc.Arc<ManagedInner>, token: Int, reason: String, prior_attempts: Int) nothrow -> Int {
+	match _take_idle_if_token(inner, token) {
+		Optional::Some(c) => {
+			var bad = move c;
+			_emit(inner, ManagedEvent::KeepalivePingFailed(ping_failed_tag = reason));
+			val _ = rpc.close(&mut bad);
+			return _reconnect_with_backoff(inner, prior_attempts);
+		},
+		Optional::None => { return prior_attempts; }
+	}
 }
 
 // Reconnect loop — runs until success or stop_flag flips. Returns the
@@ -562,6 +702,7 @@ fn _slot_put_decide(inner: &conc.Arc<ManagedInner>, conn: rpc.RpcConnection) not
 		return Optional::Some(move c);
 	} else {
 		val _old = mem.replace(&mut s.conn, Optional::Some(move c));
+		s.watch_token = s.watch_token + 1;
 		inner_ref.cv.signal_one();
 		return Optional<rpc.RpcConnection>::None();
 	}

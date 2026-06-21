@@ -1,0 +1,166 @@
+// Regression: the managed (single-slot) poll_many keepalive fiber recycles a
+// server-closed idle conn and reconnects — promptly, via the POLL path.
+//
+// Mirrors pool_idle_close_recycle_test for ManagedConnection. We shrink the
+// conn's server-side wait_timeout (sp_set_wait_timeout) so MariaDB closes it
+// after ~2s idle. The fd goes readable/hangup; the managed fiber recycles the
+// matching token incarnation (KeepalivePingFailed "idle-readiness-close") and
+// reconnects (ReconnectSucceeded). keepalive_interval is 60s, so the periodic
+// ping tick CANNOT fire in-window — an observed reconnect is the poll path.
+// Finally we re-acquire + ping to prove the replacement conn is healthy.
+//
+// Needs sp_set_wait_timeout in tests/fixtures/appdb_schema.sql.
+
+module mariadb.rpc.tests.e2e.managed_idle_close_recycle_test;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.format as format;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+
+const LIVE_HOST: String = "127.0.0.1";
+const LIVE_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 1000;
+
+const WAIT_TIMEOUT_SECS: Int = 2;
+const RECYCLE_DEADLINE_MS: Int = 12000;
+const POLL_STEP_MS: Int = 100;
+
+pub struct ReconnectCounter {
+	pub idle_recycles: Int,   // KeepalivePingFailed(idle-readiness-close)
+	pub reconnects: Int       // ReconnectSucceeded
+}
+
+fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(LIVE_HOST);
+	b.with_port(LIVE_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _make_sink(counter_for_sink: conc.Arc<conc.Mutex<ReconnectCounter> >) nothrow -> core.Callback1<managed.ManagedEvent, Void> {
+	return core.callback1(|ev: managed.ManagedEvent| captures(move counter_for_sink) => {
+		match ev {
+			managed.ManagedEvent::KeepalivePingFailed(_) => {
+				val mu_ref: &conc.Mutex<ReconnectCounter> = counter_for_sink.get();
+				var guard = conc.lock(mu_ref);
+				val s = guard.get_mut();
+				s.idle_recycles = s.idle_recycles + 1;
+			},
+			managed.ManagedEvent::ReconnectSucceeded(_) => {
+				val mu_ref: &conc.Mutex<ReconnectCounter> = counter_for_sink.get();
+				var guard = conc.lock(mu_ref);
+				val s = guard.get_mut();
+				s.reconnects = s.reconnects + 1;
+			},
+			managed.ManagedEvent::KeepalivePingOk => {},
+			managed.ManagedEvent::ReconnectAttempt(_) => {},
+			managed.ManagedEvent::ReconnectFailed(_, _) => {}
+		}
+		return;
+	});
+}
+
+fn _reconnects(counter: &conc.Arc<conc.Mutex<ReconnectCounter> >) nothrow -> Int {
+	val mu_ref: &conc.Mutex<ReconnectCounter> = counter.get();
+	var guard = conc.lock(mu_ref);
+	return guard.get_mut().reconnects;
+}
+
+fn _arm_short_timeout(mc: &managed.ManagedConnection, secs: Int) nothrow -> Int {
+	match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 5000))) {
+		core.Result::Err(e) => { console.println("[arm] acquire failed: " + e.tag); return 110; },
+		core.Result::Ok(lv) => {
+			var lease = move lv;
+			match lease.conn() {
+				core.Result::Err(_) => { return 111; },
+				core.Result::Ok(c) => {
+					var args: Array<rpc.RpcArg> = [];
+					args.push(rpc.arg_int(secs));
+					match c.call(&"sp_set_wait_timeout", &args) {
+						core.Result::Ok(s) => { val _ = move s; },
+						core.Result::Err(e) => { console.println("[arm] sp_set_wait_timeout failed: " + e.tag); return 112; }
+					}
+				}
+			}
+			return 0;  // lease drops → conn back in slot, idle with short wait_timeout
+		}
+	}
+}
+
+fn main() nothrow -> Int {
+	console.println("=== managed_idle_close_recycle_test ===");
+	match _build_cfg() {
+		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },
+		core.Result::Ok(cfg) => {
+			var counter_arc: conc.Arc<conc.Mutex<ReconnectCounter> > = conc.arc(conc.mutex(ReconnectCounter(idle_recycles = 0, reconnects = 0)));
+			var mc_cfg = managed.default_managed_config();
+			mc_cfg.keepalive_interval_ms = 60000;  // ping tick won't fire in-window → isolates poll path
+			mc_cfg.event_sink = Optional::Some(_make_sink(counter_arc.clone()));
+			match managed.open(move cfg, move mc_cfg) {
+				core.Result::Err(e) => { console.println("[main] open failed: " + e.tag); return 2; },
+				core.Result::Ok(v) => {
+					var mc = move v;
+
+					val arm_rc = _arm_short_timeout(&mc, WAIT_TIMEOUT_SECS);
+					if arm_rc != 0 { val _ = mc.close(); return arm_rc; }
+					console.println("[arm] conn armed with wait_timeout=" + format.format_int(WAIT_TIMEOUT_SECS) + "s; awaiting server close + poll reconnect");
+
+					var waited = 0;
+					var reconnected = false;
+					while not reconnected {
+						if _reconnects(&counter_arc) >= 1 {
+							reconnected = true;
+						} else {
+							if waited >= RECYCLE_DEADLINE_MS {
+								console.println("[main] FAIL: no ReconnectSucceeded within " + format.format_int(RECYCLE_DEADLINE_MS) + "ms");
+								val _ = mc.close();
+								return 3;
+							}
+							val _ = conc.sleep(conc.Duration(millis = POLL_STEP_MS));
+							waited = waited + POLL_STEP_MS;
+						}
+					}
+					console.println("[main] PASS: idle conn recycled + reconnected via poll path after ~" + format.format_int(waited) + "ms (<< 60s keepalive)");
+
+					// Replacement must be healthy.
+					match mc.acquire(managed.AcquireWait::For(timeout = conc.Duration(millis = 5000))) {
+						core.Result::Err(e) => { console.println("[main] re-acquire failed: " + e.tag); val _ = mc.close(); return 4; },
+						core.Result::Ok(lv) => {
+							var lease = move lv;
+							match lease.conn() {
+								core.Result::Err(_) => { val _ = mc.close(); return 5; },
+								core.Result::Ok(c) => {
+									match rpc.ping(c) {
+										core.Result::Ok(_) => { console.println("[main] replacement conn ping ok"); },
+										core.Result::Err(e) => { console.println("[main] replacement ping failed: " + e.tag); val _ = mc.close(); return 6; }
+									}
+								}
+							}
+						}
+					}
+
+					match mc.close() {
+						core.Result::Err(_) => { return 7; },
+						core.Result::Ok(_) => {}
+					}
+				}
+			}
+		}
+	}
+	console.println("=== managed_idle_close_recycle_test: passed ===");
+	return 0;
+}

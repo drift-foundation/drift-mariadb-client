@@ -26,9 +26,22 @@ import std.concurrent as conc;
 import std.sync as sync;
 import std.mem as mem;
 import std.time as time;
+import std.io as io;
 import std.containers as containers;
 import mariadb.rpc as rpc;
 import mariadb.rpc.managed as managed;
+
+// Keepalive service-fiber tuning.
+//   IDLE_WATCH_CAP_MS — upper bound on a single poll_many wait, so a conn that
+//     becomes idle while we are parked is picked up within this bound (no
+//     self-pipe wake). Also caps how long a quiet pool sleeps between ticks.
+//   POLL_SPIN_GUARD / POLL_ERR_BACKOFF_MS — an unexpected/raced poll error
+//     (e.g. an fd closed under us) triggers an immediate re-snapshot; only if
+//     such errors recur POLL_SPIN_GUARD times in a row do we back off, to avoid
+//     a hot loop while still draining the raced fd out on the next snapshot.
+const IDLE_WATCH_CAP_MS: Int = 1000;
+const POLL_SPIN_GUARD: Int = 8;
+const POLL_ERR_BACKOFF_MS: Int = 50;
 
 export {
 	PoolConfig,
@@ -45,6 +58,10 @@ export {
 pub variant PoolEvent {
 	ConnOpened(opened_total: Int),
 	ConnClosedByReap(closed_total: Int),
+	// One or more idle conns were recycled this service pass because poll_many
+	// reported them readable/hangup/err (server spoke first or closed) — distinct
+	// from idle-timeout reap. `recycled_now` = count closed this pass.
+	IdleConnRecycled(recycled_now: Int),
 	KeepalivePingOk,
 	KeepalivePingFailed(ping_failed_tag: String),
 	ReconnectAttempt(attempt_attempt: Int),
@@ -90,7 +107,14 @@ pub struct ConnEntry {
 	// Conn is Optional so we can mem.replace it out — v1 doesn't support
 	// moving a projected (non-Optional) field of an owned struct.
 	pub conn: Optional<rpc.RpcConnection>,
-	pub last_user_release_ms: Int
+	pub last_user_release_ms: Int,
+	// Identifies THIS idle incarnation for the poll_many watcher. Minted fresh
+	// (from PoolSlot.next_watch_token) every time the entry enters `available`.
+	// The watcher recycles a conn only if a readiness event's token still
+	// matches an entry in `available` — so a conn leased, used, and returned
+	// (with a NEW token) can never be recycled on a stale edge from its prior
+	// incarnation. See _recycle_ready_idles.
+	pub watch_token: Int
 }
 
 pub struct PoolSlot {
@@ -98,7 +122,8 @@ pub struct PoolSlot {
 	pub closed: Bool,
 	pub active_count: Int,  // currently leased OR being-opened
 	pub total_count: Int,   // available.len + active_count
-	pub waiters: Int        // VTs currently parked in cv.wait
+	pub waiters: Int,       // VTs currently parked in cv.wait
+	pub next_watch_token: Int  // monotonic source of ConnEntry.watch_token
 }
 
 pub struct PoolInner {
@@ -190,7 +215,8 @@ pub fn open(rpc_config: rpc.RpcConnectionConfig, pool_config: PoolConfig) nothro
 		closed = false,
 		active_count = 0,
 		total_count = 0,
-		waiters = 0
+		waiters = 0,
+		next_watch_token = 0
 	);
 	val inner = PoolInner(
 		slot = conc.mutex(move slot),
@@ -215,10 +241,11 @@ pub fn open(rpc_config: rpc.RpcConnectionConfig, pool_config: PoolConfig) nothro
 			},
 			core.Result::Ok(c) => {
 				val now_ms = _now_ms(&inner_arc);
-				val entry = ConnEntry(conn = Optional::Some(move c), last_user_release_ms = now_ms);
 				val mu_ref: &conc.Mutex<PoolSlot> = &inner_arc.get().slot;
 				var guard = conc.lock(mu_ref);
 				val s = guard.get_mut();
+				val tok = _mint_token(s);
+				val entry = ConnEntry(conn = Optional::Some(move c), last_user_release_ms = now_ms, watch_token = tok);
 				s.available.push_back(move entry);
 				s.total_count = s.total_count + 1;
 			}
@@ -545,7 +572,8 @@ fn _release_decide(inner: &conc.Arc<PoolInner>, conn: rpc.RpcConnection, healthy
 		// so idle-reap sees the original idle window.
 		var ts: Int = preserved_ts_ms;
 		if not is_keepalive { ts = _now_ms_from(&inner.get().boot); }
-		val entry = ConnEntry(conn = Optional::Some(move c), last_user_release_ms = ts);
+		val tok = _mint_token(s);
+		val entry = ConnEntry(conn = Optional::Some(move c), last_user_release_ms = ts, watch_token = tok);
 		s.available.push_back(move entry);
 		inner.get().cv.signal_one();
 		return Optional<rpc.RpcConnection>::None();
@@ -553,21 +581,248 @@ fn _release_decide(inner: &conc.Arc<PoolInner>, conn: rpc.RpcConnection, healthy
 }
 
 // -----------------------------------------------------------------------
-// Keepalive thread — periodic ping + idle reap
+// Keepalive service fiber — single poll_many-driven loop (replaces the former
+// one-VT-per-conn / bare conc.sleep model). Each pass:
+//   1. snapshots idle conns' fds (under lock) into a poll set,
+//   2. parks in poll_many for up to (time-until-next-tick, capped), and
+//   3a. on readiness: an idle conn that went readable/hangup/err is misbehaving
+//       (server spoke first or closed) — recycle it (no drain; it is not an
+//       active stream),
+//   3b. on the interval deadline: run the periodic ping + idle reap tick.
+// One fiber watches all N idle fds, so a server-initiated close on an idle
+// pooled conn is detected promptly instead of only at the next ping tick.
 // -----------------------------------------------------------------------
 
 fn _keepalive_loop(inner: conc.Arc<PoolInner>) nothrow -> Int {
 	val interval_ms = _pool_keepalive_ms(&inner);
 	if interval_ms <= 0 { return 0; }
+	var last_tick = time.now_monotonic();
+	var consec_err = 0;
 	while not _pool_stop_flag(&inner) {
-		match conc.sleep(conc.Duration(millis = interval_ms)) {
-			core.Result::Err(_) => { return 0; },
-			core.Result::Ok(_) => {}
+		val entries = _snapshot_idle_entries(&inner);
+		// Park no longer than the time remaining until the next ping tick, and
+		// never longer than IDLE_WATCH_CAP_MS so a newly-idle conn is picked up.
+		var wait_ms = interval_ms - time.elapsed_ms(&last_tick);
+		if wait_ms < 1 { wait_ms = 1; }
+		if wait_ms > IDLE_WATCH_CAP_MS { wait_ms = IDLE_WATCH_CAP_MS; }
+
+		if entries.len == 0 {
+			// Nothing to watch (no idle conns) — poll_many rejects an empty set,
+			// so just sleep until the next tick is due / we are cancelled.
+			match conc.sleep(conc.Duration(millis = wait_ms)) {
+				core.Result::Err(_) => { return 0; },  // cancelled by close()
+				core.Result::Ok(_) => {}
+			}
+		} else {
+			match io.poll_many(&entries, conc.Duration(millis = wait_ms)) {
+				core.Result::Ok(ready) => {
+					consec_err = 0;
+					val toks = _ready_tokens(&ready);
+					if toks.len > 0 {
+						_recycle_and_report(&inner, &toks);
+					}
+				},
+				core.Result::Err(e) => {
+					if e.kind == io.IO_ERROR_KIND_CANCELLED {
+						return 0;  // close() cancelled the fiber
+					} else {
+						if e.kind == io.IO_ERROR_KIND_TIMEOUT {
+							consec_err = 0;  // normal: no fd ready before the tick
+						} else {
+							// invalid-argument: ONE unregistrable fd in the set fails
+							// the WHOLE aggregate poll, blinding readiness for every
+							// other fd — and if that bad conn stays in `available` the
+							// next snapshot is identical, so the call would fail forever.
+							// Probe each fd individually to find the offender(s) (and
+							// any readiness the aggregate call masked) and recycle them
+							// via the token path, shrinking the set so the aggregate
+							// poll recovers. This is what actually makes the loop
+							// self-healing. Token matching keeps a leased/returned conn
+							// safe. Only if a probe pass surfaces nothing do we treat it
+							// as transient and back off after POLL_SPIN_GUARD repeats.
+							val bad = _probe_bad_tokens(&entries);
+							if bad.len > 0 {
+								consec_err = 0;
+								_recycle_and_report(&inner, &bad);
+							} else {
+								consec_err = consec_err + 1;
+								if consec_err >= POLL_SPIN_GUARD {
+									match conc.sleep(conc.Duration(millis = POLL_ERR_BACKOFF_MS)) {
+										core.Result::Err(_) => { return 0; },
+										core.Result::Ok(_) => {}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		}
+
 		if _pool_stop_flag(&inner) { return 0; }
-		_keepalive_tick(&inner);
+		// Periodic ping + idle reap on the interval deadline, decoupled from poll
+		// wakeups so a busy recycle stream can't starve pings (and a sub-interval
+		// poll cycle can't over-ping).
+		if time.elapsed_ms(&last_tick) >= interval_ms {
+			_keepalive_tick(&inner);
+			last_tick = time.now_monotonic();
+		}
 	}
 	return 0;
+}
+
+// Snapshot the fds of all currently-idle conns into a poll set. Reads fds under
+// the lock (no I/O); the lock is released before poll_many parks on them. token
+// = the entry's watch_token (this idle incarnation), so a readiness event maps
+// back to the exact entry only while it remains idle.
+fn _snapshot_idle_entries(inner: &conc.Arc<PoolInner>) nothrow -> Array<io.PollEntry> {
+	var entries: Array<io.PollEntry> = [];
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	val n = s.available.len();
+	var i = 0;
+	while i < n {
+		match s.available.get(i) {
+			Optional::Some(e) => {
+				match &e.conn {
+					Optional::Some(c) => {
+						entries.push(io.PollEntry(
+							fd = rpc.raw_fd(c),
+							token = e.watch_token,
+							want_read = true,
+							want_write = false
+						));
+					},
+					Optional::None => {}
+				}
+			},
+			Optional::None => {}
+		}
+		i = i + 1;
+	}
+	return move entries;
+}
+
+// Collect tokens of fds reported readable / hangup / err. (We do not request
+// writable, so it is never set.) These are idle conns that must be recycled.
+fn _ready_tokens(ready: &Array<io.PollReady>) nothrow -> Array<Int> {
+	var toks: Array<Int> = [];
+	var i = 0;
+	while i < ready.len {
+		if ready[i].readable or ready[i].hangup or ready[i].err {
+			toks.push(ready[i].token);
+		}
+		i = i + 1;
+	}
+	return move toks;
+}
+
+// Per-fd probe used only on the rare invalid-argument fallback: poll each
+// snapshotted fd on its own with a tiny timeout to classify it. A bad
+// (unregistrable) fd returns invalid-argument; a misbehaving idle fd returns
+// Ok (readable/hangup/err — poll_many only returns Ok when something is ready);
+// a healthy idle fd times out. Both bad and ready get their token collected for
+// recycle. Timeout/cancelled are left alone (cancellation is handled by the
+// outer loop on the next aggregate poll). O(n) extra polls, but only on the
+// error path, never the hot path.
+fn _probe_bad_tokens(entries: &Array<io.PollEntry>) nothrow -> Array<Int> {
+	var bad: Array<Int> = [];
+	var i = 0;
+	while i < entries.len {
+		var one: Array<io.PollEntry> = [];
+		one.push(io.PollEntry(
+			fd = entries[i].fd,
+			token = entries[i].token,
+			want_read = true,
+			want_write = false
+		));
+		match io.poll_many(&one, conc.Duration(millis = 1)) {
+			core.Result::Ok(_) => { bad.push(entries[i].token); },  // ready while idle
+			core.Result::Err(pe) => {
+				if pe.kind == io.IO_ERROR_KIND_INVALID_ARGUMENT { bad.push(entries[i].token); }
+				// timeout → healthy idle (keep); cancelled → shutdown (outer loop handles)
+			}
+		}
+		i = i + 1;
+	}
+	return move bad;
+}
+
+fn _contains_token(toks: &Array<Int>, t: Int) nothrow -> Bool {
+	var i = 0;
+	while i < toks.len {
+		if toks[i] == t { return true; }
+		i = i + 1;
+	}
+	return false;
+}
+
+// Pull every still-idle conn whose watch_token is in `ready_tokens` out of
+// `available` and return them for teardown OUTSIDE the lock. A token that is no
+// longer in `available` (its conn was leased — and maybe returned with a fresh
+// token — in the race window) simply isn't found, so a leased fd is never torn
+// down here: the double-reader hazard is structurally impossible. total_count
+// drops per recycled conn and a waiter is signalled so a replacement can open.
+//
+// min_idle NOTE: like the existing ping-failure discard path (_release_decide,
+// unhealthy branch), recycle does NOT proactively reopen toward min_idle — it
+// only frees the slot and wakes a waiter so the NEXT acquire opens a fresh conn
+// on demand. min_idle is therefore a SEED-TIME floor (honoured at open() and
+// never reaped below), not a maintained steady-state floor: a burst of
+// server-side idle closes can leave fewer than min_idle conns until user traffic
+// drives replacements. If min_idle is ever meant to be a contractual live floor,
+// add a background refill here + in _release_decide (tracked as a follow-up).
+fn _recycle_ready_idles(inner: &conc.Arc<PoolInner>, ready_tokens: &Array<Int>) nothrow -> containers.Deque<rpc.RpcConnection> {
+	var doomed: containers.Deque<rpc.RpcConnection> = containers.deque<type rpc.RpcConnection>();
+	var kept: containers.Deque<ConnEntry> = containers.deque<type ConnEntry>();
+	val mu_ref: &conc.Mutex<PoolSlot> = &inner.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var done = false;
+	while not done {
+		match s.available.pop_front() {
+			Optional::None => { done = true; },
+			Optional::Some(entry) => {
+				var e = move entry;
+				if _contains_token(ready_tokens, e.watch_token) {
+					val taken = mem.replace(&mut e.conn, Optional<rpc.RpcConnection>::None());
+					match taken {
+						Optional::Some(c) => {
+							doomed.push_back(move c);
+							s.total_count = s.total_count - 1;
+							inner.get().cv.signal_one();
+						},
+						Optional::None => {}
+					}
+				} else {
+					kept.push_back(move e);
+				}
+			}
+		}
+	}
+	val _drained = mem.replace(&mut s.available, move kept);
+	return move doomed;
+}
+
+// Recycle the given tokens, close them outside the lock, and emit one
+// IdleConnRecycled event reporting how many were closed this pass. Single entry
+// point so both the readiness path and the invalid-argument self-heal path emit
+// consistently.
+fn _recycle_and_report(inner: &conc.Arc<PoolInner>, tokens: &Array<Int>) nothrow -> Void {
+	val doomed = _recycle_ready_idles(inner, tokens);
+	val n = doomed.len();
+	_close_all(move doomed);
+	if n > 0 {
+		_emit_event_unlocked(inner, PoolEvent::IdleConnRecycled(recycled_now = n));
+	}
+	return;
+}
+
+// Mint the next watch token. Caller MUST hold the slot lock.
+fn _mint_token(s: &mut PoolSlot) nothrow -> Int {
+	s.next_watch_token = s.next_watch_token + 1;
+	return s.next_watch_token;
 }
 
 fn _keepalive_tick(inner: &conc.Arc<PoolInner>) nothrow -> Void {
