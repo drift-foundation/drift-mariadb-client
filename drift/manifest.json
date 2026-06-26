@@ -7,10 +7,10 @@
   },
   "artifacts": [
     {
-      "kind": "library",
+      "kind": "package",
       "name": "mariadb-wire-proto",
       "module_namespace": "mariadb.wire.proto",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "description": "MariaDB wire protocol implementation for Drift",
       "entry_module": "packages/mariadb-wire-proto/src/lib.drift",
       "modules": [
@@ -39,10 +39,10 @@
       ]
     },
     {
-      "kind": "library",
+      "kind": "package",
       "name": "mariadb-rpc",
       "module_namespace": "mariadb.rpc",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "description": "Streaming stored-procedure RPC layer for MariaDB",
       "entry_module": "packages/mariadb-rpc/src/lib.drift",
       "modules": [
@@ -53,7 +53,7 @@
       "package_deps": [
         {
           "name": "mariadb-wire-proto",
-          "version": "0.5"
+          "version": "0.6"
         }
       ],
       "assets": [

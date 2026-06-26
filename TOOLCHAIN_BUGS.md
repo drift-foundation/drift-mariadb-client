@@ -25,4 +25,8 @@ sibling `.zdmp` could not be verified.
 **Fix (0.27.92):** `drift deploy` now creates the staged trust overlay
 before the build step and passes it to both build and smoke phases.
 
-**Minimum toolchain version for this project:** 0.27.92+abi6
+**Minimum toolchain version for this project:** 0.33.57+abi18.
+The historical floor for the deploy-overlay fix below was 0.27.92+abi6, but the
+committed trust artifacts are now schema v2 (claim bodies) / v4 (provenance),
+which only driftc 0.33.57+ can parse and verify. Toolchains in
+`[0.27.92, 0.33.56]` will reject the committed `drift/*.author-claim`.

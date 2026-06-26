@@ -43,24 +43,28 @@ prepare:
 	"$DRIFT" prepare --dest "{{DEPLOY_DEST}}"
 
 # Re-mint drift/mariadb-{wire-proto,rpc}.author-claim under the Foundation
-# author key. Runs the manifest-aware drift-author publish (0.32.3+ only)
-# once per library artifact, since the manifest declares two. Use after any
-# source change that affects SCI (modules, assets, deps, version).
+# author key. Uses the toolchain's first-class `drift author` verb (0.33.57+),
+# which mints schema-v2 claims (signed body carries artifact_kind; SCI hashes
+# kind). Runs once per package artifact, since the manifest declares two. Use
+# after any source change that affects SCI (modules, assets, deps, version).
 #
 # The author-claims are then committed; the orchestrator emits the cert-claim
 # during certification, so the author key never enters the deploy host.
-# Override the seed via DRIFT_SIGN_KEY_FILE; DRIFT_LANG_ROOT defaults to
-# ~/src/drift-lang.
+# Override the seed via DRIFT_SIGN_KEY_FILE.
 author-claim:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	DRIFT_LANG_ROOT="${DRIFT_LANG_ROOT:-${HOME}/src/drift-lang}"
+	if [[ -n "${DRIFT_TOOLCHAIN_ROOT:-}" ]]; then
+	  DRIFT="${DRIFT_TOOLCHAIN_ROOT}/bin/drift"
+	  [[ -x "$DRIFT" ]] || { echo "error: drift not found at $DRIFT" >&2; exit 1; }
+	else
+	  DRIFT="drift"
+	fi
 	KEY_FILE="${DRIFT_SIGN_KEY_FILE:-${HOME}/.config/drift/keys/default.seed}"
-	[[ -d "${DRIFT_LANG_ROOT}/tools/drift_author" ]] || { echo "error: tools.drift_author not found at ${DRIFT_LANG_ROOT}" >&2; exit 1; }
 	[[ -f "${KEY_FILE}" ]] || { echo "error: signing key not found: ${KEY_FILE}" >&2; exit 1; }
 	for ART in mariadb-wire-proto mariadb-rpc; do
-	  echo "[author-claim] minting drift/${ART}.author-claim"
-	  PYTHONPATH="${DRIFT_LANG_ROOT}" python3 -m tools.drift_author publish \
+	  echo "[author-claim] minting drift/${ART}.author-claim (schema v2)"
+	  "$DRIFT" author \
 	    --manifest "$(pwd)/drift/manifest.json" \
 	    --artifact "${ART}" \
 	    --key-file "${KEY_FILE}" \

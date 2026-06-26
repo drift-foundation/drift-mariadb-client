@@ -150,7 +150,7 @@ See `perf/README.md` for result format and scenario details.
 
 ### Trust and Deploy Prerequisites
 
-`just stress` and `just perf` compile test code against the deployed signed packages, not local source trees. Under trust-v1 (toolchain 0.32.x+) this requires:
+`just stress` and `just perf` compile test code against the deployed signed packages, not local source trees. The trust **model** is trust-v1 (role-tagged author/certifier claims + a v1 trust store), but the signed **claim bodies are schema v2 and provenance is schema v4** as of driftc 0.33.57 — so the trust path requires **driftc 0.33.57+ / ABI 18**. Older toolchains in `[0.32.x, 0.33.56]` parse only v1 claim bodies and will reject these artifacts. (This is a higher floor than the `>= 0.33.17` shared-test-runner requirement the cert gates check.) This requires:
 
 1. **Cert-claim signing key** — `DRIFT_SIGN_KEY_FILE` must point to an Ed25519 seed. `drift deploy` uses it to sign each artifact's `.cert-claim.<kid>.json`.
 2. **Author-claims committed** — `drift/mariadb-wire-proto.author-claim` and `drift/mariadb-rpc.author-claim` must exist (run `just author-claim` after any SCI-affecting source change).

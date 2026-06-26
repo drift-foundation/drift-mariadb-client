@@ -30,9 +30,13 @@ protocol instrumentation).
 
 ## Consumer prerequisites
 
-- Current Drift toolchain (0.32.x+ with trust-v1, ABI 14)
-- Published package artifacts under a library root: `.zdmp` plus the
-  trust-v1 sidecars (`.author-claim` and `.cert-claim.<kid>.json`)
+- Current Drift toolchain — **driftc 0.33.57+ / ABI 18**. The trust model is
+  trust-v1, but claim bodies are schema v2 and provenance is schema v4 as of
+  0.33.57; toolchains older than 0.33.57 parse only v1 bodies and reject these
+  artifacts.
+- Published package artifacts under a package root: `.zdmp` plus the
+  trust-v1 sidecars (`.author-claim`, `.cert-claim.<kid>.json`, and the
+  `.provenance.zst` provenance bundle)
 - A project trust store (`drift/trust.json`) granting both an `authors`
   kid and a `certifiers` kid for `mariadb.wire.proto.*` and `mariadb.rpc.*`
 
