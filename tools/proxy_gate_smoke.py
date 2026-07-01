@@ -41,7 +41,27 @@ failpoint_fire, conn_close — the one thing only an outside observer of the
 process (not S7's client-side checks) can confirm, catching a logging
 regression in the actual binary.
 
-Exit 0 if both cases pass; nonzero otherwise, with a message identifying
+Case 3 (nth=2 targeting, the H1 app-usage shape — Singular emits a `start`
+COMMIT then later a `complete` COMMIT, and only the SECOND is under test):
+live_proxy_nth_commit_ambiguous_test.drift. Docs/failpoint-proxy-usage.md
+tells downstream teams to arm `match.nth=2` for this shape; this proves it
+against a real subprocess, not just control_test.drift's in-process
+scenario_fire_nth2 unit test. Same pattern as case 2: the client test proves
+the semantics (commit #1 Ok, commit #2 AmbiguousWrite, assert_all_fired
+ok:true, status shows matched_nth==2), this harness checks its exit code and
+the proxy's own log.
+
+Case 4 (domain isolation — the exact routing pattern the docs also tell
+downstream teams to rely on: one domain through the proxy, others direct):
+live_proxy_domain_isolation_test.drift. Proves the domain-independent claim
+the routing recommendation rests on: a connection that never touches the
+proxy's data listener cannot affect (or be affected by) the failpoint
+registry, while one that does touch it does. This repo has one dev DB, so it
+proves this with a direct-vs-proxied connection to the SAME backend rather
+than bookkeeper's actual two domains — simulating those is app/workflows-
+owned, see docs/failpoint-proxy-usage.md.
+
+Exit 0 if all four cases pass; nonzero otherwise, with a message identifying
 which case/assertion failed. Tears the proxy subprocess down reliably
 (SIGTERM, grace period, SIGKILL fallback) even when a case fails — including
 when the shared executor itself hangs building the proxy or running a
@@ -91,17 +111,29 @@ BETWEEN_CASES_SETTLE_S = 0.3
 BUILD_TIMEOUT_S = 180
 CLIENT_RUN_TIMEOUT_S = 120
 
-REQUIRED_EVENTS_CASE1 = ["proxy_start", "client_accept", "backend_connect", "commit_observed", "conn_close"]
-# Case 2 additionally must show the fault actually fired in the real
-# binary's own log, not just that the client-side test passed — S7's
-# assertions are client-side (RpcCommitErrorKind, assert_all_fired over
-# control); this is the one thing only the proxy's own log can confirm, and
-# it catches a logging regression in the actual binary that a client-only
-# check would miss.
-REQUIRED_EVENTS_CASE2 = ["proxy_start", "client_accept", "backend_connect", "commit_observed", "failpoint_fire", "conn_close"]
+EVENTS_PASSTHROUGH = ["proxy_start", "client_accept", "backend_connect", "commit_observed", "conn_close"]
+# Cases that arm a failpoint additionally must show the fault actually fired
+# in the real binary's own log, not just that the client-side test passed —
+# the client tests' own assertions are client-side (RpcCommitErrorKind,
+# assert_all_fired over control); this is the one thing only the proxy's own
+# log can confirm, catching a logging regression in the actual binary that a
+# client-only check would miss.
+EVENTS_FIRED = ["proxy_start", "client_accept", "backend_connect", "commit_observed", "failpoint_fire", "conn_close"]
 
-CLIENT_TEST_CASE1 = "packages/mariadb-rpc/tests/e2e/live_proxy_passthrough_smoke_test.drift"
-CLIENT_TEST_CASE2 = "packages/mariadb-rpc/tests/e2e/live_proxy_pool_commit_ambiguous_test.drift"
+# (case name, human label for progress output, client test to run against a
+# fresh proxy instance, required proxy-log events). Each client test is run
+# UNMODIFIED — see the module docstring for what each already proves
+# client-side; this harness adds only proxy-log verification on top.
+CASES = [
+    ("case1", "passthrough + lifecycle events",
+     "packages/mariadb-rpc/tests/e2e/live_proxy_passthrough_smoke_test.drift", EVENTS_PASSTHROUGH),
+    ("case2", "one-shot ambiguous COMMIT via real pool (S7)",
+     "packages/mariadb-rpc/tests/e2e/live_proxy_pool_commit_ambiguous_test.drift", EVENTS_FIRED),
+    ("case3", "nth=2 targeting via real subprocess (H1 shape)",
+     "packages/mariadb-rpc/tests/e2e/live_proxy_nth_commit_ambiguous_test.drift", EVENTS_FIRED),
+    ("case4", "domain isolation: direct traffic doesn't consume, proxied traffic does",
+     "packages/mariadb-rpc/tests/e2e/live_proxy_domain_isolation_test.drift", EVENTS_FIRED),
+]
 
 
 def _fail(msg):
@@ -238,39 +270,25 @@ def assert_events_present(log_path, expected_events):
         _fail(f"proxy log missing expected event(s) {missing} — see {log_path}")
 
 
-def case1(binpath, work_dir):
-    print("[proxy-gate] case 1: passthrough + lifecycle events", file=sys.stderr)
-    log_path = work_dir / "proxy_case1.jsonl"
+def run_case(name, label, binpath, work_dir, client_test, required_events):
+    """Fresh proxy instance -> wait ready -> run one EXISTING client test
+    unmodified -> stop the proxy -> assert its log shows the required
+    lifecycle events. Shared by every entry in CASES."""
+    print(f"[proxy-gate] {name}: {label}", file=sys.stderr)
+    log_path = work_dir / f"proxy_{name}.jsonl"
     proc, log_f = start_proxy(binpath, log_path)
     try:
         if not wait_ready(proc, READY_TIMEOUT_S):
             print(log_path.read_text(errors="ignore"), file=sys.stderr)
-            _fail("proxy did not become ready (control health) within timeout — case 1")
-        rc = run_client_test(CLIENT_TEST_CASE1, work_dir / "case1_client")
-        if rc != 0:
-            _fail(f"case 1 client test failed (exit {rc}): {CLIENT_TEST_CASE1}")
-    finally:
-        stop_proxy(proc, log_f)
-    assert_events_present(log_path, REQUIRED_EVENTS_CASE1)
-    print("[proxy-gate] case 1: PASS", file=sys.stderr)
-
-
-def case2(binpath, work_dir):
-    print("[proxy-gate] case 2: one-shot ambiguous COMMIT via real pool", file=sys.stderr)
-    log_path = work_dir / "proxy_case2.jsonl"
-    proc, log_f = start_proxy(binpath, log_path)
-    try:
-        if not wait_ready(proc, READY_TIMEOUT_S):
-            print(log_path.read_text(errors="ignore"), file=sys.stderr)
-            _fail("proxy did not become ready (control health) within timeout — case 2")
-        rc = run_client_test(CLIENT_TEST_CASE2, work_dir / "case2_client")
+            _fail(f"proxy did not become ready (control health) within timeout — {name}")
+        rc = run_client_test(client_test, work_dir / f"{name}_client")
         if rc != 0:
             print(log_path.read_text(errors="ignore"), file=sys.stderr)
-            _fail(f"case 2 client test failed (exit {rc}): {CLIENT_TEST_CASE2}")
+            _fail(f"{name} client test failed (exit {rc}): {client_test}")
     finally:
         stop_proxy(proc, log_f)
-    assert_events_present(log_path, REQUIRED_EVENTS_CASE2)
-    print("[proxy-gate] case 2: PASS", file=sys.stderr)
+    assert_events_present(log_path, required_events)
+    print(f"[proxy-gate] {name}: PASS", file=sys.stderr)
 
 
 def main():
@@ -281,9 +299,10 @@ def main():
     work_dir.mkdir(parents=True, exist_ok=True)
 
     binpath = build_proxy(work_dir / "build")
-    case1(binpath, work_dir)
-    time.sleep(BETWEEN_CASES_SETTLE_S)
-    case2(binpath, work_dir)
+    for i, (name, label, client_test, required_events) in enumerate(CASES):
+        if i > 0:
+            time.sleep(BETWEEN_CASES_SETTLE_S)
+        run_case(name, label, binpath, work_dir, client_test, required_events)
     print("[proxy-gate] all cases PASS", file=sys.stderr)
 
 

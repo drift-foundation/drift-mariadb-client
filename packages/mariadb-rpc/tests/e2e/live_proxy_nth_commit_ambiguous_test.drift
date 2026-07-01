@@ -1,0 +1,260 @@
+// Proves nth-COMMIT targeting end to end through a REAL subprocess — the
+// exact day-1 behavior the H1 (Singular.complete unknown) app-usage doc
+// tells downstream teams to rely on (docs/failpoint-proxy-usage.md). S7
+// already proves nth=1 (the H2 ledger path) live; this proves nth=2 (the H1
+// shape: Singular emits a `start` COMMIT, then later a `complete` COMMIT,
+// and only the SECOND one is the one under test) is not just unit-tested
+// (control_test.drift's scenario_fire_nth2) but actually works against the
+// real wire path.
+//
+// MANUAL — same reasons as live_proxy_pool_commit_ambiguous_test.drift (S7):
+// needs an already-running proxy in front of the dev DB; not in the gate's
+// curated LIVE_TESTS; also wired as its own case in tools/proxy_gate_smoke.py
+// (S8) so this exact behavior is exercised against the real subprocess
+// automatically, not only by hand.
+//
+//   just build-app mariadb-failpoint-proxy
+//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 43307 &
+//   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_nth_commit_ambiguous_test.drift
+//
+// Flow: clear -> arm match.nth=2 (arm ack read before any COMMIT is issued,
+// satisfying the happens-before rule in PLAN.md §7) -> ONE real connection
+// issues COMMIT #1 (the "start" commit) -> asserted Ok, passes through
+// untouched, connection stays healthy -> the SAME connection issues COMMIT
+// #2 (the "complete" commit) -> asserted RpcCommitErrorKind::AmbiguousWrite
+// (exhaustive match, not a wildcard) -> assert_all_fired asserted ok:true ->
+// status(id) asserted matched_nth == 2 (not just "fired", the actual ordinal
+// that fired — proving nth targeting hit the SECOND commit, not the first).
+module mariadb.rpc.tests.e2e.live_proxy_nth_commit_ambiguous_test;
+
+import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import std.text as text;
+import std.json as json;
+import std.format as format;
+import std.time as time;
+import std.console as console;
+import mariadb.rpc as rpc;
+
+const PROXY_HOST: String = "127.0.0.1";
+const PROXY_DATA_PORT: Int = 43306;
+const PROXY_CONTROL_PORT: Int = 43307;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const TIMEOUT_MS: Int = 2000;
+const CONTROL_OVERALL_TIMEOUT_MS: Int = 5000;
+
+fn _rpc_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(PROXY_HOST);
+	b.with_port(PROXY_DATA_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+// -----------------------------------------------------------------------
+// Minimal control-plane client: raw TCP, one JSON Lines request/response.
+// Duplicated from live_proxy_pool_commit_ambiguous_test.drift (S7) rather
+// than factored into a shared test-support module — see that file's comment
+// on why (control.drift belongs to a different manifest artifact); keeping
+// each e2e test file independently readable/runnable outweighs the ~80
+// lines of duplication here.
+// -----------------------------------------------------------------------
+
+fn _write_all(stream: &mut net.TcpStream, bytes: &mut Array<Byte>, n: Int) nothrow -> Bool {
+	val start = time.now_monotonic();
+	var off = 0;
+	while off < n {
+		if time.elapsed_ms(&start) >= CONTROL_OVERALL_TIMEOUT_MS { return false; }
+		match stream.write_bytes(bytes, off, n - off, conc.Duration(millis = TIMEOUT_MS)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return false; }
+				off = off + w;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return false; }
+			}
+		}
+	}
+	return true;
+}
+
+fn _control_request(req: String) nothrow -> core.Result<String, String> {
+	val addr = net.socket_addr(PROXY_HOST, PROXY_CONTROL_PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(_) => { return core.Result::Err("connect-failed"); },
+		core.Result::Ok(s) => {
+			var stream = move s;
+			val line = req + "\n";
+			var bytes = core.string_to_utf8_bytes(&line);
+			val n = bytes.len;
+			if not _write_all(&mut stream, &mut bytes, n) {
+				val _ = stream.close(conc.Duration(millis = 1000));
+				return core.Result::Err("write-failed-or-timeout");
+			}
+			var acc: Array<Byte> = [];
+			var lf = -1;
+			val read_start = time.now_monotonic();
+			while lf < 0 {
+				if time.elapsed_ms(&read_start) >= CONTROL_OVERALL_TIMEOUT_MS {
+					val _ = stream.close(conc.Duration(millis = 1000));
+					return core.Result::Err("response-timeout");
+				}
+				var buf = io.buffer(4096);
+				match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+					core.Result::Ok(rn) => {
+						if rn <= 0 {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("eof-before-newline");
+						}
+						var i = 0;
+						while i < rn {
+							acc.push(io.buffer_read(&mut buf, i));
+							i = i + 1;
+						}
+						var j = 0;
+						while j < acc.len and lf < 0 {
+							if acc[j] == cast<Byte>(10) { lf = j; }
+							j = j + 1;
+						}
+					},
+					core.Result::Err(e) => {
+						if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("read-failed");
+						}
+					}
+				}
+			}
+			val _ = stream.close(conc.Duration(millis = 1000));
+			match text.utf8_from_bytes_range(&acc, 0, lf) {
+				core.Result::Ok(s2) => { return core.Result::Ok(s2); },
+				core.Result::Err(_) => { return core.Result::Err("utf8-decode-failed"); }
+			}
+		}
+	}
+}
+
+fn _json_bool(resp: &String, key: String) nothrow -> Bool {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_bool_or(false); },
+		core.Result::Err(_) => { return false; }
+	}
+}
+
+fn _json_int(resp: &String, key: String) nothrow -> Int {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_int_or(-999); },
+		core.Result::Err(_) => { return -999; }
+	}
+}
+
+fn _best_effort_clear() nothrow -> Void {
+	val _ = _control_request("{\"op\":\"clear\"}");
+	return;
+}
+
+pub fn main() nothrow -> Int {
+	console.println("=== live_proxy_nth_commit_ambiguous_test ===");
+
+	match _control_request("{\"op\":\"clear\"}") {
+		core.Result::Err(tag) => { console.println("[main] control clear failed: " + tag + " (is the proxy running on " + PROXY_HOST + ":" + format.format_int(PROXY_CONTROL_PORT) + "?)"); return 1; },
+		core.Result::Ok(clear_resp) => {
+			if not _json_bool(&clear_resp, "ok") { console.println("[main] clear not ok: " + clear_resp); return 1; }
+		}
+	}
+
+	var arm_id = -1;
+	match _control_request("{\"op\":\"arm\",\"label\":\"h1-singular-complete\",\"match\":{\"nth\":2}}") {
+		core.Result::Err(tag) => { console.println("[main] arm request failed: " + tag); return 2; },
+		core.Result::Ok(arm_resp) => {
+			if not _json_bool(&arm_resp, "ok") { console.println("[main] arm not ok: " + arm_resp); return 2; }
+			arm_id = _json_int(&arm_resp, "id");
+		}
+	}
+
+	match _rpc_cfg() {
+		core.Result::Err(_) => { console.println("[main] rpc config build failed"); _best_effort_clear(); return 3; },
+		core.Result::Ok(cfg) => {
+			match rpc.connect(move cfg) {
+				core.Result::Err(e) => { console.println("[main] connect failed: " + e.tag); _best_effort_clear(); return 4; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					var rc = 0;
+
+					// COMMIT #1 ("start"): nth=2 must NOT fire on this one — it
+					// should pass through exactly like an unarmed proxy would.
+					match conn.commit() {
+						core.Result::Ok(_) => { console.println("[main] commit #1 (start) -> Ok (expected)"); },
+						core.Result::Err(ce1) => {
+							console.println("[main] UNEXPECTED: commit #1 failed, kind/cause_tag=" + ce1.cause_tag);
+							rc = 5;
+						}
+					}
+
+					// COMMIT #2 ("complete"): the SAME connection, same session —
+					// this is the one nth=2 targets.
+					if rc == 0 {
+						match conn.commit() {
+							core.Result::Ok(_) => {
+								console.println("[main] UNEXPECTED: commit #2 succeeded (failpoint did not fire)");
+								rc = 6;
+							},
+							core.Result::Err(ce2) => {
+								match ce2.kind {
+									rpc.RpcCommitErrorKind::AmbiguousWrite => { console.println("[main] commit #2 (complete) -> AmbiguousWrite (expected)"); },
+									rpc.RpcCommitErrorKind::NotSent => { console.println("[main] commit #2 -> NotSent (unexpected), cause_tag=" + ce2.cause_tag); rc = 7; },
+									rpc.RpcCommitErrorKind::ServerRejected => { console.println("[main] commit #2 -> ServerRejected (unexpected), cause_tag=" + ce2.cause_tag); rc = 7; }
+								}
+							}
+						}
+					}
+
+					// Connection is dead after the ambiguous-write read failure —
+					// best-effort close, ignore the result (nothing more to prove
+					// about the transport at this point).
+					val _ = rpc.close(&mut conn);
+
+					if rc != 0 { _best_effort_clear(); return rc; }
+
+					match _control_request("{\"op\":\"assert_all_fired\"}") {
+						core.Result::Err(tag) => { console.println("[main] assert_all_fired request failed: " + tag); _best_effort_clear(); return 8; },
+						core.Result::Ok(assert_resp) => {
+							if not _json_bool(&assert_resp, "ok") { console.println("[main] assert_all_fired not ok: " + assert_resp); _best_effort_clear(); return 9; }
+						}
+					}
+
+					// The ordinal that actually fired must be 2, not 1 — this is
+					// the difference between "it fired at all" and "nth targeting
+					// actually hit the right COMMIT".
+					val status_req = "{\"op\":\"status\",\"id\":" + format.format_int(arm_id) + "}";
+					match _control_request(status_req) {
+						core.Result::Err(tag) => { console.println("[main] status request failed: " + tag); _best_effort_clear(); return 10; },
+						core.Result::Ok(status_resp) => {
+							val matched_nth = _json_int(&status_resp, "matched_nth");
+							if matched_nth != 2 {
+								console.println("[main] expected matched_nth=2, got " + format.format_int(matched_nth) + ": " + status_resp);
+								_best_effort_clear();
+								return 11;
+							}
+						}
+					}
+
+					console.println("[main] PASS");
+					return 0;
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,275 @@
+// Proves the exact routing pattern docs/failpoint-proxy-usage.md tells
+// downstream teams to rely on: route ONLY the domain under test through the
+// proxy; every other domain stays direct, and direct traffic must not be
+// observable by (and so cannot consume) an armed proxy failpoint.
+//
+// This repo only has one dev DB instance, so it can't stand up bookkeeper's
+// actual two domains (bookkeeper_db / singular). What it CAN prove, and
+// does, is the underlying claim the whole routing recommendation rests on:
+// a connection that never touches the proxy's data listener cannot affect
+// the proxy's failpoint registry, while a connection that does touch it
+// does. That is domain-independent — it only depends on whether traffic
+// goes through the proxy's data listener at all, which is exactly what
+// "route this domain through the proxy, that one direct" means in practice.
+// Simulating bookkeeper's actual second domain (a distinct DB/host) is
+// app/workflows-owned, not this repo's — see docs/failpoint-proxy-usage.md.
+//
+// MANUAL — same reasons as the other live_proxy_* tests (S7/nth=2 above):
+// needs an already-running proxy in front of the dev DB; not in the gate's
+// curated LIVE_TESTS; wired as its own case in tools/proxy_gate_smoke.py (S8).
+//
+//   just build-app mariadb-failpoint-proxy
+//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 43307 &
+//   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_domain_isolation_test.drift
+//
+// Flow: clear -> arm match.nth=1 -> a "non-target domain" connection goes
+// STRAIGHT to the real DB (backend host/port, bypassing the proxy's data
+// listener entirely) and commits -> asserted Ok (unremarkable — the proxy
+// never even saw this traffic) -> status(id) asserted still armed/not-fired
+// (the direct COMMIT must not have been counted at all) -> a "target
+// domain" connection goes THROUGH the proxy and commits -> asserted
+// RpcCommitErrorKind::AmbiguousWrite (the proxied traffic fires it) ->
+// assert_all_fired asserted ok:true.
+module mariadb.rpc.tests.e2e.live_proxy_domain_isolation_test;
+
+import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import std.text as text;
+import std.json as json;
+import std.format as format;
+import std.time as time;
+import std.console as console;
+import mariadb.rpc as rpc;
+
+const PROXY_HOST: String = "127.0.0.1";
+const PROXY_DATA_PORT: Int = 43306;
+const PROXY_CONTROL_PORT: Int = 43307;
+// The real backend the proxy itself forwards to — a direct connection here
+// models "the non-target domain," which never touches the proxy at all.
+const BACKEND_HOST: String = "127.0.0.1";
+const BACKEND_PORT: Int = 34114;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const TIMEOUT_MS: Int = 2000;
+const CONTROL_OVERALL_TIMEOUT_MS: Int = 5000;
+
+fn _rpc_cfg(host: String, port: Int) nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(host);
+	b.with_port(port);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+// -----------------------------------------------------------------------
+// Minimal control-plane client: raw TCP, one JSON Lines request/response.
+// Duplicated from live_proxy_pool_commit_ambiguous_test.drift (S7) — see
+// that file's comment on why this isn't factored into a shared module.
+// -----------------------------------------------------------------------
+
+fn _write_all(stream: &mut net.TcpStream, bytes: &mut Array<Byte>, n: Int) nothrow -> Bool {
+	val start = time.now_monotonic();
+	var off = 0;
+	while off < n {
+		if time.elapsed_ms(&start) >= CONTROL_OVERALL_TIMEOUT_MS { return false; }
+		match stream.write_bytes(bytes, off, n - off, conc.Duration(millis = TIMEOUT_MS)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return false; }
+				off = off + w;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return false; }
+			}
+		}
+	}
+	return true;
+}
+
+fn _control_request(req: String) nothrow -> core.Result<String, String> {
+	val addr = net.socket_addr(PROXY_HOST, PROXY_CONTROL_PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(_) => { return core.Result::Err("connect-failed"); },
+		core.Result::Ok(s) => {
+			var stream = move s;
+			val line = req + "\n";
+			var bytes = core.string_to_utf8_bytes(&line);
+			val n = bytes.len;
+			if not _write_all(&mut stream, &mut bytes, n) {
+				val _ = stream.close(conc.Duration(millis = 1000));
+				return core.Result::Err("write-failed-or-timeout");
+			}
+			var acc: Array<Byte> = [];
+			var lf = -1;
+			val read_start = time.now_monotonic();
+			while lf < 0 {
+				if time.elapsed_ms(&read_start) >= CONTROL_OVERALL_TIMEOUT_MS {
+					val _ = stream.close(conc.Duration(millis = 1000));
+					return core.Result::Err("response-timeout");
+				}
+				var buf = io.buffer(4096);
+				match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+					core.Result::Ok(rn) => {
+						if rn <= 0 {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("eof-before-newline");
+						}
+						var i = 0;
+						while i < rn {
+							acc.push(io.buffer_read(&mut buf, i));
+							i = i + 1;
+						}
+						var j = 0;
+						while j < acc.len and lf < 0 {
+							if acc[j] == cast<Byte>(10) { lf = j; }
+							j = j + 1;
+						}
+					},
+					core.Result::Err(e) => {
+						if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("read-failed");
+						}
+					}
+				}
+			}
+			val _ = stream.close(conc.Duration(millis = 1000));
+			match text.utf8_from_bytes_range(&acc, 0, lf) {
+				core.Result::Ok(s2) => { return core.Result::Ok(s2); },
+				core.Result::Err(_) => { return core.Result::Err("utf8-decode-failed"); }
+			}
+		}
+	}
+}
+
+fn _json_bool(resp: &String, key: String) nothrow -> Bool {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_bool_or(false); },
+		core.Result::Err(_) => { return false; }
+	}
+}
+
+fn _json_int(resp: &String, key: String) nothrow -> Int {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_int_or(-999); },
+		core.Result::Err(_) => { return -999; }
+	}
+}
+
+fn _best_effort_clear() nothrow -> Void {
+	val _ = _control_request("{\"op\":\"clear\"}");
+	return;
+}
+
+pub fn main() nothrow -> Int {
+	console.println("=== live_proxy_domain_isolation_test ===");
+
+	match _control_request("{\"op\":\"clear\"}") {
+		core.Result::Err(tag) => { console.println("[main] control clear failed: " + tag + " (is the proxy running on " + PROXY_HOST + ":" + format.format_int(PROXY_CONTROL_PORT) + "?)"); return 1; },
+		core.Result::Ok(clear_resp) => {
+			if not _json_bool(&clear_resp, "ok") { console.println("[main] clear not ok: " + clear_resp); return 1; }
+		}
+	}
+
+	var arm_id = -1;
+	match _control_request("{\"op\":\"arm\",\"label\":\"domain-isolation\",\"match\":{\"nth\":1}}") {
+		core.Result::Err(tag) => { console.println("[main] arm request failed: " + tag); return 2; },
+		core.Result::Ok(arm_resp) => {
+			if not _json_bool(&arm_resp, "ok") { console.println("[main] arm not ok: " + arm_resp); return 2; }
+			arm_id = _json_int(&arm_resp, "id");
+		}
+	}
+
+	// "Non-target domain": straight to the real backend, bypassing the
+	// proxy's data listener entirely.
+	match _rpc_cfg(BACKEND_HOST, BACKEND_PORT) {
+		core.Result::Err(_) => { console.println("[main] direct rpc config build failed"); _best_effort_clear(); return 3; },
+		core.Result::Ok(direct_cfg) => {
+			match rpc.connect(move direct_cfg) {
+				core.Result::Err(e) => { console.println("[main] direct connect failed: " + e.tag); _best_effort_clear(); return 4; },
+				core.Result::Ok(dc) => {
+					var direct_conn = move dc;
+					match direct_conn.commit() {
+						core.Result::Ok(_) => { console.println("[main] direct commit -> Ok (expected — never touched the proxy)"); },
+						core.Result::Err(de) => {
+							console.println("[main] UNEXPECTED: direct commit failed, cause_tag=" + de.cause_tag);
+							val _ = rpc.close(&mut direct_conn);
+							_best_effort_clear();
+							return 5;
+						}
+					}
+					val _ = rpc.close(&mut direct_conn);
+				}
+			}
+		}
+	}
+
+	// The armed failpoint must be untouched by the direct traffic: still
+	// armed, not fired — the proxy never observed a COMMIT at all.
+	val status_req = "{\"op\":\"status\",\"id\":" + format.format_int(arm_id) + "}";
+	match _control_request(status_req) {
+		core.Result::Err(tag) => { console.println("[main] status request failed: " + tag); _best_effort_clear(); return 6; },
+		core.Result::Ok(status_resp) => {
+			if _json_bool(&status_resp, "fired") {
+				console.println("[main] UNEXPECTED: direct traffic consumed the armed failpoint: " + status_resp);
+				_best_effort_clear();
+				return 7;
+			}
+			if not _json_bool(&status_resp, "armed") {
+				console.println("[main] UNEXPECTED: failpoint no longer armed after direct traffic: " + status_resp);
+				_best_effort_clear();
+				return 8;
+			}
+		}
+	}
+
+	// "Target domain": through the proxy's data listener — this is the one
+	// that must fire.
+	match _rpc_cfg(PROXY_HOST, PROXY_DATA_PORT) {
+		core.Result::Err(_) => { console.println("[main] proxied rpc config build failed"); _best_effort_clear(); return 9; },
+		core.Result::Ok(proxied_cfg) => {
+			match rpc.connect(move proxied_cfg) {
+				core.Result::Err(e) => { console.println("[main] proxied connect failed: " + e.tag); _best_effort_clear(); return 10; },
+				core.Result::Ok(pc) => {
+					var proxied_conn = move pc;
+					var rc = 0;
+					match proxied_conn.commit() {
+						core.Result::Ok(_) => {
+							console.println("[main] UNEXPECTED: proxied commit succeeded (failpoint did not fire)");
+							rc = 11;
+						},
+						core.Result::Err(pe) => {
+							match pe.kind {
+								rpc.RpcCommitErrorKind::AmbiguousWrite => { console.println("[main] proxied commit -> AmbiguousWrite (expected)"); },
+								rpc.RpcCommitErrorKind::NotSent => { console.println("[main] proxied commit -> NotSent (unexpected), cause_tag=" + pe.cause_tag); rc = 12; },
+								rpc.RpcCommitErrorKind::ServerRejected => { console.println("[main] proxied commit -> ServerRejected (unexpected), cause_tag=" + pe.cause_tag); rc = 12; }
+							}
+						}
+					}
+					val _ = rpc.close(&mut proxied_conn);
+					if rc != 0 { _best_effort_clear(); return rc; }
+				}
+			}
+		}
+	}
+
+	match _control_request("{\"op\":\"assert_all_fired\"}") {
+		core.Result::Err(tag) => { console.println("[main] assert_all_fired request failed: " + tag); _best_effort_clear(); return 13; },
+		core.Result::Ok(assert_resp) => {
+			if not _json_bool(&assert_resp, "ok") { console.println("[main] assert_all_fired not ok: " + assert_resp); _best_effort_clear(); return 14; }
+		}
+	}
+
+	console.println("[main] PASS");
+	return 0;
+}
