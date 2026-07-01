@@ -1,0 +1,86 @@
+// Regression on the commit-error taxonomy that consumers (e.g. the bookkeeper
+// ledger DAO) branch on. commit() returns RpcCommitError, and consumers branch
+// only on its `kind`. This pins the real wire-tag -> kind mapping via the
+// exported classify_commit_wire_tag(), so the dangerous cases are unit-covered
+// without a live wire session:
+//   - lost-ack read failures after a full COMMIT send -> AmbiguousWrite;
+//   - a decoded server ERR -> ServerRejected;
+//   - pre-write / failed write -> NotSent;
+//   - an unrecognized tag -> AmbiguousWrite (conservative default).
+// The same mapping is additionally exercised through a real socket by the proxy
+// COMMIT e2e (PLAN.md S7).
+module mariadb.rpc.tests.unit.commit_error_taxonomy_test;
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+// Map a wire failure tag through the real mapping.
+fn _mapped(wire_tag: String) nothrow -> rpc.RpcCommitError {
+	val t = move wire_tag;
+	return rpc.classify_commit_wire_tag(&t);
+}
+
+// 1 = AmbiguousWrite, 2 = NotSent, 3 = ServerRejected.
+fn _kind_code(e: rpc.RpcCommitError) nothrow -> Int {
+	match e.kind {
+		rpc.RpcCommitErrorKind::AmbiguousWrite => { return 1; },
+		rpc.RpcCommitErrorKind::NotSent => { return 2; },
+		rpc.RpcCommitErrorKind::ServerRejected => { return 3; }
+	}
+}
+
+// Read-side / lost-ack failures after a full COMMIT send are AmbiguousWrite —
+// the money case: the client cannot know whether the commit landed.
+fn scenario_read_failures_are_ambiguous() nothrow -> Int {
+	if _kind_code(_mapped("wire-read-eof")) != 1 { return 101; }
+	if _kind_code(_mapped("wire-read-failed")) != 1 { return 102; }
+	if _kind_code(_mapped("wire-header-decode-failed")) != 1 { return 103; }
+	if _kind_code(_mapped("wire-sequence-mismatch")) != 1 { return 104; }
+	return 0;
+}
+
+// An unrecognized tag collapses to AmbiguousWrite (conservative default —
+// reconcile is always safe, a blind re-drive is not).
+fn scenario_unknown_is_ambiguous() nothrow -> Int {
+	if _kind_code(_mapped("some-brand-new-wire-tag")) != 1 { return 201; }
+	return 0;
+}
+
+// A failed/partial write and every pre-write readiness failure mean the COMMIT
+// was never sent -> NotSent (definite not-applied).
+fn scenario_not_sent() nothrow -> Int {
+	if _kind_code(_mapped("wire-write-failed")) != 2 { return 301; }
+	if _kind_code(_mapped("session-closed")) != 2 { return 302; }
+	if _kind_code(_mapped("session-not-reusable")) != 2 { return 303; }
+	if _kind_code(_mapped("active-statement-present")) != 2 { return 304; }
+	return 0;
+}
+
+// A decoded server ERR packet is a definite rejection.
+fn scenario_server_rejected() nothrow -> Int {
+	if _kind_code(_mapped("tx-command-server-err")) != 3 { return 401; }
+	return 0;
+}
+
+// cause_tag preserves the original lower-level wire tag for diagnostics.
+fn scenario_cause_tag_preserved() nothrow -> Int {
+	val amb = _mapped("wire-read-failed");
+	if amb.cause_tag != "wire-read-failed" { return 501; }
+	val srv = _mapped("tx-command-server-err");
+	if srv.cause_tag != "tx-command-server-err" { return 502; }
+	return 0;
+}
+
+fn main() nothrow -> Int {
+	val a = scenario_read_failures_are_ambiguous();
+	if a != 0 { return a; }
+	val b = scenario_unknown_is_ambiguous();
+	if b != 0 { return b; }
+	val c = scenario_not_sent();
+	if c != 0 { return c; }
+	val d = scenario_server_rejected();
+	if d != 0 { return d; }
+	val e = scenario_cause_tag_preserved();
+	if e != 0 { return e; }
+	return 0;
+}

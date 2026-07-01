@@ -1,0 +1,27 @@
+// mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy.
+//
+// Sits transparently between a MariaDB client (e.g. bookkeeper's pool) and a
+// real MariaDB server, forwarding the wire protocol byte-for-byte. A raw-TCP
+// JSON-Lines control plane arms one-shot failpoints that deterministically
+// inject an AMBIGUOUS COMMIT outcome: the full COMMIT is forwarded to the
+// server (which may durably commit), then the server's acknowledgement is
+// swallowed and both sockets are closed, so the client sees a transport read
+// failure with no clean ack — the "did it commit?" boundary that exactly-once
+// recovery must survive.
+//
+// This is a kind:app artifact built and certified from this repo, consumed by
+// app test harnesses as an external process (it slots in like uflowsd). It is
+// NOT a production component: arming lives entirely outside any app binary, and
+// neither bookkeeper nor production mariadb-rpc contains an arming API.
+//
+// See work/mariadb-rpc-failpoints/PLAN.md for the full design.
+module mariadb.failpoint.proxy;
+
+import std.core as core;
+
+// Entry point (referenced from drift/manifest.json as
+// mariadb.failpoint.proxy::service_main). Scaffold: returns 0. Networking and
+// the control plane are added in subsequent slices.
+fn service_main(argv: Array<String>) nothrow -> Int {
+	return 0;
+}

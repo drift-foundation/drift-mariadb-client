@@ -73,7 +73,10 @@ export {
 	ping,
 	is_alive,
 	raw_fd,
-	is_transport_error
+	is_transport_error,
+	RpcCommitError,
+	RpcCommitErrorKind,
+	classify_commit_wire_tag
 };
 
 // write_timeout_ms: reserved. Wire layer uses one io_timeout_ms for reads and
@@ -165,6 +168,40 @@ pub error RpcConfigError {
 pub error RpcError {
 	tag: String,
 	message: String
+}
+
+// Commit outcome classes. A COMMIT request is written in full before its
+// response is read, so a failed commit falls into exactly one of these. This is
+// the only field consumers branch on.
+//
+//   AmbiguousWrite — the full COMMIT was sent but no clean acknowledgement was
+//     read (connection reset/EOF, truncated/garbled response, or any
+//     unrecognized failure). The transaction MAY OR MAY NOT be durable; recover
+//     only via an idempotency-key reconcile, never a blind re-drive.
+//   NotSent — the request was never fully written (session not ready, or a
+//     failed/partial write), so the commit definitely did not apply; safe to
+//     re-drive as not-committed.
+//   ServerRejected — the server returned an ERR packet for COMMIT: it is alive
+//     and definitively did NOT commit; non-retriable.
+pub variant RpcCommitErrorKind {
+	AmbiguousWrite,
+	NotSent,
+	ServerRejected
+}
+
+// Error returned by commit(). `kind` is the only field consumers branch on;
+// `cause_tag` carries the original lower-level wire-proto machine tag (e.g.
+// wire-write-failed, wire-read-failed, tx-command-server-err) for diagnostics
+// only — no English prose, no duplicate classification string.
+//
+// A plain `pub struct`, not a `pub error`: a `pub error`'s synthesized
+// Diagnostic cannot project a variant-typed field (E_PUB_ERROR_FIELD_NOT_
+// PROJECTABLE). commit() is nothrow and returns an explicit core.Result, so the
+// Err payload does not need Throw/Diagnostic synthesis — consumers branch on
+// `kind` via match on the Result's Err arm.
+pub struct RpcCommitError {
+	pub kind: RpcCommitErrorKind,
+	pub cause_tag: String
 }
 
 const DEFAULT_HOST: String = "127.0.0.1";
@@ -543,10 +580,10 @@ implement RpcConnection {
 		}
 	}
 
-	pub fn commit(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
+	pub fn commit(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcCommitError> {
 		match wire.commit(&mut self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-commit-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(classify_commit_wire_tag(&e.tag)); }
 		}
 	}
 
@@ -712,7 +749,7 @@ pub fn next_event(statement: &mut RpcStatement) nothrow -> core.Result<RpcEvent,
 pub fn skip_result(statement: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> { return statement.skip_result(); }
 pub fn skip_remaining(statement: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> { return statement.skip_remaining(); }
 pub fn set_autocommit(conn: &mut RpcConnection, enabled: Bool) nothrow -> core.Result<Void, RpcError> { return conn.set_autocommit(enabled); }
-pub fn commit(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.commit(); }
+pub fn commit(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcCommitError> { return conn.commit(); }
 pub fn rollback(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.rollback(); }
 pub fn reset_for_pool_reuse(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.reset_for_pool_reuse(); }
 pub fn close(conn: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> { return conn.close(); }
@@ -722,9 +759,36 @@ pub fn raw_fd(conn: &RpcConnection) nothrow -> Int { return conn.raw_fd(); }
 
 // Classifies an RpcError as a transport/protocol failure (rpc-wire-*) for
 // which the conn may be dead and a reconnect+retry is the right response.
-// Server-level errors arrive via RpcEvent::ServerErr, not RpcError, so they
-// never pass through here. Config-time and row-getter tags also return false.
+// Server errors arrive via RpcEvent::ServerErr, not RpcError; commit outcomes
+// have their own typed RpcCommitError and do not pass through here. Config-time
+// and row-getter tags return false.
 pub fn is_transport_error(e: &RpcError) nothrow -> Bool {
 	val prefix = "rpc-wire-";
 	return text.starts_with(&e.tag, &prefix);
+}
+
+// Maps a wire-layer commit-failure tag (from wire.commit) to an RpcCommitError.
+// commit() delegates here; it is also exported so unit tests and diagnostics can
+// exercise the mapping directly without a live wire session. The wire layer
+// writes the whole COMMIT packet before reading any response, so:
+//   - a pre-write readiness failure (session-closed / session-not-reusable /
+//     active-statement-present) or a failed/partial write (wire-write-failed)
+//     means the COMMIT was NOT sent -> NotSent;
+//   - a decoded server ERR packet (tx-command-server-err) means the server is
+//     alive and definitively rejected the COMMIT -> ServerRejected;
+//   - ANY other failure — read EOF/reset, truncated/garbled response, or an
+//     unrecognized tag — means the full COMMIT was sent with no clean ack ->
+//     AmbiguousWrite. Unknown tags collapse to AmbiguousWrite ON PURPOSE: the
+//     only dangerous misclassification is calling an ambiguous commit "not
+//     applied" and re-driving it into a double mutation, so unrecognized
+//     failures fall to the reconcile-required side, which is always safe.
+pub fn classify_commit_wire_tag(wire_tag: &String) nothrow -> RpcCommitError {
+	val t = _dup_string(wire_tag);
+	if t == "wire-write-failed" or t == "session-closed" or t == "session-not-reusable" or t == "active-statement-present" {
+		return RpcCommitError(kind = RpcCommitErrorKind::NotSent(), cause_tag = _dup_string(wire_tag));
+	}
+	if t == "tx-command-server-err" {
+		return RpcCommitError(kind = RpcCommitErrorKind::ServerRejected(), cause_tag = _dup_string(wire_tag));
+	}
+	return RpcCommitError(kind = RpcCommitErrorKind::AmbiguousWrite(), cause_tag = _dup_string(wire_tag));
 }

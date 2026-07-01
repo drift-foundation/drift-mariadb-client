@@ -16,7 +16,7 @@ The app team needs to test the one real bookkeeper binary, including smoke tests
 
 ## 2. Revised design direction
 
-Use an external MariaDB wire proxy for fault injection. Keep `mariadb-rpc` changes limited to production-safe error taxonomy and classifiers.
+Use an external MariaDB wire proxy for fault injection. Keep `mariadb-rpc` changes limited to production-safe error taxonomy/classification (the typed `RpcCommitError`).
 
 Topology:
 
@@ -25,11 +25,12 @@ bookkeeper -- MariaDB protocol --> proxy -- MariaDB protocol --> real MariaDB
 test harness -- TCP control API --> proxy
 ```
 
-Preferred ownership:
+Ownership (decided):
 
-- implement the proxy in this repo as `tools/` test infrastructure, because this repo owns the MariaDB wire protocol details and already has capture-proxy precedent;
-- keep the proxy control plane raw TCP / stdlib-only so this repo does not take a `drift-web` dependency;
-- move the proxy to app/workflows only if the control plane becomes REST/web and needs `drift-web` or other app-stack dependencies.
+- the proxy is a product of this repo: a certified `kind:app` Drift artifact (`mariadb-failpoint-proxy`) with source at `failpoint-proxy/src/`, mirroring uflowsd. This repo owns the MariaDB wire-protocol details, so the wire-accurate framing/COMMIT-matching lives with the wire experts; `tools/wire_capture_proxy.py` is a reference/precedent only, not where the app lives (the Drift app is not under `tools/`, which holds Python helpers);
+- control plane stays raw TCP / stdlib-only (JSON Lines), so this repo never takes a `drift-web` dependency;
+- the app harness consumes the proxy as an external process — it slots into `run_ledger_stress.py` like uflowsd — but the proxy itself is owned and versioned here, not in app/workflows;
+- because the proxy is ours, the nth-COMMIT discriminator H1 needs is an in-scope deliverable of this repo, not a cross-team ask. The only genuine cross-team dependency left is the S1–S3 `RpcCommitError` contract that bookkeeper branches on.
 
 Consequences:
 
@@ -47,8 +48,8 @@ App-team confirmation:
 - TCP control API is acceptable, local-by-default with explicit remote opt-in.
 - `max_conns = 1`, keepalive disabled, and finite/fail-fast acquire are acceptable for these tests.
 - No known tested bookkeeper path holds two leases from the same DB pool at once; if this appears later, treat it as a useful app finding.
-- Exact `COMMIT` matching is sufficient for v1.
-- Proxy ownership in this repo is preferred if the control plane is raw TCP and does not add `drift-web`; otherwise it belongs in app/workflows. Production `mariadb-rpc` still remains taxonomy/classification only.
+- Exact `COMMIT` matching is sufficient for v1 H2 (ledger); H1 (singular) needs nth-COMMIT matching because the singular pool emits an earlier `start` COMMIT before `complete`.
+- App team recommended hosting the proxy in app/workflows; final decision is to keep it as this repo's product (see Ownership above), consumed by the app harness as an external process. Production `mariadb-rpc` remains taxonomy/classification only — no in-process arming.
 
 ## 3. Current repo facts
 
@@ -81,37 +82,45 @@ For manual transactions with autocommit disabled:
 
 The coordinator stored-procedure helper path also drains the SP result and explicitly calls `rpc.commit()`. So coordinator SP writes share the same ambiguous boundary: the helper's `rpc.commit()`.
 
+Scenario-specific implications from the app team:
+
+- **H2 - ledger COMMIT unknown:** route `bookkeeper_db` through the proxy. This is deterministic with exact-COMMIT matching because the ledger path emits one `bookkeeper_db` COMMIT per transfer. The ledger DAO already has a commit-unknown path; bookkeeper follow-up is to branch that helper on `commit()`'s `RpcCommitError.kind` once S1-S3 land.
+- **H1 - `Singular.complete` unknown:** route `singular` through the proxy, but routing alone is not enough. The singular pool can emit multiple COMMITs for one operation (`start`, then `complete`, plus `resume` on reclaim). Exact "next COMMIT" would fire too early on `start`. H1 requires an nth-COMMIT discriminator, expected `nth = 2` for the normal start-then-complete path unless the harness proves a different ordinal for a specific scenario.
+
 ## 5. Production-safe mariadb-rpc work
 
 This repo should not grow in-process failpoint arming. It should grow safe classification.
 
-Current gap: `RpcConnection.commit()` collapses every wire commit error into `rpc-wire-commit-failed` and puts the real wire tag in the message (`packages/mariadb-rpc/src/lib.drift:546-550`). The wire layer already has more shape: server commit rejection reaches `tx-command-server-err` from `_query_expect_ok` (`packages/mariadb-wire-proto/src/lib.drift:482-493`), while transport/read failure marks the session dead and returns the transport tag (`packages/mariadb-wire-proto/src/lib.drift:702-704`).
+Prior gap (now fixed): `RpcConnection.commit()` collapsed every wire commit error into `rpc-wire-commit-failed` with the real wire tag stuffed in the message. The wire layer already had more shape: server commit rejection reaches `tx-command-server-err` from `_query_expect_ok` (`packages/mariadb-wire-proto/src/lib.drift:482-493`), while transport/read failure marks the session dead and returns the transport tag (`packages/mariadb-wire-proto/src/lib.drift:702-704`).
 
-The RPC layer must preserve enough taxonomy for consumers to distinguish:
-
-| Class | Boundary | Meaning | Consumer handling |
-|---|---|---|---|
-| ambiguous commit outcome | `COMMIT` request fully sent, acknowledgement lost | commit may or may not be durable | retriable/reconcile |
-| request not fully sent | failure before full request write completes | definite not-applied at this request boundary | safe to retry as not-applied |
-| server rejected | server response/SQL error received | definite server rejection | non-retriable rejection where appropriate |
-
-The proxy harness directly exercises the ambiguous row by forwarding zero server-response bytes after the full COMMIT request, so the client fails in `session_read_packet` and the wire layer marks the session dead. Server rejection is a different structural path: `_query_expect_ok` can only produce `tx-command-server-err` after a real server `ErrPacket` is decoded. The proxy cannot accidentally turn the ambiguous case into a server-rejected case.
-
-The proxy does not realistically exercise "request not fully sent" for COMMIT. An 11-byte COMMIT command is normally handed to the OS as one small write, and the proxy sits on the response side after it receives the client packet. Cover this class with unit/transport-level tests or explicit synthetic write-failure tests, not by adding a proxy mode that tries to create partial COMMIT writes.
-
-Recommended classifier:
+`commit()` now returns a commit-specific error so consumers branch on a typed `kind`, never a string:
 
 ```drift
-pub fn is_ambiguous_write_error(e: &RpcError) nothrow -> Bool
+pub variant RpcCommitErrorKind { AmbiguousWrite, NotSent, ServerRejected }
+
+// pub struct (not pub error): a pub error's synthesized Diagnostic can't project
+// a variant field, and commit() is nothrow + returns an explicit Result, so no
+// Throw/Diagnostic synthesis is needed.
+pub struct RpcCommitError { pub kind: RpcCommitErrorKind, pub cause_tag: String }
+
+pub fn commit(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcCommitError>
 ```
 
-Recommended tag shape:
+`kind` is the only field consumers branch on; `cause_tag` carries the original lower-level wire-proto machine tag (e.g. `wire-write-failed`, `wire-read-failed`, `tx-command-server-err`) for diagnostics only — no English prose, no duplicate classification string. The three classes:
 
-```text
-rpc-wire-ambiguous-write
-```
+| kind | Boundary | Meaning | Consumer handling |
+|---|---|---|---|
+| `AmbiguousWrite` | `COMMIT` fully sent, acknowledgement lost (or any unrecognized failure) | commit may or may not be durable | retriable/reconcile via idempotency key |
+| `NotSent` | failure before the request was fully written (session not ready, or partial write) | definite not-applied | safe to retry as not-applied |
+| `ServerRejected` | server `ErrPacket` received | definite server rejection | non-retriable |
 
-This is production-safe: it classifies real failures correctly and does not provide any way to arm a failure.
+The pure `classify_commit_wire_tag(wire_tag: &String) -> RpcCommitError` mapping is exported so tests/diagnostics can exercise it without a live wire session; `commit()` delegates to it. Unknown wire tags map to `AmbiguousWrite` on purpose (the only dangerous misclassification is calling an ambiguous commit "not applied" and re-driving a double mutation).
+
+The proxy harness directly exercises the `AmbiguousWrite` class by forwarding zero server-response bytes after the full COMMIT request, so the client fails in `session_read_packet`. `ServerRejected` is a structurally different path (`tx-command-server-err` only after a decoded `ErrPacket`), so the proxy cannot accidentally turn the ambiguous case into a server rejection.
+
+The proxy does not realistically exercise `NotSent` for COMMIT (an ~11-byte COMMIT is one small write, and the proxy sits on the response side). That class is covered by the `classify_commit_wire_tag` unit test (pre-write + `wire-write-failed` tags), not by a proxy mode.
+
+This is production-safe: it classifies real failures correctly and provides no way to arm a failure.
 
 ## 6. Proxy fault semantics
 
@@ -155,7 +164,8 @@ Arm:
   "domain": "bookkeeper_db",
   "match": {
     "command": "COM_QUERY",
-    "sql": "COMMIT"
+    "sql": "COMMIT",
+    "nth": 1
   },
   "action": "drop_server_response_after_forward",
   "times": 1
@@ -197,6 +207,7 @@ Response:
   "matched_client": "127.0.0.1:49218",
   "matched_command": "COM_QUERY",
   "matched_sql": "COMMIT",
+  "matched_nth": 1,
   "bytes_forwarded_to_server": 11,
   "server_response_bytes_dropped": 7
 }
@@ -215,6 +226,7 @@ Controls:
 
 - `label` required.
 - optional `domain` label (e.g. `bookkeeper_db`, `singular`) is echoed in arm/status so a fired event names which DB domain it hit; with one proxy/listener per domain, the `data_listener` already disambiguates, but the explicit label keeps assertions readable.
+- `match.nth` defaults to `1`. **Counting origin is arm-time, not connection-open:** the counter starts at the `arm` ack and counts only matching COMMITs seen thereafter on the proxy data listener; only the nth match fires, and the first n-1 matches pass through normally while incrementing the counter. Arm-time origin is what makes it deterministic — under `max_conns = 1` the data connection often pre-exists (warmup / a prior op), so counting from connection-open would be off by the earlier traffic. Required for H1, where the singular pool commits `start` before `complete` (`nth = 2`); H2 uses the default `nth = 1`.
 - `times` must default to `1`.
 - one-shot failpoints auto-disarm.
 - stale armed failpoints must make tests fail loudly through the `assert_all_fired` op.
@@ -260,7 +272,7 @@ For live deployed-app smoke tests, steps 2 and 5 are the key knobs: the deployed
 Bookkeeper has at least two DB domains: `singular` and `bookkeeper_db`. The harness must be able to route each domain independently so `times = 1` is consumed by the intended COMMIT:
 
 - ledger COMMIT unknown: route `bookkeeper_db` through the proxy and keep `singular` direct;
-- `Singular.complete` COMMIT unknown: route `singular` through the proxy and keep `bookkeeper_db` direct.
+- `Singular.complete` COMMIT unknown: route `singular` through the proxy and keep `bookkeeper_db` direct; arm with nth-COMMIT targeting so the failpoint fires on `complete`, not the earlier `start` commit.
 
 Do not put both domains behind the same armed one-shot proxy unless the test also has a stronger discriminator. Otherwise the wrong domain can consume the armed COMMIT.
 
@@ -279,14 +291,13 @@ Avoid broad substring matching. Do not match `COMMIT WORK` unless intentionally 
 
 Optional future discriminators:
 
-- nth matching COMMIT;
 - client remote address;
 - connection ordinal;
 - DB domain, if the proxy or harness can supply it out-of-band;
 - SQL comment marker if a caller can safely add one;
 - transaction label if exposed outside the SQL path.
 
-Start with label + one-shot + exact COMMIT matching.
+Start with label + one-shot + exact COMMIT matching for H2. Add `match.nth` before H1, because H1 is not deterministic with exact next-COMMIT alone.
 
 ## 10. Pool/test configuration
 
@@ -307,13 +318,17 @@ Domain routing requirement:
 - only the domain under test should route through the armed proxy;
 - other DB domains should remain direct, or use an unarmed proxy if packet capture is separately desired.
 
+Boundary-fault tests H1/H2 should run as sequential single-operation tests in their own config with `max_conns = 1`. They should not be run in the same config as the concurrent matrix or concurrent redispatch case D, which keep the normal multi-connection settings.
+
 ## 11. Step plan
 
-- [ ] S1. Production-safe RPC taxonomy: stop flattening all `wire.commit()` errors into only `rpc-wire-commit-failed`; preserve ambiguous-vs-server-rejected distinction.
-- [ ] S2. Add RPC classifier, e.g. `is_ambiguous_write_error`.
-- [ ] S3. Add regression tests for commit server rejection vs commit transport/read failure classification. Cover "request not fully sent" separately with unit/transport-level or synthetic write-failure tests; do not expect the proxy to produce partial COMMIT writes deterministically.
-- [ ] S4. Implement a MariaDB wire proxy in this repo under tooling for transparent forwarding with framed packet-level COM_QUERY inspection. Keep control raw TCP/no `drift-web`; if the design later needs REST/web, move that proxy to app/workflows instead. Borrow framing lessons from `tools/wire_capture_proxy.py`.
-- [ ] S5. Add newline-delimited JSON over raw TCP control API for one-shot `drop_server_response_after_forward` on exact COMMIT.
+- [x] S1. Production-safe RPC taxonomy: `commit()` no longer flattens all failures into one tag. Delegates to a pure `classify_commit_wire_tag()` that returns an `RpcCommitError` whose `kind` is `NotSent` for pre-write/never-sent failures (`wire-write-failed`, `session-closed`, `session-not-reusable`, `active-statement-present`), `ServerRejected` for a decoded server ERR (`tx-command-server-err`), or `AmbiguousWrite` for all read-side/unknown failures (conservative default — unknown collapses to ambiguous so a lost ack is never misread as not-applied). `cause_tag` preserves the original wire tag for diagnostics. (`packages/mariadb-rpc/src/lib.drift`)
+- [x] S2. Typed commit-error contract (frozen): `commit()` returns `core.Result<Void, RpcCommitError>` where `RpcCommitError { kind: RpcCommitErrorKind, cause_tag: String }` and `RpcCommitErrorKind { AmbiguousWrite, NotSent, ServerRejected }`. Consumers branch on `kind` only. Pure `classify_commit_wire_tag` exported for tests. (`packages/mariadb-rpc/src/lib.drift`)
+- [x] S3. Unit regression exercises the real wire-tag→`RpcCommitError.kind` mapping via the exported `classify_commit_wire_tag`: read-side failures (`wire-read-eof`/`-failed`/`-header-decode-failed`/`-sequence-mismatch`) → `AmbiguousWrite`, unknown tag → `AmbiguousWrite`, pre-write + `wire-write-failed` → `NotSent`, `tx-command-server-err` → `ServerRejected`, plus `cause_tag` preservation. (`packages/mariadb-rpc/tests/unit/commit_error_taxonomy_test.drift`, passing.) S7 additionally exercises the same mapping through a real socket end-to-end.
+- [~] S4. Implement the MariaDB wire proxy as a `kind:app` Drift artifact in this repo, mirroring uflowsd's layout: source at `failpoint-proxy/src/`, namespace `mariadb.failpoint.proxy`, app `mariadb-failpoint-proxy`, entry `mariadb.failpoint.proxy::service_main`, declared in `drift/manifest.json`. Built/certified here and consumed by the app harness as an external process (like uflowsd), not under `tools/` (which is Python helpers). Transparent forwarding with framed packet-level COM_QUERY inspection; framing inlined (trivial 4-byte MariaDB header), so no `mariadb-wire-proto` dep. Control plane raw TCP / JSON Lines, no `drift-web`.
+  - DONE: scaffold (`failpoint-proxy/src/main.drift` + manifest entry) compiles; `tools/emit_test_plan.py` artifact inference extended for `failpoint-proxy/`; build path validated via `just compile-check`. Confirmed stdlib has `std.net` listen/accept/connect, `std.json`, `std.concurrent` spawn.
+  - TODO: data-plane bidirectional forwarding (spawn-per-connection vthreads) + MariaDB packet reassembly; failpoint registry + nth-from-arm COMMIT matching; fault action (forward full COMMIT, swallow response, close both sockets, mark fired, auto-disarm).
+- [ ] S5. Add newline-delimited JSON over raw TCP control API for one-shot `drop_server_response_after_forward` on exact COMMIT, including `match.nth` support before H1.
 - [ ] S6. Add proxy observability and the `assert_all_fired`/`list`/`status` control ops.
 - [ ] S7. Add an e2e test using real pool `max_conns = 1`: arm proxy, trigger COMMIT, assert proxy fired, assert app/client sees ambiguous write error, assert next acquire reconnects.
 - [ ] S8. Document app usage: selected DB domain endpoint points at proxy, non-target domains stay direct, control API over raw TCP, no failpoint code in app binary.
@@ -329,11 +344,13 @@ Known app-side issue from the app team draft:
 - `rpc.commit(...)` errors currently map to `BackendRejected` in relevant coordinator helper paths.
 - Lost ack on COMMIT must not be classified as server rejection.
 
-Once this repo exposes the classifier, consumer commit helpers should branch:
+Once this repo exposes the typed commit error, consumer commit helpers should branch on `RpcCommitError.kind`:
 
-- ambiguous commit transport loss -> retriable/reconcile path;
-- commit server error response -> backend rejected;
-- pre-send/not-sent transport failure -> retry according to caller semantics.
+- `AmbiguousWrite` -> retriable/reconcile path;
+- `ServerRejected` -> backend rejected;
+- `NotSent` -> retry as not-applied, per caller semantics.
+
+H2 is not blocked on new bookkeeper business behavior: the ledger DAO already has a commit-unknown path and deliberately does not roll back after that classification. The expected bookkeeper follow-up is narrower: branch the relevant commit helper on `commit()`'s new `RpcCommitError.kind` (`AmbiguousWrite` → reconcile, `ServerRejected` → backend-rejected, `NotSent` → retry as not-applied) once available.
 
 ## 13. Security and operations note
 
@@ -351,16 +368,22 @@ The core safety property is not that TCP control is impossible to misuse. It is 
 
 ## 14. Open questions
 
-- Proxy ownership: preferred path is this repo under tooling with raw TCP/no `drift-web`. If the control plane needs REST/web via `drift-web`, put it in app/workflows. This repo should not grow a `drift-web` dependency.
 - Can the proxy reuse framing logic or fixture knowledge from `tools/wire_capture_proxy.py`, or should it be implemented separately?
 - Should the proxy close client-side with FIN or RST by default? Recommendation: abrupt close; make mode configurable only if tests need to distinguish FIN/RST.
 - Should timeout-style ack loss (`drop-and-hold` until client timeout) be added after the close-mode MVP?
 - If both DB domains ever need to be behind proxies at once, should the harness run one proxy per domain or add an explicit domain discriminator?
+- For H1, what exact `nth` value should be armed in each Singular scenario (`start` -> `complete`, reclaim/resume path)? Default assumption is `nth = 2` for normal `complete`, but the harness should prove it with proxy observability.
 
-Resolved by app team:
+Cross-team item with bookkeeper (only one remaining):
 
+- Pre-cert H2 end-to-end: bookkeeper wants to build against `mariadb-rpc`'s new commit-error contract before a cert cut, to exercise H2 end-to-end. Acceptable on the condition that the contract — `commit() -> core.Result<Void, RpcCommitError>` with `RpcCommitError { kind: RpcCommitErrorKind, cause_tag: String }` and `RpcCommitErrorKind { AmbiguousWrite, NotSent, ServerRejected }` — is frozen as of S1/S2, so the consumer branch does not break at cert. The mariadb-side reply should confirm the contract is pinned.
+
+Resolved:
+
+- Proxy ownership: decided — the proxy is this repo's product as a certified `kind:app` at `failpoint-proxy/src/` (not under `tools/`; `tools/wire_capture_proxy.py` is precedent only), raw TCP / JSON Lines control, no `drift-web`. App team recommended app/workflows; we keep it here and the app harness consumes the certified binary as an external process. Because it is ours, nth-COMMIT is an in-scope deliverable, not a cross-team ask.
 - Remote raw TCP control: local-by-default with explicit opt-in for remote smoke environments. Loopback + SSH/port-forwarding is the default; remote bind is opt-in only.
-- `COMMIT WORK` and other COMMIT spellings: out of scope for v1. Exact `COMMIT` matching is sufficient because current `mariadb-rpc` emits exact `COMMIT`. Revisit only if the emitted text changes.
+- `COMMIT WORK` and other COMMIT spellings: out of scope for v1. Exact `COMMIT` text matching is sufficient because current `mariadb-rpc` emits exact `COMMIT`. Revisit only if the emitted text changes.
+- Exact next-COMMIT matching is sufficient for H2 ledger tests. H1 needs nth-COMMIT matching because the singular domain can emit an earlier `start` COMMIT before `complete`.
 
 ## 15. Definition of done
 
@@ -371,9 +394,11 @@ Resolved by app team:
 - Proxy forwards the full COMMIT request before dropping/closing the client response path.
 - Proxy closes both client-side and server-side sockets after firing.
 - Proxy accepts a fresh client connection after firing, and the one-shot failpoint does not consume the retry/reconcile COMMIT.
+- Proxy supports nth-COMMIT matching before H1 is considered covered; H2 can run with the default `nth = 1`.
 - Caller receives a classifiable ambiguous write transport error.
 - Connection is poisoned/dead and the pool discards it.
 - Next acquire reconnects cleanly.
 - Tests can assert the proxy failpoint fired exactly once and fail loudly if armed but never fired.
 - App team can run the same bookkeeper binary against the proxy by changing DB endpoint config.
 - App harness can route `singular` and `bookkeeper_db` independently so a one-shot COMMIT failpoint fires in the intended DB domain.
+- H1/H2 boundary tests run sequentially under their single-connection config, separate from concurrent stress/redispatch cases that use normal multi-connection config.

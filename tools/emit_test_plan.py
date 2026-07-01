@@ -274,7 +274,9 @@ def infer_artifact(rel):
         return "mariadb-wire-proto"
     if rel.startswith("packages/mariadb-rpc/"):
         return "mariadb-rpc"
-    sys.exit(f"error: cannot infer artifact for {rel} (expected packages/mariadb-*/...)")
+    if rel.startswith("failpoint-proxy/"):
+        return "mariadb-failpoint-proxy"
+    sys.exit(f"error: cannot infer artifact for {rel} (expected packages/mariadb-*/... or failpoint-proxy/...)")
 
 
 def emit_one(rel):

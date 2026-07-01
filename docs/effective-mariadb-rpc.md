@@ -433,11 +433,25 @@ Connection lifecycle:
 | `rpc-wire-query-failed` | `connect()`, `conn.call()` | Wire layer query execution failed |
 | `rpc-server-error` | `connect()` (SET NAMES) | Server returned ERR during post-connect setup |
 | `rpc-wire-set-autocommit-failed` | `connect()`, `conn.set_autocommit()` | Wire layer set_autocommit failed |
-| `rpc-wire-commit-failed` | `conn.commit()` | Wire layer commit failed |
 | `rpc-wire-rollback-failed` | `conn.rollback()` | Wire layer rollback failed |
 | `rpc-wire-reset-failed` | `conn.reset_for_pool_reuse()` | Wire layer reset failed |
 | `rpc-wire-close-failed` | `conn.close()` | Wire layer close failed |
 | `rpc-wire-ping-failed` | `conn.ping()` | Wire layer ping failed (conn marked dead) |
+
+`conn.commit()` is the exception: it does **not** return an `RpcError`. It returns
+`core.Result<Void, RpcCommitError>`, where `RpcCommitError { kind: RpcCommitErrorKind, cause_tag: String }`
+and `RpcCommitErrorKind` is one of `AmbiguousWrite`, `NotSent`, `ServerRejected`. Branch on `kind`:
+
+- `AmbiguousWrite` — the full `COMMIT` was sent but no clean acknowledgement was read (connection reset/EOF,
+  truncated/garbled response, or any unrecognized failure). The transaction **may or may not** be durable;
+  recover via an idempotency-key reconcile, never a blind re-drive.
+- `NotSent` — the request was never fully written (session not ready, or a partial write); the commit
+  definitely did not apply — safe to re-drive as not-committed.
+- `ServerRejected` — the server returned an ERR packet for `COMMIT`; it is alive and did not commit —
+  non-retriable.
+
+`cause_tag` carries the original lower-level wire tag (e.g. `wire-read-failed`, `tx-command-server-err`) for
+diagnostics only; do not branch on it.
 
 Statement operations:
 

@@ -61,6 +61,18 @@
         "docs/effective-mariadb-rpc.md",
         "README.md"
       ]
+    },
+    {
+      "kind": "app",
+      "name": "mariadb-failpoint-proxy",
+      "module_namespace": "mariadb.failpoint.proxy",
+      "version": "0.1.0",
+      "description": "Test-only MariaDB wire fault-injection proxy: deterministically injects ambiguous COMMIT ack-loss at the wire boundary for exactly-once recovery tests. Raw-TCP JSON-Lines control plane, no drift-web. NOT a production component.",
+      "entry_module": "failpoint-proxy/src/main.drift",
+      "entry_point": "mariadb.failpoint.proxy::service_main",
+      "modules": [
+        "failpoint-proxy/src/main.drift"
+      ]
     }
   ]
 }
