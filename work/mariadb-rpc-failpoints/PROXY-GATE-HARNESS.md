@@ -1,6 +1,6 @@
 # Proxy gate harness follow-up
 
-Status: REQUIRED before treating `mariadb-failpoint-proxy` as certification-ready downstream test tooling.
+Status: REQUIRED before treating `mariadb-failpoint-proxy` as certification-ready downstream test tooling. Tracked separately from S7 on purpose — S7 (done, see PLAN.md) proved the fault action end to end via `just check-one` against a manually-started proxy; this doc is specifically about making `just test` exercise the actual subprocess automatically. Do not let this slip once downstream teams (bookkeeper/Microflows) start relying on the proxy during cert — a manually-run proof is not gate coverage.
 
 ## Problem
 
