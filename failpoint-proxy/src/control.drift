@@ -1,0 +1,583 @@
+// Control plane for the failpoint proxy: a one-shot COMMIT-ack-loss failpoint
+// registry plus a newline-delimited JSON ("JSON Lines") request/response
+// protocol over raw TCP. See work/mariadb-rpc-failpoints/PLAN.md §7 for the
+// wire protocol this implements.
+//
+// `observe_commit` is the data-path hook: main.drift calls it once per
+// observed exact-COMMIT (see framing.drift) and gets back a `FireResult` if
+// that COMMIT should trigger the fault action (forward-then-drop-response).
+// The nth-COMMIT counter is arm-time-relative and global across the data
+// listener, per PLAN.md §7 ("Counting origin is arm-time, not
+// connection-open").
+//
+// `handle_line` is the pure request/response core (JSON in, JSON out, no
+// sockets) so it is unit-testable the same way classify_commit_wire_tag and
+// the packet framer are: see failpoint-proxy/tests/unit/control_test.drift.
+// The socket-facing line reader/writer lives at the bottom of this file.
+module mariadb.failpoint.proxy.control;
+
+import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import std.format as format;
+import std.text as text;
+import std.json as json;
+import std.log as log;
+
+export {
+	Registry,
+	FailpointEntry,
+	FireResult,
+	new_registry,
+	observe_commit,
+	handle_line,
+	run_control_loop
+};
+
+const ACCEPT_TIMEOUT_MS: Int = 3600000;
+const ACCEPT_BACKOFF_MS: Int = 100;
+const IO_TIMEOUT_MS: Int = 60000;
+const CLOSE_TIMEOUT_MS: Int = 1000;
+const CHUNK: Int = 4096;
+// Robust reader cap (PLAN.md §7): past this, a line without '\n' is rejected
+// as too-long rather than growing the accumulator without bound.
+const MAX_LINE_BYTES: Int = 1000000;
+
+// -----------------------------------------------------------------------
+// Registry
+// -----------------------------------------------------------------------
+
+pub struct FailpointEntry {
+	pub id: Int,
+	pub label: String,
+	pub db_domain: String,
+	pub match_command: String,
+	pub match_sql: String,
+	pub match_nth: Int,
+	pub action: String,
+	pub times: Int,
+	pub armed: Bool,
+	pub fired: Bool,
+	pub fire_count: Int,
+	// Matching COMMITs counted since this failpoint was armed (arm-time
+	// origin, not connection-open — see PLAN.md §7).
+	pub seen_since_arm: Int,
+	pub matched_client: String,
+	pub matched_command: String,
+	pub matched_sql: String,
+	pub matched_nth: Int,
+	pub bytes_forwarded_to_server: Int,
+	pub server_response_bytes_dropped: Int
+}
+
+pub struct RegistrySlot {
+	pub entries: Array<FailpointEntry>,
+	pub next_id: Int
+}
+
+pub struct Registry {
+	pub slot: conc.Mutex<RegistrySlot>,
+	pub data_listener: String
+}
+
+// What the data path should do once a COMMIT causes a failpoint to fire.
+pub struct FireResult {
+	pub id: Int,
+	pub label: String,
+	pub db_domain: String,
+	pub matched_nth: Int
+}
+
+pub fn new_registry(data_listener: String) nothrow -> conc.Arc<Registry> {
+	var entries: Array<FailpointEntry> = [];
+	val slot = RegistrySlot(entries = move entries, next_id = 0);
+	val reg = Registry(slot = conc.mutex(move slot), data_listener = data_listener);
+	return conc.arc(move reg);
+}
+
+// Data-path hook: call once per observed exact-COMMIT. Only the first armed,
+// not-yet-fired entry whose nth-COMMIT counter matches is fired per call —
+// a synchronous client sends at most one COMMIT per forwarded chunk, so in
+// practice at most one entry can fire per call anyway.
+pub fn observe_commit(reg: &conc.Arc<Registry>, client: &String) nothrow -> Optional<FireResult> {
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var result: Optional<FireResult> = Optional<FireResult>::None();
+	var i = 0;
+	var done = false;
+	while i < s.entries.len and not done {
+		val e = &mut s.entries[i];
+		if e.armed and not e.fired {
+			e.seen_since_arm = e.seen_since_arm + 1;
+			if e.seen_since_arm == e.match_nth {
+				e.armed = false;
+				e.fired = true;
+				e.fire_count = e.fire_count + 1;
+				e.matched_client = client.clone();
+				e.matched_command = "COM_QUERY";
+				e.matched_sql = "COMMIT";
+				e.matched_nth = e.seen_since_arm;
+				// A bare COMMIT packet is always header(4) + cmd(1) +
+				// "COMMIT"(6) = 11 bytes; mariadb-rpc's wire.commit() emits
+				// exactly that text (PLAN.md §5/§9), so this is exact for
+				// the intended consumer rather than a generic measurement.
+				e.bytes_forwarded_to_server = 11;
+				// The proxy deliberately never reads the swallowed server
+				// response (reading it would itself risk forwarding part of
+				// it), so the dropped byte count is intentionally
+				// unmeasured. -1 is a documented "not measured" sentinel.
+				e.server_response_bytes_dropped = -1;
+				result = Optional::Some(FireResult(id = e.id, label = e.label.clone(), db_domain = e.db_domain.clone(), matched_nth = e.matched_nth));
+				done = true;
+			}
+		}
+		i = i + 1;
+	}
+	return move result;
+}
+
+// -----------------------------------------------------------------------
+// JSON Lines request/response (pure — no sockets; see control_test.drift)
+// -----------------------------------------------------------------------
+
+fn _err_response(code: String, msg: String) nothrow -> String {
+	var o = json.new_object();
+	o.set("ok", json.JsonNode::Bool(value = false));
+	o.set("error", json.JsonNode::String(value = code));
+	o.set("message", json.JsonNode::String(value = msg));
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+fn _entry_status_object(e: &FailpointEntry, data_listener: &String) nothrow -> json.JsonObject {
+	var o = json.new_object();
+	o.set("id", json.JsonNode::Number(raw = format.format_int(e.id)));
+	o.set("label", json.JsonNode::String(value = e.label.clone()));
+	o.set("domain", json.JsonNode::String(value = e.db_domain.clone()));
+	o.set("armed", json.JsonNode::Bool(value = e.armed));
+	o.set("fired", json.JsonNode::Bool(value = e.fired));
+	o.set("fire_count", json.JsonNode::Number(raw = format.format_int(e.fire_count)));
+	o.set("data_listener", json.JsonNode::String(value = data_listener.clone()));
+	o.set("matched_client", json.JsonNode::String(value = e.matched_client.clone()));
+	o.set("matched_command", json.JsonNode::String(value = e.matched_command.clone()));
+	o.set("matched_sql", json.JsonNode::String(value = e.matched_sql.clone()));
+	o.set("matched_nth", json.JsonNode::Number(raw = format.format_int(e.matched_nth)));
+	o.set("bytes_forwarded_to_server", json.JsonNode::Number(raw = format.format_int(e.bytes_forwarded_to_server)));
+	o.set("server_response_bytes_dropped", json.JsonNode::Number(raw = format.format_int(e.server_response_bytes_dropped)));
+	return move o;
+}
+
+// v1 supports exactly one match shape (COM_QUERY COMMIT) and one action
+// (drop_server_response_after_forward) — see PLAN.md §6/§9. `arm` validates
+// against that fixed shape rather than accepting arbitrary matchers.
+fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String {
+	val label = root.select().field("label").as_string_or("");
+	if label == "" { return _err_response("bad-args", "label is required"); }
+	val db_domain = root.select().field("domain").as_string_or("");
+	val m = root.select().field("match");
+	val command = m.field("command").as_string_or("COM_QUERY");
+	val sql = m.field("sql").as_string_or("COMMIT");
+	val nth = m.field("nth").as_int_or(1);
+	val action = root.select().field("action").as_string_or("drop_server_response_after_forward");
+	val times = root.select().field("times").as_int_or(1);
+
+	if not text.equals_ignore_case(&command, "COM_QUERY") { return _err_response("bad-args", "match.command must be COM_QUERY"); }
+	if not text.equals_ignore_case(&sql, "COMMIT") { return _err_response("bad-args", "match.sql must be COMMIT"); }
+	if nth < 1 { return _err_response("bad-args", "match.nth must be >= 1"); }
+	if action != "drop_server_response_after_forward" { return _err_response("bad-args", "unsupported action"); }
+	if times != 1 { return _err_response("bad-args", "times must be 1"); }
+
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	val id = s.next_id + 1;
+	s.next_id = id;
+	val entry = FailpointEntry(
+		id = id,
+		label = label,
+		db_domain = db_domain,
+		match_command = "COM_QUERY",
+		match_sql = "COMMIT",
+		match_nth = nth,
+		action = action,
+		times = times,
+		armed = true,
+		fired = false,
+		fire_count = 0,
+		seen_since_arm = 0,
+		matched_client = "",
+		matched_command = "",
+		matched_sql = "",
+		matched_nth = 0,
+		bytes_forwarded_to_server = 0,
+		server_response_bytes_dropped = 0
+	);
+	s.entries.push(move entry);
+
+	var o = json.new_object();
+	o.set("ok", json.JsonNode::Bool(value = true));
+	o.set("id", json.JsonNode::Number(raw = format.format_int(id)));
+	o.set("label", json.JsonNode::String(value = label));
+	o.set("armed", json.JsonNode::Bool(value = true));
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String {
+	val id = root.select().field("id").as_int_or(-1);
+	val data_listener = reg.get().data_listener.clone();
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var idx = -1;
+	var i = 0;
+	while i < s.entries.len {
+		match s.entries.get(i) {
+			Optional::Some(e) => { if e.id == id { idx = i; } },
+			Optional::None => {}
+		}
+		i = i + 1;
+	}
+	if idx < 0 { return _err_response("unknown-id", "no such failpoint id"); }
+	match s.entries.get(idx) {
+		Optional::Some(e) => {
+			var o = _entry_status_object(e, &data_listener);
+			o.set("ok", json.JsonNode::Bool(value = true));
+			val node = o.to_node();
+			return json.encode_compact(&node);
+		},
+		Optional::None => { return _err_response("unknown-id", "no such failpoint id"); }
+	}
+}
+
+fn _handle_list(reg: &conc.Arc<Registry>) nothrow -> String {
+	val data_listener = reg.get().data_listener.clone();
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var arr = json.new_array();
+	var i = 0;
+	while i < s.entries.len {
+		match s.entries.get(i) {
+			Optional::Some(e) => {
+				val obj = _entry_status_object(e, &data_listener);
+				arr.push(obj.to_node());
+			},
+			Optional::None => {}
+		}
+		i = i + 1;
+	}
+	var o = json.new_object();
+	o.set("ok", json.JsonNode::Bool(value = true));
+	o.set("failpoints", arr.to_node());
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+fn _handle_assert_all_fired(reg: &conc.Arc<Registry>) nothrow -> String {
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var not_fired = json.new_array();
+	var not_fired_count = 0;
+	val armed_count = s.entries.len;
+	var i = 0;
+	while i < s.entries.len {
+		match s.entries.get(i) {
+			Optional::Some(e) => {
+				if not e.fired {
+					not_fired.push(json.JsonNode::String(value = e.label.clone()));
+					not_fired_count = not_fired_count + 1;
+				}
+			},
+			Optional::None => {}
+		}
+		i = i + 1;
+	}
+	// An empty registry (nothing ever armed — a forgotten `arm`, or everything
+	// wiped by `clear`) must fail loudly rather than vacuously pass: ok is
+	// false whenever armed_count is 0, even though not_fired is also empty in
+	// that case. This is the one case that uses the closed set's "not-armed"
+	// error code (PLAN.md §7); "some armed failpoints didn't fire" is a
+	// legitimate assertion failure, not a usage error, so it stays ok:false
+	// with no `error` field — the `not_fired` list already carries the detail.
+	var o = json.new_object();
+	if armed_count == 0 {
+		o.set("ok", json.JsonNode::Bool(value = false));
+		o.set("error", json.JsonNode::String(value = "not-armed"));
+		o.set("message", json.JsonNode::String(value = "no failpoint was ever armed"));
+	} else {
+		o.set("ok", json.JsonNode::Bool(value = (not_fired_count == 0)));
+	}
+	o.set("armed_count", json.JsonNode::Number(raw = format.format_int(armed_count)));
+	o.set("not_fired", not_fired.to_node());
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+// Full registry reset (armed + fired history), for test isolation between
+// cases — see PLAN.md §7 ("clear is a full reset").
+fn _handle_clear(reg: &conc.Arc<Registry>) nothrow -> String {
+	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
+	var guard = conc.lock(mu_ref);
+	val s = guard.get_mut();
+	var empty: Array<FailpointEntry> = [];
+	s.entries = move empty;
+	var o = json.new_object();
+	o.set("ok", json.JsonNode::Bool(value = true));
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+// The data listener is bound before the control listener starts serving
+// (service_main), so by construction `health` is always ready:true while
+// reachable — see PLAN.md §7 ("health means the data listener is bound").
+fn _handle_health(reg: &conc.Arc<Registry>) nothrow -> String {
+	val data_listener = reg.get().data_listener.clone();
+	var o = json.new_object();
+	o.set("ok", json.JsonNode::Bool(value = true));
+	o.set("data_listener", json.JsonNode::String(value = data_listener));
+	o.set("ready", json.JsonNode::Bool(value = true));
+	val node = o.to_node();
+	return json.encode_compact(&node);
+}
+
+// Pure request/response core: one JSON line in, one JSON line out (no
+// trailing newline — the socket writer appends it). No sockets, no logging —
+// see failpoint-proxy/tests/unit/control_test.drift for direct unit tests.
+pub fn handle_line(reg: &conc.Arc<Registry>, line: &String) nothrow -> String {
+	match json.parse_strict(line) {
+		core.Result::Err(_) => { return _err_response("bad-json", "invalid json"); },
+		core.Result::Ok(root) => {
+			val op = root.select().field("op").as_string_or("");
+			if op == "arm" { return _handle_arm(reg, &root); }
+			if op == "status" { return _handle_status(reg, &root); }
+			if op == "list" { return _handle_list(reg); }
+			if op == "assert_all_fired" { return _handle_assert_all_fired(reg); }
+			if op == "clear" { return _handle_clear(reg); }
+			if op == "health" { return _handle_health(reg); }
+			return _err_response("unknown-op", "unsupported op: " + op);
+		}
+	}
+}
+
+// -----------------------------------------------------------------------
+// Socket-facing control listener (JSON Lines over raw TCP)
+// -----------------------------------------------------------------------
+
+fn _dur(ms: Int) nothrow -> conc.Duration {
+	if ms <= 0 { return conc.Duration(millis = 1); }
+	return conc.Duration(millis = ms);
+}
+
+// Small local duplicates of main.drift's socket byte-shuffling helpers
+// (buf_to_array / forward_all): control connections are low-volume and
+// logically separate from the data-forwarding path, so a shared module
+// isn't worth the coupling for ~15 lines of plumbing.
+fn _buf_to_array(buf: &mut io.Buffer, n: Int) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < n {
+		out.push(io.buffer_read(buf, i));
+		i = i + 1;
+	}
+	return move out;
+}
+
+fn _copy_range(buf: &Array<Byte>, start: Int, end: Int) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = start;
+	while i < end {
+		out.push(buf[i]);
+		i = i + 1;
+	}
+	return move out;
+}
+
+fn _find_lf(buf: &Array<Byte>) nothrow -> Int {
+	var i = 0;
+	while i < buf.len {
+		if buf[i] == cast<Byte>(10) { return i; }
+		i = i + 1;
+	}
+	return -1;
+}
+
+fn _forward_all(dst: &conc.Arc<net.TcpStream>, bytes: &mut Array<Byte>, n: Int) nothrow -> Bool {
+	var off = 0;
+	while off < n {
+		match dst.get().write_bytes(bytes, off, n - off, _dur(IO_TIMEOUT_MS)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return false; }
+				off = off + w;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return false; }
+			}
+		}
+	}
+	return true;
+}
+
+// Best-effort op extraction for logging only — handle_line re-parses the same
+// line for real dispatch, since it must stay logger-free and independently
+// testable (control_test.drift).
+fn _extract_op_for_log(line: &String) nothrow -> String {
+	match json.parse(line) {
+		core.Result::Ok(root) => { return root.select().field("op").as_string_or("?"); },
+		core.Result::Err(_) => { return "?"; }
+	}
+}
+
+fn _bstr(b: Bool) nothrow -> String {
+	if b { return "true"; }
+	return "false";
+}
+
+fn _json_field_string(text_val: &String, key: String) nothrow -> String {
+	match json.parse(text_val) {
+		core.Result::Ok(root) => { return root.select().field(key).as_string_or(""); },
+		core.Result::Err(_) => { return ""; }
+	}
+}
+
+fn _json_field_int(text_val: &String, key: String) nothrow -> Int {
+	match json.parse(text_val) {
+		core.Result::Ok(root) => { return root.select().field(key).as_int_or(-1); },
+		core.Result::Err(_) => { return -1; }
+	}
+}
+
+fn _json_field_bool(text_val: &String, key: String) nothrow -> Bool {
+	match json.parse(text_val) {
+		core.Result::Ok(root) => { return root.select().field(key).as_bool_or(false); },
+		core.Result::Err(_) => { return false; }
+	}
+}
+
+// Per-op structured logging: `arm`/`clear` get the named events PLAN.md §6
+// calls for (failpoint_arm/failpoint_clear); every other op gets a generic
+// control_op audit line. Re-parses the response rather than threading a
+// logger through handle_line, which must stay logger-free and pure for
+// control_test.drift.
+fn _log_control_event(logger: &log.Logger, conn_id: Int, op: String, resp: &String) nothrow -> Void {
+	if op == "arm" {
+		logger.info("failpoint_arm", {"conn_id": format.format_int(conn_id), "ok": _bstr(_json_field_bool(resp, "ok")), "id": format.format_int(_json_field_int(resp, "id")), "label": _json_field_string(resp, "label")});
+		return;
+	}
+	if op == "clear" {
+		logger.info("failpoint_clear", {"conn_id": format.format_int(conn_id), "ok": _bstr(_json_field_bool(resp, "ok"))});
+		return;
+	}
+	logger.info("control_op", {"conn_id": format.format_int(conn_id), "op": op});
+}
+
+fn _write_line(stream: &conc.Arc<net.TcpStream>, line: &String) nothrow -> Bool {
+	val with_nl = line.clone() + "\n";
+	var bytes = core.string_to_utf8_bytes(&with_nl);
+	val n = bytes.len;
+	return _forward_all(stream, &mut bytes, n);
+}
+
+// One control connection: accumulate bytes until '\n', dispatch each
+// complete line through handle_line, write back the response line.
+// Framing rule (PLAN.md §7): one minified JSON object per line, both
+// directions; a malformed line gets a bad-json reply and the connection
+// stays open, but an over-length line (no '\n' within MAX_LINE_BYTES) gets a
+// too-long reply and the connection is closed — the buffered bytes have no
+// discoverable line boundary, so resyncing safely isn't possible.
+fn _handle_control_client(client_stream: net.TcpStream, reg: conc.Arc<Registry>, logger: &log.Logger, conn_id: Int) nothrow -> Int {
+	var cs = move client_stream;
+	val arc = conc.arc(move cs);
+	var acc: Array<Byte> = [];
+	while true {
+		val lf = _find_lf(&acc);
+		if lf >= 0 {
+			val line_bytes = _copy_range(&acc, 0, lf);
+			val remainder = _copy_range(&acc, lf + 1, acc.len);
+			acc = move remainder;
+			match text.utf8_from_bytes(&line_bytes) {
+				core.Result::Ok(line) => {
+					val op = _extract_op_for_log(&line);
+					val resp = handle_line(&reg, &line);
+					_log_control_event(logger, conn_id, op, &resp);
+					if not _write_line(&arc, &resp) {
+						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
+						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "write-error"});
+						return 0;
+					}
+				},
+				core.Result::Err(_) => {
+					val resp = _err_response("bad-json", "line is not valid utf-8");
+					if not _write_line(&arc, &resp) {
+						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
+						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "write-error"});
+						return 0;
+					}
+				}
+			}
+		} else {
+			if acc.len > MAX_LINE_BYTES {
+				val resp = _err_response("too-long", "line exceeds max length");
+				val _ = _write_line(&arc, &resp);
+				val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
+				logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "too-long"});
+				return 0;
+			}
+			var buf = io.buffer(CHUNK);
+			match arc.get().read(&mut buf, _dur(IO_TIMEOUT_MS)) {
+				core.Result::Ok(n) => {
+					if n <= 0 {
+						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
+						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "eof"});
+						return 0;
+					}
+					val chunk = _buf_to_array(&mut buf, n);
+					var i = 0;
+					while i < n {
+						acc.push(chunk[i]);
+						i = i + 1;
+					}
+				},
+				core.Result::Err(e) => {
+					if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
+						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "read-error"});
+						return 0;
+					}
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+// Control accept loop: one detached handler vthread per control connection
+// (control ops are rare; simplicity over throughput here).
+pub fn run_control_loop(listener: &net.TcpListener, reg: conc.Arc<Registry>, logger: &log.Logger) nothrow -> Int {
+	var next_conn_id = 0;
+	while true {
+		match listener.accept(_dur(ACCEPT_TIMEOUT_MS)) {
+			core.Result::Ok(cs) => {
+				next_conn_id = next_conn_id + 1;
+				val conn_id = next_conn_id;
+				var client_stream = move cs;
+				var reg_for_conn = reg.clone();
+				var logger_for_conn = logger.derive("failpoint-proxy-control").build();
+				var cb: core.Callback0<Int> = core.callback0(| | captures(move client_stream, move reg_for_conn, move logger_for_conn, copy conn_id) => {
+					return _handle_control_client(move client_stream, move reg_for_conn, &logger_for_conn, conn_id);
+				});
+				val _ = conc.spawn(move cb);
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+					logger.error("control_accept_error", {"kind": e.kind});
+					conc.sleep(_dur(ACCEPT_BACKOFF_MS));
+				}
+			}
+		}
+	}
+	return 0;
+}

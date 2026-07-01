@@ -1,17 +1,22 @@
 // mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy.
 //
-// Slice 1 (this file): transparent bidirectional forwarding between a MariaDB
-// client and a real MariaDB server, plus client->server packet framing that can
-// observe an exact `COMMIT` without matching raw TCP chunks. No fault injection
-// and no control plane yet — those are later slices.
+// This file: transparent bidirectional forwarding between a MariaDB client and
+// a real MariaDB server, client->server packet framing that observes an exact
+// `COMMIT` without matching raw TCP chunks (framing.drift), and the fault
+// action itself — on a firing COMMIT (per the control-plane registry in
+// control.drift), forward only through that COMMIT packet's end, swallow the
+// server's response, and close both sockets. The JSON Lines control plane
+// (arm/status/list/assert_all_fired/clear/health) lives in control.drift.
 //
 // Logging: structured JSON Lines via the stdlib logger (std.log), matching the
 // house style (string-valued attrs). Low-noise and structured — NEVER logs raw
 // SQL, auth bytes, or packet payloads; only event names, ids, coarse reasons,
-// and byte/commit counts. Slice-1 events: proxy_start, client_accept,
-// backend_connect, commit_observed, conn_close. Later slices reuse the same
-// style for failpoint_arm / failpoint_fire / failpoint_clear /
-// server_response_dropped.
+// and byte/commit counts. Events: proxy_start, client_accept, backend_connect,
+// commit_observed, conn_close (this file); failpoint_arm, failpoint_fire,
+// failpoint_clear, control_op, control_close (control.drift). There is no
+// separate "server response dropped" event — the swallowed-response byte
+// count is intentionally unmeasured (see control.drift's
+// server_response_bytes_dropped sentinel), so it has nothing to log.
 //
 // It is a kind:app artifact built and certified from this repo, consumed by app
 // test harnesses as an external process (it slots in like uflowsd). NOT a
@@ -29,11 +34,14 @@ import std.core as core;
 import std.io as io;
 import std.net as net;
 import std.concurrent as conc;
+import std.sync as sync;
 import std.format as format;
 import std.parse as parse;
 import std.text as text;
 import std.log as log;
+import std.console as console;
 import mariadb.failpoint.proxy.framing as framing;
+import mariadb.failpoint.proxy.control as control;
 
 const DATA_HOST_DEFAULT: String = "127.0.0.1";
 const DATA_PORT_DEFAULT: Int = 43306;
@@ -180,13 +188,24 @@ fn _forward_all(dst: &conc.Arc<net.TcpStream>, bytes: &mut Array<Byte>, n: Int) 
 
 // Server->client: pass bytes through verbatim. Returns the coarse reason and
 // byte count when the source EOFs or a socket errors.
-fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>) nothrow -> PumpResult {
+//
+// `swallow` is set by the c2s direction the instant a failpoint fires — BEFORE
+// the triggering COMMIT is forwarded to the backend (see
+// _pump_client_to_server), so the backend cannot have produced any response
+// bytes yet at the moment the flag becomes visible. Checking it right after
+// each read (before forwarding that read) therefore means any bytes read once
+// the flag is true are safely known to be the swallowed response, never
+// legitimate earlier traffic.
+fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, swallow: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
 	var total = 0;
 	while true {
 		var buf = io.buffer(CHUNK);
 		match src.get().read(&mut buf, _dur(IO_TIMEOUT_MS)) {
 			core.Result::Ok(n) => {
 				if n <= 0 { return PumpResult(reason = "eof", bytes = total, commits = 0); }
+				if swallow.get().load(sync.MemoryOrder::Acquire()) {
+					return PumpResult(reason = "failpoint-swallowed", bytes = total, commits = 0);
+				}
 				var bytes = _buf_to_array(&mut buf, n);
 				if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = 0); }
 				total = total + n;
@@ -201,9 +220,18 @@ fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream
 
 // Client->server: pass bytes through verbatim AND feed them to the packet framer
 // so exact COMMITs can be observed. Emits one commit_observed event per COMMIT
-// (with a per-connection ordinal). Slice 1 only observes; the fault action is a
-// later slice.
-fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, logger: &log.Logger, conn_id: Int) nothrow -> PumpResult {
+// (with a per-connection ordinal), and consults the failpoint registry on each
+// one. If a COMMIT causes a failpoint to fire: `swallow` is set BEFORE the
+// COMMIT is forwarded (so _pump_passthrough can never let the dropped response
+// slip through — see its comment), only the bytes THROUGH the end of that exact
+// COMMIT packet are forwarded — any later bytes in the same read (pipelining or
+// kernel coalescing, e.g. a coalesced `[COMMIT][SELECT ...]` read) are discarded
+// rather than forwarded, so the fault action stays precise at the COMMIT
+// boundary even though a synchronous mariadb-rpc client is not expected to
+// produce this shape in practice — then this pump closes both sockets itself
+// and returns immediately, matching "whichever direction ends first closes the
+// pair" (see _handle_client).
+fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, logger: &log.Logger, conn_id: Int, reg: &conc.Arc<control.Registry>, client_addr: &String, swallow: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
 	var framer = framing.new_framer();
 	var total = 0;
 	var commits = 0;
@@ -213,15 +241,51 @@ fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpS
 			core.Result::Ok(n) => {
 				if n <= 0 { return PumpResult(reason = "eof", bytes = total, commits = commits); }
 				var bytes = _buf_to_array(&mut buf, n);
-				val c = framing.feed_and_count_commits(&mut framer, &bytes, n);
+				val feed = framing.feed_and_locate_commits(&mut framer, &bytes, n);
+				val c = feed.commits;
 				var k = 0;
-				while k < c {
+				var did_fire = false;
+				var fire_id = 0;
+				var fire_label = "";
+				var fire_domain = "";
+				var fire_nth = 0;
+				var fire_end = -1;
+				// Stop at the first fire: once a failpoint fires we sever the
+				// connection, so any further commits observed in this same
+				// over-read chunk were never actually delivered to the
+				// backend (see the truncated forward below) and must not be
+				// counted against other armed failpoints.
+				while k < c and not did_fire {
 					commits = commits + 1;
 					logger.info("commit_observed", {"conn_id": format.format_int(conn_id), "ordinal": format.format_int(commits)});
+					match control.observe_commit(reg, client_addr) {
+						Optional::Some(f) => {
+							did_fire = true;
+							fire_id = f.id;
+							fire_label = f.label;
+							fire_domain = f.db_domain;
+							fire_nth = f.matched_nth;
+							match feed.commit_ends.get(k) {
+								Optional::Some(end_off) => { fire_end = *end_off; },
+								Optional::None => {}
+							}
+						},
+						Optional::None => {}
+					}
 					k = k + 1;
 				}
-				if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = commits); }
-				total = total + n;
+				// Set BEFORE forwarding: see _pump_passthrough's comment on why
+				// this ordering makes the swallow check race-free.
+				if did_fire { swallow.get().store(true, sync.MemoryOrder::Release()); }
+				var fwd_n = n;
+				if did_fire and fire_end >= 0 { fwd_n = fire_end; }
+				if not _forward_all(dst, &mut bytes, fwd_n) { return PumpResult(reason = "write-error", bytes = total, commits = commits); }
+				total = total + fwd_n;
+				if did_fire {
+					logger.info("failpoint_fire", {"conn_id": format.format_int(conn_id), "id": format.format_int(fire_id), "label": fire_label, "domain": fire_domain, "matched_nth": format.format_int(fire_nth)});
+					_close_pair(src, dst);
+					return PumpResult(reason = "failpoint-fired", bytes = total, commits = commits);
+				}
 			},
 			core.Result::Err(e) => {
 				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return PumpResult(reason = "read-error", bytes = total, commits = commits); }
@@ -236,7 +300,7 @@ fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpS
 // framing) runs inline. When either direction ends, both fds are closed so the
 // other's blocked read unblocks, then the spawned direction is joined and a
 // single conn_close event summarises the connection.
-fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_port: Int, logger: &log.Logger, conn_id: Int) nothrow -> Int {
+fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_port: Int, logger: &log.Logger, conn_id: Int, reg: conc.Arc<control.Registry>, client_addr: String) nothrow -> Int {
 	val baddr = net.socket_addr(backend_host, backend_port);
 	match net.connect(&baddr, _dur(CONNECT_TIMEOUT_MS)) {
 		core.Result::Err(_) => {
@@ -250,17 +314,22 @@ fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_po
 			var server_stream = move s;
 			val client_arc = conc.arc(move client_stream);
 			val server_arc = conc.arc(move server_stream);
+			// Shared per-connection fault flag: c2s sets it the instant a
+			// failpoint fires (before forwarding the triggering COMMIT), s2c
+			// polls it to know the response for that COMMIT must be dropped.
+			val swallow: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
 
 			var s_for_s2c = server_arc.clone();
 			var c_for_s2c = client_arc.clone();
-			var s2c_cb: core.Callback0<PumpResult> = core.callback0(| | captures(move s_for_s2c, move c_for_s2c) => {
-				val r = _pump_passthrough(&s_for_s2c, &c_for_s2c);
+			var swallow_for_s2c = swallow.clone();
+			var s2c_cb: core.Callback0<PumpResult> = core.callback0(| | captures(move s_for_s2c, move c_for_s2c, move swallow_for_s2c) => {
+				val r = _pump_passthrough(&s_for_s2c, &c_for_s2c, &swallow_for_s2c);
 				_close_pair(&s_for_s2c, &c_for_s2c);
 				return r;
 			});
 			var s2c_vt: conc.VirtualThread<PumpResult> = conc.spawn(move s2c_cb);
 
-			val c2s = _pump_client_to_server(&client_arc, &server_arc, logger, conn_id);
+			val c2s = _pump_client_to_server(&client_arc, &server_arc, logger, conn_id, &reg, &client_addr, &swallow);
 			_close_pair(&client_arc, &server_arc);
 
 			var s2c = PumpResult(reason = "eof", bytes = 0, commits = 0);
@@ -289,7 +358,7 @@ fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_po
 // cancellation path. The handler gets its own cloned Logger (a borrow can't
 // cross into a detached closure). conn_id is assigned on this single accept
 // vthread, so the counter needs no synchronization.
-fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: Int, logger: &log.Logger) nothrow -> Int {
+fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: Int, logger: &log.Logger, reg: conc.Arc<control.Registry>) nothrow -> Int {
 	var next_conn_id = 0;
 	while true {
 		match listener.accept(_dur(ACCEPT_TIMEOUT_MS)) {
@@ -304,8 +373,9 @@ fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: 
 				}
 				logger.info("client_accept", {"conn_id": format.format_int(conn_id), "client": client});
 				var logger_for_handler = logger.derive("failpoint-proxy").build();
-				var handler_cb: core.Callback0<Int> = core.callback0(| | captures(move client_stream, move logger_for_handler, copy backend_host, copy backend_port, copy conn_id) => {
-					return _handle_client(move client_stream, backend_host, backend_port, &logger_for_handler, conn_id);
+				var reg_for_handler = reg.clone();
+				var handler_cb: core.Callback0<Int> = core.callback0(| | captures(move client_stream, move logger_for_handler, move reg_for_handler, copy backend_host, copy backend_port, copy conn_id, copy client) => {
+					return _handle_client(move client_stream, backend_host, backend_port, &logger_for_handler, conn_id, move reg_for_handler, client);
 				});
 				val _ = conc.spawn(move handler_cb);
 			},
@@ -320,9 +390,29 @@ fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: 
 	return 0;
 }
 
+fn _has_flag(argv: &Array<String>, key: String) nothrow -> Bool {
+	var i = 0;
+	while i < argv.len {
+		if argv[i] == key { return true; }
+		i = i + 1;
+	}
+	return false;
+}
+
+const USAGE: String = "mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy\n\nUsage: mariadb-failpoint-proxy [--data-host H] [--data-port P] [--backend-host H] [--backend-port P] [--control-host H] [--control-port P]\n\nRuns until killed; there is no built-in shutdown flag. See work/mariadb-rpc-failpoints/PLAN.md.";
+
 // Entry point (referenced from drift/manifest.json as
 // mariadb.failpoint.proxy::service_main).
 pub fn service_main(argv: Array<String>) nothrow -> Int {
+	// This is a long-running daemon with no natural exit — `drift deploy`'s
+	// baseline app smoke runs `<bin> --help` and requires SOME exit within
+	// 30s (any code; it only rules out a hang or a signal death), so --help
+	// must be handled before anything binds a listener and blocks forever.
+	if _has_flag(&argv, "--help") or _has_flag(&argv, "-h") {
+		console.println(USAGE);
+		return 0;
+	}
+
 	val logger = _make_logger();
 
 	var data_host = "";
@@ -364,12 +454,33 @@ pub fn service_main(argv: Array<String>) nothrow -> Int {
 		},
 		core.Result::Ok(l) => {
 			var listener = move l;
-			// control_host/control_port are parsed + validated now (stable CLI
-			// shape) but unused until the control-plane slice.
-			logger.info("proxy_start", {"data_host": data_host, "data_port": format.format_int(data_port), "backend_host": backend_host, "backend_port": format.format_int(backend_port), "control_host": control_host, "control_port": format.format_int(control_port)});
-			// main() runs as the root virtual thread, so socket I/O here parks on
-			// the same reactor as any spawned VT — run the accept loop directly.
-			return _accept_loop(&listener, backend_host, backend_port, &logger);
+			val caddr = net.socket_addr(control_host, control_port);
+			match net.listen(&caddr, _dur(LISTEN_TIMEOUT_MS)) {
+				core.Result::Err(_) => {
+					logger.error("control_listen_failed", {"control_host": control_host, "control_port": format.format_int(control_port)});
+					return 1;
+				},
+				core.Result::Ok(cl) => {
+					var control_listener = move cl;
+					// Registry is created only after the data listener is bound, so
+					// `health` reporting ready:true is always true by construction
+					// (see control.drift's _handle_health comment).
+					val registry = control.new_registry(_hostport(data_host, data_port));
+					logger.info("proxy_start", {"data_host": data_host, "data_port": format.format_int(data_port), "backend_host": backend_host, "backend_port": format.format_int(backend_port), "control_host": control_host, "control_port": format.format_int(control_port)});
+
+					var control_logger = logger.derive("failpoint-proxy-control").build();
+					var registry_for_control = registry.clone();
+					var control_cb: core.Callback0<Int> = core.callback0(| | captures(move control_listener, move control_logger, move registry_for_control) => {
+						return control.run_control_loop(&control_listener, move registry_for_control, &control_logger);
+					});
+					val _ = conc.spawn(move control_cb);
+
+					// main() runs as the root virtual thread, so socket I/O here parks
+					// on the same reactor as any spawned VT — run the data accept loop
+					// directly (the control accept loop above runs detached).
+					return _accept_loop(&listener, backend_host, backend_port, &logger, registry);
+				}
+			}
 		}
 	}
 }

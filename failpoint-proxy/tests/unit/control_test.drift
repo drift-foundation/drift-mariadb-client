@@ -1,0 +1,248 @@
+// Proves the control-plane JSON Lines request/response core (control.drift's
+// handle_line + observe_commit) end to end, purely: no sockets, no DB. Mirrors
+// framing_test.drift's style (scenario functions returning error codes).
+module mariadb.failpoint.proxy.tests.unit.control_test;
+
+import std.core as core;
+import std.json as json;
+import mariadb.failpoint.proxy.control as control;
+
+fn _resp_bool(resp: &String, key: String) nothrow -> Bool {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_bool_or(false); },
+		core.Result::Err(_) => { return false; }
+	}
+}
+
+fn _resp_int(resp: &String, key: String) nothrow -> Int {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_int_or(-999); },
+		core.Result::Err(_) => { return -999; }
+	}
+}
+
+fn _resp_string(resp: &String, key: String) nothrow -> String {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_string_or(""); },
+		core.Result::Err(_) => { return ""; }
+	}
+}
+
+fn _resp_array_len(resp: &String, key: String) nothrow -> Int {
+	match json.parse(resp) {
+		core.Result::Ok(root) => {
+			match root.get(&key) {
+				Optional::Some(node) => {
+					match node.as_array() {
+						Optional::Some(a) => { return a.len; },
+						Optional::None => { return -1; }
+					}
+				},
+				Optional::None => { return -1; }
+			}
+		},
+		core.Result::Err(_) => { return -1; }
+	}
+}
+
+// arm defaults to match.nth = 1: armed:true immediately, status shows
+// armed/not-fired/fire_count 0 before any COMMIT is observed.
+fn scenario_arm_and_status() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"t1\",\"match\":{\"nth\":1}}";
+	val arm_resp = control.handle_line(&reg, &arm_req);
+	if not _resp_bool(&arm_resp, "ok") { return 101; }
+	if _resp_int(&arm_resp, "id") != 1 { return 102; }
+	if not _resp_bool(&arm_resp, "armed") { return 103; }
+
+	val status_req = "{\"op\":\"status\",\"id\":1}";
+	val status_resp = control.handle_line(&reg, &status_req);
+	if not _resp_bool(&status_resp, "armed") { return 104; }
+	if _resp_bool(&status_resp, "fired") { return 105; }
+	if _resp_int(&status_resp, "fire_count") != 0 { return 106; }
+	return 0;
+}
+
+// nth = 1 (default): the very next observed COMMIT fires.
+fn scenario_fire_nth1() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"once\",\"match\":{\"nth\":1}}";
+	val _arm_resp = control.handle_line(&reg, &arm_req);
+	val client = "127.0.0.1:50000";
+	match control.observe_commit(&reg, &client) {
+		Optional::Some(f) => { if f.matched_nth != 1 { return 202; } },
+		Optional::None => { return 201; }
+	}
+	val status_req = "{\"op\":\"status\",\"id\":1}";
+	val status_resp = control.handle_line(&reg, &status_req);
+	if not _resp_bool(&status_resp, "fired") { return 203; }
+	if _resp_bool(&status_resp, "armed") { return 204; }
+	if _resp_int(&status_resp, "fire_count") != 1 { return 205; }
+	if _resp_int(&status_resp, "matched_nth") != 1 { return 206; }
+	if _resp_string(&status_resp, "matched_client") != client { return 207; }
+	return 0;
+}
+
+// nth = 2 (the H1 Singular.start-then-complete shape): the first COMMIT
+// passes through unfired, only the second fires.
+fn scenario_fire_nth2() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"second\",\"match\":{\"nth\":2}}";
+	val _arm_resp = control.handle_line(&reg, &arm_req);
+	val client = "127.0.0.1:50001";
+	match control.observe_commit(&reg, &client) {
+		Optional::Some(_) => { return 301; },
+		Optional::None => {}
+	}
+	val status_req = "{\"op\":\"status\",\"id\":1}";
+	val mid_resp = control.handle_line(&reg, &status_req);
+	if _resp_bool(&mid_resp, "fired") { return 302; }
+
+	match control.observe_commit(&reg, &client) {
+		Optional::Some(f) => { if f.matched_nth != 2 { return 303; } },
+		Optional::None => { return 304; }
+	}
+	val end_resp = control.handle_line(&reg, &status_req);
+	if not _resp_bool(&end_resp, "fired") { return 305; }
+	if _resp_int(&end_resp, "matched_nth") != 2 { return 306; }
+	return 0;
+}
+
+// assert_all_fired: ok:false with armed_count while unfired, ok:true after.
+fn scenario_assert_all_fired() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
+	val _r = control.handle_line(&reg, &arm_req);
+	val assert_req = "{\"op\":\"assert_all_fired\"}";
+	val before = control.handle_line(&reg, &assert_req);
+	if _resp_bool(&before, "ok") { return 401; }
+	if _resp_int(&before, "armed_count") != 1 { return 402; }
+
+	val client = "127.0.0.1:50002";
+	match control.observe_commit(&reg, &client) {
+		Optional::Some(_) => {},
+		Optional::None => { return 403; }
+	}
+	val after = control.handle_line(&reg, &assert_req);
+	if not _resp_bool(&after, "ok") { return 404; }
+	return 0;
+}
+
+// A test that forgot to arm anything must fail loudly, not vacuously pass on
+// an empty set: assert_all_fired on a fresh (never-armed) registry is ok:false
+// with error "not-armed" and armed_count 0.
+fn scenario_assert_all_fired_never_armed() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val assert_req = "{\"op\":\"assert_all_fired\"}";
+	val resp = control.handle_line(&reg, &assert_req);
+	if _resp_bool(&resp, "ok") { return 451; }
+	if _resp_int(&resp, "armed_count") != 0 { return 452; }
+	if _resp_string(&resp, "error") != "not-armed" { return 453; }
+	return 0;
+}
+
+// clear wipes armed + fired history: list becomes empty, assert_all_fired
+// reports armed_count 0 (so a test that forgot to arm fails loudly, not
+// silently passes on an empty set).
+fn scenario_clear() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
+	val _r = control.handle_line(&reg, &arm_req);
+	val clear_req = "{\"op\":\"clear\"}";
+	val clear_resp = control.handle_line(&reg, &clear_req);
+	if not _resp_bool(&clear_resp, "ok") { return 501; }
+
+	val list_req = "{\"op\":\"list\"}";
+	val list_resp = control.handle_line(&reg, &list_req);
+	if _resp_array_len(&list_resp, "failpoints") != 0 { return 502; }
+
+	// An empty registry (nothing armed since the clear) must fail loudly, not
+	// vacuously pass — armed_count 0 means ok:false with error "not-armed".
+	val assert_req = "{\"op\":\"assert_all_fired\"}";
+	val assert_resp = control.handle_line(&reg, &assert_req);
+	if _resp_int(&assert_resp, "armed_count") != 0 { return 503; }
+	if _resp_bool(&assert_resp, "ok") { return 504; }
+	if _resp_string(&assert_resp, "error") != "not-armed" { return 505; }
+	return 0;
+}
+
+fn scenario_bad_json() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val bad = "not json at all";
+	val resp = control.handle_line(&reg, &bad);
+	if _resp_bool(&resp, "ok") { return 601; }
+	if _resp_string(&resp, "error") != "bad-json" { return 602; }
+	return 0;
+}
+
+fn scenario_unknown_op() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val req = "{\"op\":\"bogus\"}";
+	val resp = control.handle_line(&reg, &req);
+	if _resp_bool(&resp, "ok") { return 701; }
+	if _resp_string(&resp, "error") != "unknown-op" { return 702; }
+	return 0;
+}
+
+fn scenario_unknown_id() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val req = "{\"op\":\"status\",\"id\":999}";
+	val resp = control.handle_line(&reg, &req);
+	if _resp_bool(&resp, "ok") { return 801; }
+	if _resp_string(&resp, "error") != "unknown-id" { return 802; }
+	return 0;
+}
+
+fn scenario_bad_args() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val req = "{\"op\":\"arm\"}";
+	val resp = control.handle_line(&reg, &req);
+	if _resp_bool(&resp, "ok") { return 901; }
+	if _resp_string(&resp, "error") != "bad-args" { return 902; }
+	return 0;
+}
+
+fn scenario_list_and_health() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val a1 = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
+	val a2 = "{\"op\":\"arm\",\"label\":\"b\",\"match\":{\"nth\":1}}";
+	val _r1 = control.handle_line(&reg, &a1);
+	val _r2 = control.handle_line(&reg, &a2);
+
+	val list_req = "{\"op\":\"list\"}";
+	val list_resp = control.handle_line(&reg, &list_req);
+	if _resp_array_len(&list_resp, "failpoints") != 2 { return 1001; }
+
+	val health_req = "{\"op\":\"health\"}";
+	val health_resp = control.handle_line(&reg, &health_req);
+	if not _resp_bool(&health_resp, "ok") { return 1002; }
+	if not _resp_bool(&health_resp, "ready") { return 1003; }
+	if _resp_string(&health_resp, "data_listener") != "127.0.0.1:43306" { return 1004; }
+	return 0;
+}
+
+pub fn main() nothrow -> Int {
+	val a = scenario_arm_and_status();
+	if a != 0 { return a; }
+	val b = scenario_fire_nth1();
+	if b != 0 { return b; }
+	val c = scenario_fire_nth2();
+	if c != 0 { return c; }
+	val d = scenario_assert_all_fired();
+	if d != 0 { return d; }
+	val d2 = scenario_assert_all_fired_never_armed();
+	if d2 != 0 { return d2; }
+	val e = scenario_clear();
+	if e != 0 { return e; }
+	val f = scenario_bad_json();
+	if f != 0 { return f; }
+	val g = scenario_unknown_op();
+	if g != 0 { return g; }
+	val h = scenario_unknown_id();
+	if h != 0 { return h; }
+	val i = scenario_bad_args();
+	if i != 0 { return i; }
+	val j = scenario_list_and_health();
+	if j != 0 { return j; }
+	return 0;
+}

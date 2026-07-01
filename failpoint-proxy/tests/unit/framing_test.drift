@@ -128,6 +128,26 @@ fn scenario_commit_then_partial() nothrow -> Int {
 	return 0;
 }
 
+// A COMMIT immediately followed by a WHOLE later packet, coalesced into one
+// read (e.g. pipelining or kernel coalescing): feed_and_locate_commits must
+// report exactly one commit whose end offset is the byte length of the COMMIT
+// packet alone — i.e. the boundary a fault-injecting caller must forward
+// through, discarding the trailing SELECT bytes rather than forwarding them.
+fn scenario_locate_coalesced_commit_then_other() nothrow -> Int {
+	var f = framing.new_framer();
+	val commit = _query_packet("COMMIT");
+	val other = _query_packet("SELECT 1");
+	val combined = _concat(&commit, &other);
+	val result = framing.feed_and_locate_commits(&mut f, &combined, combined.len);
+	if result.commits != 1 { return 801; }
+	if result.commit_ends.len != 1 { return 802; }
+	match result.commit_ends.get(0) {
+		Optional::Some(end_off) => { if *end_off != commit.len { return 803; } },
+		Optional::None => { return 804; }
+	}
+	return 0;
+}
+
 // Non-COMMIT queries are never matched.
 fn scenario_non_commit() nothrow -> Int {
 	var f = framing.new_framer();
@@ -191,5 +211,7 @@ pub fn main() nothrow -> Int {
 	if g != 0 { return g; }
 	val h = scenario_oversized_realign();
 	if h != 0 { return h; }
+	val i = scenario_locate_coalesced_commit_then_other();
+	if i != 0 { return i; }
 	return 0;
 }

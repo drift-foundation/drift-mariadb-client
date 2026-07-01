@@ -23,8 +23,10 @@ import std.core as core;
 
 export {
 	PacketFramer,
+	CommitFeedResult,
 	new_framer,
-	feed_and_count_commits
+	feed_and_count_commits,
+	feed_and_locate_commits
 };
 
 // COM_QUERY command byte (kept as Int; compared against a byte cast to Int).
@@ -87,14 +89,29 @@ fn _is_commit_payload(buf: &Array<Byte>, start: Int, len: Int) nothrow -> Bool {
 		and _ci_eq(buf[lo + 5], cast<Byte>(84));
 }
 
-// Feed the first `n` bytes of `chunk` and return how many exact-COMMIT COM_QUERY
-// packets completed within it. A streaming state machine that stays aligned:
-// bytes that do not yet form a complete packet stay buffered for the next feed
-// (split reads); multiple packets in one feed are all processed (coalesced
-// reads); and an oversized packet's payload is discarded byte-exactly via
-// `skip`, so it can never be misread as later headers or produce a false COMMIT.
-pub fn feed_and_count_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n: Int) nothrow -> Int {
+// Result of feed_and_locate_commits: how many exact-COMMIT packets completed
+// in this feed, plus the chunk-relative offset (exclusive, i.e. "one past the
+// last byte of the packet") at which EACH one ended, in order. A caller that
+// must stop forwarding right at a specific COMMIT (the fault-injection path)
+// needs the offset of THAT commit, not just a count — a single TCP read can
+// in principle contain a COMMIT packet followed by later client bytes (e.g.
+// pipelining or kernel coalescing), and forwarding past the triggering
+// COMMIT would defeat the "inject precisely at COMMIT ack loss" guarantee.
+pub struct CommitFeedResult {
+	pub commits: Int,
+	pub commit_ends: Array<Int>
+}
+
+// Feed the first `n` bytes of `chunk` and report every exact-COMMIT COM_QUERY
+// packet that completed within it, with its end offset. A streaming state
+// machine that stays aligned: bytes that do not yet form a complete packet
+// stay buffered for the next feed (split reads); multiple packets in one feed
+// are all processed (coalesced reads); and an oversized packet's payload is
+// discarded byte-exactly via `skip`, so it can never be misread as later
+// headers or produce a false COMMIT.
+pub fn feed_and_locate_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n: Int) nothrow -> CommitFeedResult {
 	var commits = 0;
+	var commit_ends: Array<Int> = [];
 	var i = 0;
 	while i < n {
 		if framer.skip > 0 {
@@ -117,12 +134,24 @@ pub fn feed_and_count_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n:
 				} else {
 					val total = 4 + len;
 					if framer.buf.len == total {
-						if _is_commit_payload(&framer.buf, 4, len) { commits = commits + 1; }
+						if _is_commit_payload(&framer.buf, 4, len) {
+							commits = commits + 1;
+							// `i` is already one past the payload's last byte
+							// (pushed then incremented above), which is
+							// exactly this packet's end offset in `chunk`.
+							commit_ends.push(i);
+						}
 						_reset_buf(framer);
 					}
 				}
 			}
 		}
 	}
-	return commits;
+	return CommitFeedResult(commits = commits, commit_ends = move commit_ends);
+}
+
+// Convenience wrapper for callers that only need the count (e.g.
+// observation-only logging) and don't need per-commit offsets.
+pub fn feed_and_count_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n: Int) nothrow -> Int {
+	return feed_and_locate_commits(framer, chunk, n).commits;
 }

@@ -72,7 +72,8 @@
       "entry_point": "mariadb.failpoint.proxy::service_main",
       "modules": [
         "failpoint-proxy/src/main.drift",
-        "failpoint-proxy/src/framing.drift"
+        "failpoint-proxy/src/framing.drift",
+        "failpoint-proxy/src/control.drift"
       ]
     }
   ]
