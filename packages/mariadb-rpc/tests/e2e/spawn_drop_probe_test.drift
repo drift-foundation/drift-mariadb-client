@@ -1,0 +1,50 @@
+// PROBE (temporary): does dropping a conc.spawn VirtualThread handle in an inner
+// scope prevent the task from running? Mirrors the proxy accept loop, where the
+// per-connection handler handle was created and dropped inside a block.
+//
+// Self-verifying via a shared Arc<AtomicBool>. Exit code:
+//   0 = both the dropped-handle task and the joined task ran (drop is fine)
+//   1 = dropped-handle task did NOT run, joined task DID (drop abandons task)
+//   2 = neither ran (spawn broken)
+//   3 = only the dropped one ran (unexpected)
+module mariadb.rpc.tests.e2e.spawn_drop_probe_test;
+
+import std.core as core;
+import std.concurrent as conc;
+import std.sync as sync;
+
+fn _spawn_and_drop(flag: conc.Arc<conc.AtomicBool>) nothrow -> Void {
+	var f = move flag;
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move f) => {
+		f.get().store(true, sync.MemoryOrder::Release());
+		return 0;
+	});
+	val _vt: conc.VirtualThread<Int> = conc.spawn(move cb);
+	// _vt drops here (end of scope), before the caller gives it time to run.
+	return;
+}
+
+fn _spawn_and_join(flag: conc.Arc<conc.AtomicBool>) nothrow -> Void {
+	var f = move flag;
+	var cb: core.Callback0<Int> = core.callback0(| | captures(move f) => {
+		f.get().store(true, sync.MemoryOrder::Release());
+		return 0;
+	});
+	var vt: conc.VirtualThread<Int> = conc.spawn(move cb);
+	val _ = vt.join();
+	return;
+}
+
+pub fn main() nothrow -> Int {
+	val flag_a = conc.arc(conc.atomic_bool(false));
+	val flag_b = conc.arc(conc.atomic_bool(false));
+	_spawn_and_drop(flag_a.clone());
+	conc.sleep(conc.Duration(millis = 500));
+	_spawn_and_join(flag_b.clone());
+	val a_ran = flag_a.get().load(sync.MemoryOrder::Acquire());
+	val b_ran = flag_b.get().load(sync.MemoryOrder::Acquire());
+	if a_ran and b_ran { return 0; }
+	if (not a_ran) and b_ran { return 1; }
+	if (not a_ran) and (not b_ran) { return 2; }
+	return 3;
+}

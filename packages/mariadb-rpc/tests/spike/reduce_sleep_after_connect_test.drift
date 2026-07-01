@@ -303,7 +303,7 @@ fn l3_full_rpc_connect() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	// Narrowing scenarios FIRST — earlier scenarios appear to "warm up" the
 	// runtime and mask the bug. Running these first preserves the pristine
 	// state in which the trigger reproduces.

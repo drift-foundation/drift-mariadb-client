@@ -163,7 +163,7 @@ fn scenario_tx_roundtrip() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_query_skip_and_commit();
 	if a != 0 { return a; }
 	val b = scenario_drop_auto_drain();

@@ -133,7 +133,7 @@ fn scenario_server_missing_connect_with_db() nothrow -> Int {
 	return 0;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_required_flags_forced();
 	if a != 0 { return a; }
 	val b = scenario_database_flag_conditional();

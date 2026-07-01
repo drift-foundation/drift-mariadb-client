@@ -290,6 +290,6 @@ fn _run_all() nothrow -> Int {
 	return 0;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	return _run_all();
 }

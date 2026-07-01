@@ -101,7 +101,7 @@ fn expect_handshake_auth_nul_tag() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_constant_values();
 	if a != 0 { return a; }
 	val b = expect_ok_error_tag();

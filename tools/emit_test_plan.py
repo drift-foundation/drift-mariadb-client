@@ -54,6 +54,7 @@ DB_GROUP = "mariadb-mdb114-a"
 UNIT_ROOTS = [
     ("mariadb-wire-proto", "packages/mariadb-wire-proto/tests/unit"),
     ("mariadb-rpc", "packages/mariadb-rpc/tests/unit"),
+    ("mariadb-failpoint-proxy", "failpoint-proxy/tests/unit"),
 ]
 
 # Live/e2e lists — CURATED and ORDERED (order is significant: serial on the DB).
@@ -154,8 +155,10 @@ def build_context(artifact):
 
 
 def is_test_entry(rel):
+    # drift >= 0.33.67 requires the --entry target to be `pub`, so `main` may be
+    # declared `pub fn main` (older tests still use bare `fn main`).
     txt = (ROOT / rel).read_text(errors="ignore")
-    return bool(re.search(r"^module\s+", txt, re.M)) and bool(re.search(r"^fn\s+main\(", txt, re.M))
+    return bool(re.search(r"^module\s+", txt, re.M)) and bool(re.search(r"^(?:pub\s+)?fn\s+main\(", txt, re.M))
 
 
 def module_of(rel):
@@ -296,13 +299,39 @@ def emit_compile(rel):
     return {"name": "compile", "phases": [{"name": "compile", "jobs": [{"id": "compile-check", "cmd": cmd}]}]}
 
 
+def emit_app(app_name):
+    """Build-only plan for a kind:app artifact FROM LOCAL SOURCE — no deploy,
+    signing, or publishing. Sources + deps come from drift/manifest.json; the
+    entry symbol is the artifact's entry_point. Output binary lands at
+    {work}/<app_name>; the caller copies it out to a persistent path."""
+    manifest = json.loads(MANIFEST.read_text())
+    art = {a["name"]: a for a in manifest.get("artifacts", [])}.get(app_name)
+    if not art:
+        sys.exit(f"error: artifact {app_name!r} not in manifest")
+    if art.get("kind") != "app":
+        sys.exit(f"error: artifact {app_name!r} is not kind:app")
+    entry = art.get("entry_point")
+    if not entry:
+        sys.exit(f"error: app {app_name!r} has no entry_point in the manifest")
+    srcs, dep_flags = build_context(app_name)
+    out = f"{{work}}/{app_name}"
+    cmd = ["{driftc}", "--target-word-bits", TWB] + dep_flags + ["--entry", entry] + srcs + ["-o", out]
+    job = {"id": app_name, "out": out, "cmd": cmd}
+    return {"name": "app", "phases": [{"name": "build", "jobs": [job]}]}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Emit a drift_test_run.py plan for a mariadb-client gate.")
-    ap.add_argument("gate", choices=["test", "stress", "perf", "one", "compile"])
+    ap.add_argument("gate", choices=["test", "stress", "perf", "one", "compile", "app"])
     ap.add_argument("--file", help="test/source file (for one|compile)")
+    ap.add_argument("--app", help="app artifact name (for app)")
     ap.add_argument("--out", default="-", help="output path for the plan JSON (default: stdout)")
     args = ap.parse_args()
-    if args.gate in ("one", "compile"):
+    if args.gate == "app":
+        if not args.app:
+            sys.exit("error: --app required for app")
+        plan = emit_app(args.app)
+    elif args.gate in ("one", "compile"):
         if not args.file:
             sys.exit("error: --file required for one|compile")
         plan = emit_one(args.file) if args.gate == "one" else emit_compile(args.file)

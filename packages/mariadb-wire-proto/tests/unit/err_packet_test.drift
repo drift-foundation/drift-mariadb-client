@@ -79,7 +79,7 @@ fn expect_truncated_sql_state() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_decode_with_sqlstate();
 	if a != 0 { return a; }
 	val b = expect_decode_without_sqlstate();

@@ -102,7 +102,7 @@ fn _expect_err_packet_unknown_database() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = _expect_version_resultset();
 	if a != 0 { return a; }
 	val b = _expect_err_packet_unknown_database();

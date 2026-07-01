@@ -37,7 +37,7 @@ fn _connect_err_code(e: &rpc.RpcError) nothrow -> Int {
 	return 119;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	match _cfg() {
 		core.Result::Err(_) => { return 100; },
 		core.Result::Ok(c) => {

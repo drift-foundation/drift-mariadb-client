@@ -92,7 +92,7 @@ fn expect_handshake_truncated() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_handshake_decode_ok();
 	if a != 0 { return a; }
 	val b = expect_handshake_truncated();

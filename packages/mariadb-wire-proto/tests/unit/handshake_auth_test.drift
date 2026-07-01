@@ -46,7 +46,7 @@ fn expect_encode_without_database() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_encode_with_database();
 	if a != 0 { return a; }
 	val b = expect_encode_without_database();

@@ -220,7 +220,7 @@ fn _expect_sp_multi_resultset() nothrow -> Int {
 	return 0;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = _expect_sp_ping_resultset();
 	if a != 0 { return a; }
 	val b = _expect_sp_rows_resultset();

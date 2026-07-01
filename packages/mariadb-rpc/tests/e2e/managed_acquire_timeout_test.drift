@@ -44,7 +44,7 @@ fn _release_lease(lease: managed.LeasedConn) nothrow -> Void {
 	return;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== managed_acquire_timeout_test ===");
 	match _build_cfg() {
 		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },

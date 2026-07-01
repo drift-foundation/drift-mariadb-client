@@ -117,7 +117,7 @@ fn _expect_tx_error_then_rollback_chain() nothrow -> Int {
 	return 0;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = _expect_tx_commit_chain();
 	if a != 0 { return a; }
 	val b = _expect_tx_rollback_chain();

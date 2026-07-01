@@ -164,7 +164,7 @@ fn scenario_observed_keepalive() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== live_managed_smoke_test ===");
 	val a = scenario_lifecycle();
 	if a != 0 { return a; }

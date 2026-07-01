@@ -86,7 +86,7 @@ fn scenario_zero_expected_with_empty_input_ok() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_exact_len_ok();
 	if a != 0 { return a; }
 	val b = scenario_short_input_err();

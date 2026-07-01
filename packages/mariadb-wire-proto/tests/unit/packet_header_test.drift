@@ -70,7 +70,7 @@ fn expect_payload_len_bounds_error() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_ok_roundtrip();
 	if a != 0 { return a; }
 	val b = expect_short_decode_error();

@@ -29,7 +29,7 @@ fn _spawn(c: conc.Arc<conc.Mutex<Counter> >, stop: conc.Arc<conc.AtomicBool>) no
 	return conc.spawn(move cb);
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	var counter: conc.Arc<conc.Mutex<Counter> > = conc.arc(conc.mutex(Counter(n = 0)));
 	var stop: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
 	var vt: conc.VirtualThread<Int> = _spawn(counter.clone(), stop.clone());

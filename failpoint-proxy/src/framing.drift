@@ -1,0 +1,128 @@
+// Client->server MariaDB packet reassembly for the forwarding path.
+//
+// Reassembles wire packets from a byte stream that may be split or coalesced
+// across TCP reads, and reports client command packets whose payload is exactly
+// `COM_QUERY "COMMIT"`. This is OBSERVATION ONLY — the forwarding path passes
+// bytes through byte-for-byte; nothing here rewrites the stream.
+//
+// MariaDB packet framing: a 4-byte header (3-byte little-endian payload length +
+// 1-byte sequence id) followed by `length` payload bytes. A COM_QUERY packet has
+// payload[0] == 0x03 and the rest is SQL text. A COMMIT is a single tiny packet
+// (payload = 0x03 + "COMMIT"), so no multi-packet command reassembly is needed
+// to detect it.
+//
+// TLS/compression assumption: this framing is only valid while the client speaks
+// plaintext, uncompressed MariaDB protocol — which the mariadb-wire-proto client
+// does (REQUIRED_CAPS excludes CLIENT_SSL and CLIENT_COMPRESS, and there is no
+// TLS/compression implementation). If either is ever negotiated, COM_QUERY bytes
+// would be encrypted/compressed and this detector must be revisited. The proxy
+// never rewrites handshake capability flags, so it cannot mask that change.
+module mariadb.failpoint.proxy.framing;
+
+import std.core as core;
+
+export {
+	PacketFramer,
+	new_framer,
+	feed_and_count_commits
+};
+
+// COM_QUERY command byte (kept as Int; compared against a byte cast to Int).
+const COM_QUERY: Int = 3;
+// Any packet whose declared payload exceeds this cannot be a COMMIT (payload 7),
+// so its payload is skipped byte-exactly rather than buffered. This bounds the
+// framer's memory to ~MAX_OBSERVE_PAYLOAD+4 and — crucially — keeps the parser
+// aligned: an oversized packet's payload is discarded via `skip`, never
+// reinterpreted as later packet headers (which could otherwise false-match a
+// COMMIT). Comfortably larger than COMMIT while still bounded.
+const MAX_OBSERVE_PAYLOAD: Int = 4096;
+
+pub struct PacketFramer {
+	// Bytes accumulated toward the current small packet (header, then payload).
+	buf: Array<Byte>,
+	// Remaining payload bytes to discard for an in-progress oversized packet.
+	skip: Int
+}
+
+pub fn new_framer() nothrow -> PacketFramer {
+	var b: Array<Byte> = [];
+	return PacketFramer(buf = move b, skip = 0);
+}
+
+fn _reset_buf(framer: &mut PacketFramer) nothrow -> Void {
+	var e: Array<Byte> = [];
+	framer.buf = move e;
+}
+
+fn _is_ws(b: Byte) nothrow -> Bool {
+	return b == cast<Byte>(32) or b == cast<Byte>(9) or b == cast<Byte>(10) or b == cast<Byte>(13);
+}
+
+// Case-insensitive compare of an ASCII byte against an uppercase letter.
+fn _ci_eq(b: Byte, upper: Byte) nothrow -> Bool {
+	return b == upper or b == cast<Byte>(cast<Int>(upper) + 32);
+}
+
+// True if the packet payload at buf[start .. start+len) is COM_QUERY whose SQL,
+// trimmed of surrounding whitespace and an optional single trailing ';', equals
+// "COMMIT" case-insensitively. Exact match only — "COMMIT WORK", multi-statement
+// text, etc. are intentionally not matched (see PLAN.md §9).
+fn _is_commit_payload(buf: &Array<Byte>, start: Int, len: Int) nothrow -> Bool {
+	if len < 1 { return false; }
+	if cast<Int>(buf[start]) != COM_QUERY { return false; }
+	var lo = start + 1;
+	var hi = start + len;
+	while lo < hi and _is_ws(buf[lo]) { lo = lo + 1; }
+	while hi > lo and _is_ws(buf[hi - 1]) { hi = hi - 1; }
+	if hi > lo and buf[hi - 1] == cast<Byte>(59) {
+		hi = hi - 1;
+		while hi > lo and _is_ws(buf[hi - 1]) { hi = hi - 1; }
+	}
+	if hi - lo != 6 { return false; }
+	return _ci_eq(buf[lo], cast<Byte>(67))
+		and _ci_eq(buf[lo + 1], cast<Byte>(79))
+		and _ci_eq(buf[lo + 2], cast<Byte>(77))
+		and _ci_eq(buf[lo + 3], cast<Byte>(77))
+		and _ci_eq(buf[lo + 4], cast<Byte>(73))
+		and _ci_eq(buf[lo + 5], cast<Byte>(84));
+}
+
+// Feed the first `n` bytes of `chunk` and return how many exact-COMMIT COM_QUERY
+// packets completed within it. A streaming state machine that stays aligned:
+// bytes that do not yet form a complete packet stay buffered for the next feed
+// (split reads); multiple packets in one feed are all processed (coalesced
+// reads); and an oversized packet's payload is discarded byte-exactly via
+// `skip`, so it can never be misread as later headers or produce a false COMMIT.
+pub fn feed_and_count_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n: Int) nothrow -> Int {
+	var commits = 0;
+	var i = 0;
+	while i < n {
+		if framer.skip > 0 {
+			// Discarding an oversized packet's payload; consume as much of this
+			// chunk as the remaining skip allows, without buffering.
+			var take = framer.skip;
+			val avail = n - i;
+			if avail < take { take = avail; }
+			i = i + take;
+			framer.skip = framer.skip - take;
+		} else {
+			framer.buf.push(chunk[i]);
+			i = i + 1;
+			if framer.buf.len >= 4 {
+				val len = cast<Int>(framer.buf[0]) + (cast<Int>(framer.buf[1]) * 256) + (cast<Int>(framer.buf[2]) * 65536);
+				if framer.buf.len == 4 and len > MAX_OBSERVE_PAYLOAD {
+					// Oversized: header seen; discard the payload via skip, stay aligned.
+					framer.skip = len;
+					_reset_buf(framer);
+				} else {
+					val total = 4 + len;
+					if framer.buf.len == total {
+						if _is_commit_payload(&framer.buf, 4, len) { commits = commits + 1; }
+						_reset_buf(framer);
+					}
+				}
+			}
+		}
+	}
+	return commits;
+}

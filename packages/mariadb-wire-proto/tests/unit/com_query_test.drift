@@ -37,7 +37,7 @@ fn expect_empty_query() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_basic_encode();
 	if a != 0 { return a; }
 	val b = expect_empty_query();

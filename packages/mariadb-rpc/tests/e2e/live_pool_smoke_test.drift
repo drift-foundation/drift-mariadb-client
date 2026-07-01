@@ -34,7 +34,7 @@ fn _build_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigErr
 	return rpc.build_connection_config(move b);
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== live_pool_smoke_test: open/close only ===");
 	match _build_cfg() {
 		core.Result::Err(_) => { return 1; },

@@ -207,7 +207,7 @@ fn scenario_c_prime_with_join() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_a_baseline();
 	if a != 0 { return a; }
 	val b = scenario_b_production();

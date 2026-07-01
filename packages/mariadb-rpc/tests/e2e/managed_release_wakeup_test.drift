@@ -76,7 +76,7 @@ fn _waiter(shared: conc.Arc<conc.Mutex<managed.ManagedConnection> >, ready: conc
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== managed_release_wakeup_test ===");
 	match _build_cfg() {
 		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },

@@ -129,7 +129,7 @@ fn _expect_server_error_decode_path() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = _expect_handshake_path();
 	if a != 0 { return a; }
 	val b = _expect_com_query_success_path();

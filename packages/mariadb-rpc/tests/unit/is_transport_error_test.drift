@@ -67,7 +67,7 @@ fn scenario_prefix_without_dash_not_transport() nothrow -> Int {
 	return 0;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_wire_connect_failed_is_transport();
 	if a != 0 { return a; }
 	val b = scenario_wire_query_failed_is_transport();

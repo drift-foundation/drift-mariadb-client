@@ -17,7 +17,7 @@ const PASSWORD: String = "rootpw";
 const DB: String = "appdb";
 const TIMEOUT_MS: Int = 1000;
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	// Probe: does one baseline sleep BEFORE any I/O prime the runtime?
 	val tp = time.now_monotonic();
 	val _ = conc.sleep(conc.Duration(millis = 50));

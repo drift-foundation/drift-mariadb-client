@@ -104,7 +104,7 @@ fn _scenario_rebind() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = _scenario_direct();
 	if a != 0 { return a; }
 	val b = _scenario_passthrough();

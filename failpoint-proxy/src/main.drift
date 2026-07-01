@@ -1,27 +1,375 @@
 // mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy.
 //
-// Sits transparently between a MariaDB client (e.g. bookkeeper's pool) and a
-// real MariaDB server, forwarding the wire protocol byte-for-byte. A raw-TCP
-// JSON-Lines control plane arms one-shot failpoints that deterministically
-// inject an AMBIGUOUS COMMIT outcome: the full COMMIT is forwarded to the
-// server (which may durably commit), then the server's acknowledgement is
-// swallowed and both sockets are closed, so the client sees a transport read
-// failure with no clean ack — the "did it commit?" boundary that exactly-once
-// recovery must survive.
+// Slice 1 (this file): transparent bidirectional forwarding between a MariaDB
+// client and a real MariaDB server, plus client->server packet framing that can
+// observe an exact `COMMIT` without matching raw TCP chunks. No fault injection
+// and no control plane yet — those are later slices.
 //
-// This is a kind:app artifact built and certified from this repo, consumed by
-// app test harnesses as an external process (it slots in like uflowsd). It is
-// NOT a production component: arming lives entirely outside any app binary, and
-// neither bookkeeper nor production mariadb-rpc contains an arming API.
+// Logging: structured JSON Lines via the stdlib logger (std.log), matching the
+// house style (string-valued attrs). Low-noise and structured — NEVER logs raw
+// SQL, auth bytes, or packet payloads; only event names, ids, coarse reasons,
+// and byte/commit counts. Slice-1 events: proxy_start, client_accept,
+// backend_connect, commit_observed, conn_close. Later slices reuse the same
+// style for failpoint_arm / failpoint_fire / failpoint_clear /
+// server_response_dropped.
+//
+// It is a kind:app artifact built and certified from this repo, consumed by app
+// test harnesses as an external process (it slots in like uflowsd). NOT a
+// production component: arming will live entirely outside any app binary.
+//
+// TLS/compression: bytes are forwarded verbatim and handshake capability flags
+// are never rewritten. Framing (see framing.drift) is valid only while the
+// client speaks plaintext, uncompressed MariaDB protocol (which the
+// mariadb-wire-proto client does). No protocol rewriting is performed.
 //
 // See work/mariadb-rpc-failpoints/PLAN.md for the full design.
 module mariadb.failpoint.proxy;
 
 import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import std.format as format;
+import std.parse as parse;
+import std.text as text;
+import std.log as log;
+import mariadb.failpoint.proxy.framing as framing;
+
+const DATA_HOST_DEFAULT: String = "127.0.0.1";
+const DATA_PORT_DEFAULT: Int = 43306;
+const BACKEND_HOST_DEFAULT: String = "127.0.0.1";
+const BACKEND_PORT_DEFAULT: Int = 3306;
+const CONTROL_HOST_DEFAULT: String = "127.0.0.1";
+const CONTROL_PORT_DEFAULT: Int = 43307;
+
+const CHUNK: Int = 16384;
+const LISTEN_TIMEOUT_MS: Int = 5000;
+const ACCEPT_TIMEOUT_MS: Int = 3600000;
+const CONNECT_TIMEOUT_MS: Int = 5000;
+const CLOSE_TIMEOUT_MS: Int = 1000;
+// Long read timeout: reads retry on WOULD_BLOCK so an idle-but-open connection
+// is never torn down on a timeout; teardown happens on EOF or a real error.
+const IO_TIMEOUT_MS: Int = 60000;
+const ACCEPT_BACKOFF_MS: Int = 100;
+
+// Outcome of one forwarding direction. `reason` is a coarse bucket
+// ("eof" | "read-error" | "write-error"); `bytes` is total forwarded; `commits`
+// is exact-COMMITs observed (client->server only).
+struct PumpResult {
+	reason: String,
+	bytes: Int,
+	commits: Int
+}
+
+fn _dur(ms: Int) nothrow -> conc.Duration {
+	if ms <= 0 { return conc.Duration(millis = 1); }
+	return conc.Duration(millis = ms);
+}
+
+fn _bool_str(b: Bool) nothrow -> String {
+	if b { return "true"; }
+	return "false";
+}
+
+fn _hostport(host: String, port: Int) nothrow -> String {
+	return host + ":" + format.format_int(port);
+}
+
+fn _make_logger() nothrow -> log.Logger {
+	var b = log.config_builder();
+	b.min_level(log.Level::Info());
+	b.sink(log.stderr_sink());
+	return log.create_logger("failpoint-proxy", b.build());
+}
+
+// argv lookup outcome for a `--key value` flag.
+variant _ArgLookup {
+	Absent,
+	MissingValue,
+	Found(value: String)
+}
+
+fn _looks_like_flag(s: &String) nothrow -> Bool {
+	val prefix = "--";
+	return text.starts_with(s, &prefix);
+}
+
+// Find `key` in argv and return its following value. A flag present as the last
+// token, or immediately followed by another `--flag`, is MissingValue — the
+// value was omitted — so callers fail fast rather than silently defaulting.
+fn _lookup_arg(argv: &Array<String>, key: String) nothrow -> _ArgLookup {
+	var i = 0;
+	while i < argv.len {
+		if argv[i] == key {
+			if i + 1 >= argv.len { return _ArgLookup::MissingValue(); }
+			val nxt = argv[i + 1];
+			if _looks_like_flag(&nxt) { return _ArgLookup::MissingValue(); }
+			return _ArgLookup::Found(nxt);
+		}
+		i = i + 1;
+	}
+	return _ArgLookup::Absent();
+}
+
+// Resolve a string flag. Absent -> Ok(dflt). Present with no value -> Err(key).
+fn _arg_value(argv: &Array<String>, key: String, dflt: String) nothrow -> core.Result<String, String> {
+	match _lookup_arg(argv, key) {
+		_ArgLookup::Absent => { return core.Result::Ok(dflt); },
+		_ArgLookup::MissingValue => { return core.Result::Err(key); },
+		_ArgLookup::Found(v) => { return core.Result::Ok(v); }
+	}
+}
+
+// Resolve a port flag. Absent -> Ok(dflt). Present but missing / non-integer /
+// out of 1..65535 -> Err(key): a fault-injection proxy must fail fast on a bad
+// port rather than silently bind/forward to a default.
+fn _arg_port(argv: &Array<String>, key: String, dflt: Int) nothrow -> core.Result<Int, String> {
+	match _lookup_arg(argv, key) {
+		_ArgLookup::Absent => { return core.Result::Ok(dflt); },
+		_ArgLookup::MissingValue => { return core.Result::Err(key); },
+		_ArgLookup::Found(v) => {
+			match parse.parse_int(v) {
+				core.Result::Ok(p) => {
+					if p < 1 or p > 65535 { return core.Result::Err(key); }
+					return core.Result::Ok(p);
+				},
+				core.Result::Err(_) => { return core.Result::Err(key); }
+			}
+		}
+	}
+}
+
+// Close both sockets of a client<->backend pair. Idempotent in effect: a second
+// close on an already-closed fd just errors and is ignored. Called by WHICHEVER
+// forwarding direction ends first, so the other direction's blocked read
+// unblocks (with Errno) and the whole connection tears down — never one-sided.
+fn _close_pair(a: &conc.Arc<net.TcpStream>, b: &conc.Arc<net.TcpStream>) nothrow -> Void {
+	val _ = a.get().close(_dur(CLOSE_TIMEOUT_MS));
+	val _ = b.get().close(_dur(CLOSE_TIMEOUT_MS));
+}
+
+// Copy the first `n` bytes of a read buffer into an Array<Byte>. Reused for both
+// forwarding (write_bytes) and framing, so the read is copied out exactly once.
+fn _buf_to_array(buf: &mut io.Buffer, n: Int) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < n {
+		out.push(io.buffer_read(buf, i));
+		i = i + 1;
+	}
+	return move out;
+}
+
+// Write all `n` bytes of `bytes` to `dst`, looping over partial writes and
+// retrying on WOULD_BLOCK. Returns false on a real write error.
+fn _forward_all(dst: &conc.Arc<net.TcpStream>, bytes: &mut Array<Byte>, n: Int) nothrow -> Bool {
+	var off = 0;
+	while off < n {
+		match dst.get().write_bytes(bytes, off, n - off, _dur(IO_TIMEOUT_MS)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return false; }
+				off = off + w;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return false; }
+			}
+		}
+	}
+	return true;
+}
+
+// Server->client: pass bytes through verbatim. Returns the coarse reason and
+// byte count when the source EOFs or a socket errors.
+fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>) nothrow -> PumpResult {
+	var total = 0;
+	while true {
+		var buf = io.buffer(CHUNK);
+		match src.get().read(&mut buf, _dur(IO_TIMEOUT_MS)) {
+			core.Result::Ok(n) => {
+				if n <= 0 { return PumpResult(reason = "eof", bytes = total, commits = 0); }
+				var bytes = _buf_to_array(&mut buf, n);
+				if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = 0); }
+				total = total + n;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return PumpResult(reason = "read-error", bytes = total, commits = 0); }
+			}
+		}
+	}
+	return PumpResult(reason = "eof", bytes = total, commits = 0);
+}
+
+// Client->server: pass bytes through verbatim AND feed them to the packet framer
+// so exact COMMITs can be observed. Emits one commit_observed event per COMMIT
+// (with a per-connection ordinal). Slice 1 only observes; the fault action is a
+// later slice.
+fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, logger: &log.Logger, conn_id: Int) nothrow -> PumpResult {
+	var framer = framing.new_framer();
+	var total = 0;
+	var commits = 0;
+	while true {
+		var buf = io.buffer(CHUNK);
+		match src.get().read(&mut buf, _dur(IO_TIMEOUT_MS)) {
+			core.Result::Ok(n) => {
+				if n <= 0 { return PumpResult(reason = "eof", bytes = total, commits = commits); }
+				var bytes = _buf_to_array(&mut buf, n);
+				val c = framing.feed_and_count_commits(&mut framer, &bytes, n);
+				var k = 0;
+				while k < c {
+					commits = commits + 1;
+					logger.info("commit_observed", {"conn_id": format.format_int(conn_id), "ordinal": format.format_int(commits)});
+					k = k + 1;
+				}
+				if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = commits); }
+				total = total + n;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return PumpResult(reason = "read-error", bytes = total, commits = commits); }
+			}
+		}
+	}
+	return PumpResult(reason = "eof", bytes = total, commits = commits);
+}
+
+// One client connection: dial the backend, then forward both directions.
+// Server->client runs on a spawned (joined) vthread; client->server (with
+// framing) runs inline. When either direction ends, both fds are closed so the
+// other's blocked read unblocks, then the spawned direction is joined and a
+// single conn_close event summarises the connection.
+fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_port: Int, logger: &log.Logger, conn_id: Int) nothrow -> Int {
+	val baddr = net.socket_addr(backend_host, backend_port);
+	match net.connect(&baddr, _dur(CONNECT_TIMEOUT_MS)) {
+		core.Result::Err(_) => {
+			var cs = move client_stream;
+			val _ = cs.close(_dur(CLOSE_TIMEOUT_MS));
+			logger.info("backend_connect", {"conn_id": format.format_int(conn_id), "backend": _hostport(backend_host, backend_port), "ok": _bool_str(false)});
+			return 1;
+		},
+		core.Result::Ok(s) => {
+			logger.info("backend_connect", {"conn_id": format.format_int(conn_id), "backend": _hostport(backend_host, backend_port), "ok": _bool_str(true)});
+			var server_stream = move s;
+			val client_arc = conc.arc(move client_stream);
+			val server_arc = conc.arc(move server_stream);
+
+			var s_for_s2c = server_arc.clone();
+			var c_for_s2c = client_arc.clone();
+			var s2c_cb: core.Callback0<PumpResult> = core.callback0(| | captures(move s_for_s2c, move c_for_s2c) => {
+				val r = _pump_passthrough(&s_for_s2c, &c_for_s2c);
+				_close_pair(&s_for_s2c, &c_for_s2c);
+				return r;
+			});
+			var s2c_vt: conc.VirtualThread<PumpResult> = conc.spawn(move s2c_cb);
+
+			val c2s = _pump_client_to_server(&client_arc, &server_arc, logger, conn_id);
+			_close_pair(&client_arc, &server_arc);
+
+			var s2c = PumpResult(reason = "eof", bytes = 0, commits = 0);
+			match s2c_vt.join() {
+				core.Result::Ok(r) => { s2c = r; },
+				core.Result::Err(_) => {}
+			}
+
+			// Coarse "first closer": a clean client EOF on c2s means the client
+			// closed first; otherwise c2s failed because s2c tore the pair down.
+			var first = "c2s";
+			var reason = c2s.reason;
+			if c2s.reason != "eof" {
+				first = "s2c";
+				reason = s2c.reason;
+			}
+			logger.info("conn_close", {"conn_id": format.format_int(conn_id), "first": first, "reason": reason, "bytes_c2s": format.format_int(c2s.bytes), "bytes_s2c": format.format_int(s2c.bytes), "commits": format.format_int(c2s.commits)});
+			return 0;
+		}
+	}
+}
+
+// Accept loop: one detached handler vthread per accepted client, so connections
+// are served concurrently. Dropping the spawn handle no longer cancels the
+// submitted task (drift >= 0.33.67 / abi19); explicit cancel() is the
+// cancellation path. The handler gets its own cloned Logger (a borrow can't
+// cross into a detached closure). conn_id is assigned on this single accept
+// vthread, so the counter needs no synchronization.
+fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: Int, logger: &log.Logger) nothrow -> Int {
+	var next_conn_id = 0;
+	while true {
+		match listener.accept(_dur(ACCEPT_TIMEOUT_MS)) {
+			core.Result::Ok(cs) => {
+				next_conn_id = next_conn_id + 1;
+				val conn_id = next_conn_id;
+				var client_stream = move cs;
+				var client = "unknown";
+				match client_stream.peer_addr() {
+					core.Result::Ok(pa) => { client = pa.ip + ":" + format.format_int(pa.port); },
+					core.Result::Err(_) => {}
+				}
+				logger.info("client_accept", {"conn_id": format.format_int(conn_id), "client": client});
+				var logger_for_handler = logger.derive("failpoint-proxy").build();
+				var handler_cb: core.Callback0<Int> = core.callback0(| | captures(move client_stream, move logger_for_handler, copy backend_host, copy backend_port, copy conn_id) => {
+					return _handle_client(move client_stream, backend_host, backend_port, &logger_for_handler, conn_id);
+				});
+				val _ = conc.spawn(move handler_cb);
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+					logger.error("accept_error", {"kind": e.kind});
+					conc.sleep(_dur(ACCEPT_BACKOFF_MS));
+				}
+			}
+		}
+	}
+	return 0;
+}
 
 // Entry point (referenced from drift/manifest.json as
-// mariadb.failpoint.proxy::service_main). Scaffold: returns 0. Networking and
-// the control plane are added in subsequent slices.
-fn service_main(argv: Array<String>) nothrow -> Int {
-	return 0;
+// mariadb.failpoint.proxy::service_main).
+pub fn service_main(argv: Array<String>) nothrow -> Int {
+	val logger = _make_logger();
+
+	var data_host = "";
+	match _arg_value(&argv, "--data-host", DATA_HOST_DEFAULT) {
+		core.Result::Ok(v) => { data_host = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--data-host", "why": "requires-value"}); return 2; }
+	}
+	var backend_host = "";
+	match _arg_value(&argv, "--backend-host", BACKEND_HOST_DEFAULT) {
+		core.Result::Ok(v) => { backend_host = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--backend-host", "why": "requires-value"}); return 2; }
+	}
+	var control_host = "";
+	match _arg_value(&argv, "--control-host", CONTROL_HOST_DEFAULT) {
+		core.Result::Ok(v) => { control_host = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--control-host", "why": "requires-value"}); return 2; }
+	}
+	var data_port = 0;
+	match _arg_port(&argv, "--data-port", DATA_PORT_DEFAULT) {
+		core.Result::Ok(v) => { data_port = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--data-port", "why": "want-int-1-65535"}); return 2; }
+	}
+	var backend_port = 0;
+	match _arg_port(&argv, "--backend-port", BACKEND_PORT_DEFAULT) {
+		core.Result::Ok(v) => { backend_port = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--backend-port", "why": "want-int-1-65535"}); return 2; }
+	}
+	var control_port = 0;
+	match _arg_port(&argv, "--control-port", CONTROL_PORT_DEFAULT) {
+		core.Result::Ok(v) => { control_port = v; },
+		core.Result::Err(_) => { logger.error("bad_arg", {"flag": "--control-port", "why": "want-int-1-65535"}); return 2; }
+	}
+
+	val addr = net.socket_addr(data_host, data_port);
+	match net.listen(&addr, _dur(LISTEN_TIMEOUT_MS)) {
+		core.Result::Err(_) => {
+			logger.error("listen_failed", {"data_host": data_host, "data_port": format.format_int(data_port)});
+			return 1;
+		},
+		core.Result::Ok(l) => {
+			var listener = move l;
+			// control_host/control_port are parsed + validated now (stable CLI
+			// shape) but unused until the control-plane slice.
+			logger.info("proxy_start", {"data_host": data_host, "data_port": format.format_int(data_port), "backend_host": backend_host, "backend_port": format.format_int(backend_port), "control_host": control_host, "control_port": format.format_int(control_port)});
+			// main() runs as the root virtual thread, so socket I/O here parks on
+			// the same reactor as any spawned VT — run the accept loop directly.
+			return _accept_loop(&listener, backend_host, backend_port, &logger);
+		}
+	}
 }

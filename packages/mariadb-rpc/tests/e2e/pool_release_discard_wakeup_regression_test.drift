@@ -106,7 +106,7 @@ fn _waiter(shared: conc.Arc<conc.Mutex<pool.ConnectionPool> >, ready: conc.Arc<c
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== pool_release_discard_wakeup_regression_test ===");
 	match _build_cfg() {
 		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },

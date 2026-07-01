@@ -133,7 +133,7 @@ fn expect_invalid_utf8_error() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_int_encode_decode();
 	if a != 0 { return a; }
 	val b = expect_prefix_shapes();

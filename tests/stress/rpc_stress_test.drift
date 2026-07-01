@@ -431,7 +431,7 @@ fn _run_error_cycling() nothrow -> Int {
 	return _join_all(&mut dq);
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val rc1 = _run_connection_churn();
 	if rc1 != 0 { return rc1; }
 

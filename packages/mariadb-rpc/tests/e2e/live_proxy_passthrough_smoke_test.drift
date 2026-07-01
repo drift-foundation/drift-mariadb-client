@@ -1,0 +1,92 @@
+// Slice-1 live pass-through smoke: drives the real mariadb-rpc client through the
+// failpoint proxy and proves connect/auth/query/commit all traverse it unchanged.
+//
+// MANUAL — not in the gate's curated LIVE_TESTS. It requires the proxy running in
+// front of the dev DB:
+//   just build-app mariadb-failpoint-proxy
+//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 &
+//   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_passthrough_smoke_test.drift
+//
+// Connects to the PROXY port (43306), not the DB directly. Exit 0 means the full
+// connect->auth->query->COMMIT round-trip passed through the proxy; the proxy's
+// own stderr shows one JSON Lines event with ev:"commit_observed".
+module mariadb.rpc.tests.e2e.live_proxy_passthrough_smoke_test;
+
+import std.core as core;
+import mariadb.rpc as rpc;
+
+const PROXY_HOST: String = "127.0.0.1";
+const PROXY_PORT: Int = 43306;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const LIVE_TIMEOUT_MS: Int = 2000;
+
+fn _cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(PROXY_HOST);
+	b.with_port(PROXY_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_read_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_write_timeout_ms(LIVE_TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+pub fn main() nothrow -> Int {
+	match _cfg() {
+		core.Result::Err(_) => { return 10; },
+		core.Result::Ok(cfg) => {
+			var config = move cfg;
+			// connect + handshake/auth through the proxy
+			match rpc.connect(move config) {
+				core.Result::Err(_) => { return 11; },
+				core.Result::Ok(c) => {
+					var conn = move c;
+					// a query (stored-proc call) through the proxy
+					var args: Array<rpc.RpcArg> = [];
+					args.push(rpc.arg_int(1));
+					args.push(rpc.arg_int(2));
+					match conn.call(&"sp_add", &args) {
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 12; },
+						core.Result::Ok(s) => {
+							var stmt = move s;
+							var saw_sum = false;
+							while true {
+								match stmt.next_event() {
+									core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 13; },
+									core.Result::Ok(ev) => {
+										match ev {
+											rpc.RpcEvent::Row(row) => {
+												match row.get_int(0) {
+													core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 14; },
+													core.Result::Ok(v) => { if v == 3 { saw_sum = true; } }
+												}
+											},
+											rpc.RpcEvent::ResultSetEnd => {},
+											rpc.RpcEvent::ServerErr(_) => { val _ = rpc.close(&mut conn); return 15; },
+											rpc.RpcEvent::StatementEnd(_) => { break; }
+										}
+									}
+								}
+							}
+							if not saw_sum { val _ = rpc.close(&mut conn); return 16; }
+						}
+					}
+					// COMMIT through the proxy — the boundary the whole design targets
+					match conn.commit() {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 17; }
+					}
+					val _ = rpc.close(&mut conn);
+					return 0;
+				}
+			}
+		}
+	}
+}

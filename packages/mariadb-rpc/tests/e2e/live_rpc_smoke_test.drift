@@ -348,7 +348,7 @@ fn scenario_binary_column(logger: &log.Logger) nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val logger = _make_logger();
 	val a = scenario_ping_no_args(&logger);
 	if a != 0 { return a; }

@@ -1,0 +1,195 @@
+// Proves the client->server packet framer observes an exact COMMIT correctly
+// under the read shapes a proxy actually sees: a whole packet, a packet split
+// across reads, and multiple packets coalesced into one read. Non-COMMIT queries
+// and COMMIT spelling variants (whitespace, trailing ';', case) are pinned too.
+// Pure logic — no sockets, no DB.
+module mariadb.failpoint.proxy.tests.unit.framing_test;
+
+import std.core as core;
+import mariadb.failpoint.proxy.framing as framing;
+
+// Build a single-packet COM_QUERY for `sql` (all test inputs are < 2^24 bytes).
+fn _query_packet(sql: String) nothrow -> Array<Byte> {
+	var payload: Array<Byte> = [];
+	payload.push(cast<Byte>(3));
+	var i = 0;
+	val n = sql.byte_length();
+	while i < n {
+		payload.push(core.string_byte_at(&sql, i));
+		i = i + 1;
+	}
+	val plen = payload.len;
+	var pkt: Array<Byte> = [];
+	pkt.push(cast<Byte>(plen % 256));
+	pkt.push(cast<Byte>((plen / 256) % 256));
+	pkt.push(cast<Byte>((plen / 65536) % 256));
+	pkt.push(cast<Byte>(0));
+	var j = 0;
+	while j < payload.len {
+		pkt.push(payload[j]);
+		j = j + 1;
+	}
+	return move pkt;
+}
+
+fn _sub(src: &Array<Byte>, lo: Int, hi: Int) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = lo;
+	while i < hi {
+		out.push(src[i]);
+		i = i + 1;
+	}
+	return move out;
+}
+
+fn _concat(a: &Array<Byte>, b: &Array<Byte>) nothrow -> Array<Byte> {
+	var out: Array<Byte> = [];
+	var i = 0;
+	while i < a.len { out.push(a[i]); i = i + 1; }
+	var j = 0;
+	while j < b.len { out.push(b[j]); j = j + 1; }
+	return move out;
+}
+
+fn _feed(framer: &mut framing.PacketFramer, chunk: &Array<Byte>) nothrow -> Int {
+	return framing.feed_and_count_commits(framer, chunk, chunk.len);
+}
+
+// An oversized COM_QUERY packet (payload_len bytes) whose payload is tiled with
+// real COMMIT-packet bytes. If the framer ever desynced and parsed the payload,
+// it would false-match; a correct framer skips the payload byte-exactly.
+fn _oversized_with_embedded_commits(payload_len: Int) nothrow -> Array<Byte> {
+	var pkt: Array<Byte> = [];
+	pkt.push(cast<Byte>(payload_len % 256));
+	pkt.push(cast<Byte>((payload_len / 256) % 256));
+	pkt.push(cast<Byte>((payload_len / 65536) % 256));
+	pkt.push(cast<Byte>(0));
+	val commit = _query_packet("COMMIT");
+	var written = 0;
+	while written < payload_len {
+		var k = 0;
+		while k < commit.len and written < payload_len {
+			pkt.push(commit[k]);
+			k = k + 1;
+			written = written + 1;
+		}
+	}
+	return move pkt;
+}
+
+// A whole COMMIT packet in one read -> observed once.
+fn scenario_whole_packet() nothrow -> Int {
+	var f = framing.new_framer();
+	val pkt = _query_packet("COMMIT");
+	if _feed(&mut f, &pkt) != 1 { return 101; }
+	return 0;
+}
+
+// COMMIT split across two reads (mid-header and mid-payload) -> observed once,
+// only after the completing read.
+fn scenario_split_reads() nothrow -> Int {
+	val pkt = _query_packet("COMMIT");
+	// Split inside the payload.
+	var f = framing.new_framer();
+	val a = _sub(&pkt, 0, 6);
+	val b = _sub(&pkt, 6, pkt.len);
+	if _feed(&mut f, &a) != 0 { return 201; }
+	if _feed(&mut f, &b) != 1 { return 202; }
+	// Split inside the 4-byte header (only 2 bytes first).
+	var g = framing.new_framer();
+	val c = _sub(&pkt, 0, 2);
+	val d = _sub(&pkt, 2, pkt.len);
+	if _feed(&mut g, &c) != 0 { return 203; }
+	if _feed(&mut g, &d) != 1 { return 204; }
+	return 0;
+}
+
+// Two COMMIT packets coalesced into one read -> observed twice.
+fn scenario_coalesced() nothrow -> Int {
+	var f = framing.new_framer();
+	val pkt = _query_packet("COMMIT");
+	val two = _concat(&pkt, &pkt);
+	if _feed(&mut f, &two) != 2 { return 301; }
+	return 0;
+}
+
+// A COMMIT immediately followed by the first bytes of an unrelated packet:
+// COMMIT observed now, the partial tail retained and NOT miscounted.
+fn scenario_commit_then_partial() nothrow -> Int {
+	var f = framing.new_framer();
+	val commit = _query_packet("COMMIT");
+	val other = _query_packet("SELECT 1");
+	val head = _sub(&other, 0, 3);
+	val combined = _concat(&commit, &head);
+	if _feed(&mut f, &combined) != 1 { return 401; }
+	// Complete the SELECT packet: no new COMMIT.
+	val rest = _sub(&other, 3, other.len);
+	if _feed(&mut f, &rest) != 0 { return 402; }
+	return 0;
+}
+
+// Non-COMMIT queries are never matched.
+fn scenario_non_commit() nothrow -> Int {
+	var f = framing.new_framer();
+	val q = _query_packet("SELECT 1");
+	if _feed(&mut f, &q) != 0 { return 501; }
+	val rb = _query_packet("ROLLBACK");
+	if _feed(&mut f, &rb) != 0 { return 502; }
+	// COMMIT as a substring of a larger statement must not match.
+	val cw = _query_packet("COMMIT AND CHILL");
+	if _feed(&mut f, &cw) != 0 { return 503; }
+	return 0;
+}
+
+// COMMIT spelling variants: lowercase, surrounding whitespace, trailing ';'.
+fn scenario_commit_variants() nothrow -> Int {
+	var f1 = framing.new_framer();
+	val lower = _query_packet("commit");
+	if _feed(&mut f1, &lower) != 1 { return 601; }
+	var f2 = framing.new_framer();
+	val ws = _query_packet("  COMMIT  ");
+	if _feed(&mut f2, &ws) != 1 { return 602; }
+	var f3 = framing.new_framer();
+	val semi = _query_packet("COMMIT;");
+	if _feed(&mut f3, &semi) != 1 { return 603; }
+	var f4 = framing.new_framer();
+	val mixed = _query_packet(" Commit ; ");
+	if _feed(&mut f4, &mixed) != 1 { return 604; }
+	return 0;
+}
+
+// An oversized packet's payload (tiled with COMMIT bytes), split across feeds,
+// is skipped byte-exactly and never false-matches; a real COMMIT after it still
+// realigns and is observed. Guards against the desync finding.
+fn scenario_oversized_realign() nothrow -> Int {
+	var f = framing.new_framer();
+	val big = _oversized_with_embedded_commits(5000);
+	val n = big.len;
+	val c1 = _sub(&big, 0, 2000);
+	val c2 = _sub(&big, 2000, 4000);
+	val c3 = _sub(&big, 4000, n);
+	if _feed(&mut f, &c1) != 0 { return 701; }
+	if _feed(&mut f, &c2) != 0 { return 702; }
+	if _feed(&mut f, &c3) != 0 { return 703; }
+	val commit = _query_packet("COMMIT");
+	if _feed(&mut f, &commit) != 1 { return 704; }
+	return 0;
+}
+
+pub fn main() nothrow -> Int {
+	val a = scenario_whole_packet();
+	if a != 0 { return a; }
+	val b = scenario_split_reads();
+	if b != 0 { return b; }
+	val c = scenario_coalesced();
+	if c != 0 { return c; }
+	val d = scenario_commit_then_partial();
+	if d != 0 { return d; }
+	val e = scenario_non_commit();
+	if e != 0 { return e; }
+	val g = scenario_commit_variants();
+	if g != 0 { return g; }
+	val h = scenario_oversized_realign();
+	if h != 0 { return h; }
+	return 0;
+}

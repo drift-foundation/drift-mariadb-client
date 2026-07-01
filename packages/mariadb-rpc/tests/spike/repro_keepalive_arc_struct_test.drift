@@ -47,7 +47,7 @@ fn _spawn(inner: conc.Arc<Inner>) nothrow -> conc.VirtualThread<Int> {
 	return conc.spawn(move cb);
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	var inner: conc.Arc<Inner> = conc.arc(Inner(slot = conc.mutex(Counter(n = 0)), stop = conc.atomic_bool(false)));
 	var vt: conc.VirtualThread<Int> = _spawn(inner.clone());
 	val _ = conc.sleep(conc.Duration(millis = 550));

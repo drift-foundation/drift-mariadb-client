@@ -37,7 +37,7 @@ fn _expect_tag(err: &rpc.RpcError, expected: String) nothrow -> Bool {
 	return err.tag == expected;
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	var ri = _row_one_text("123");
 	match ri.get_int(0) {
 		core.Result::Err(_) => { return 1; },

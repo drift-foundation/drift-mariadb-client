@@ -139,7 +139,7 @@ fn _healthy_cycle(p: &pool.ConnectionPool) nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	console.println("=== pool_idle_close_recycle_test ===");
 	match _build_cfg() {
 		core.Result::Err(_) => { console.println("[main] config build failed"); return 1; },

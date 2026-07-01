@@ -45,7 +45,7 @@ fn _consume(stmt: &mut rpc.RpcStatement) nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	match _build_cfg() {
 		core.Result::Err(_) => { return 10; },
 		core.Result::Ok(cfg) => {

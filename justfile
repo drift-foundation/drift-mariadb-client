@@ -8,6 +8,7 @@
 
 MANIFEST := "drift/manifest.json"
 DEPLOY_DEST := env("DRIFT_PKG_ROOT", "build/deploy")
+APP_DEPLOY_DEST := env("DRIFT_APP_PKG_ROOT", "build/deploy-app")
 RPC_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-rpc'))"`
 WIRE_VERSION := `python3 -c "import json; m=json.load(open('drift/manifest.json')); print(next(a['version'] for a in m['artifacts'] if a['name']=='mariadb-wire-proto'))"`
 
@@ -42,10 +43,11 @@ prepare:
 	fi
 	"$DRIFT" prepare --dest "{{DEPLOY_DEST}}"
 
-# Re-mint drift/mariadb-{wire-proto,rpc}.author-claim under the Foundation
-# author key. Uses the toolchain's first-class `drift author` verb (0.33.57+),
-# which mints schema-v2 claims (signed body carries artifact_kind; SCI hashes
-# kind). Runs once per package artifact, since the manifest declares two. Use
+# Re-mint drift/{mariadb-wire-proto,mariadb-rpc,mariadb-failpoint-proxy}.author-claim
+# under the Foundation author key. Uses the toolchain's first-class `drift author`
+# verb (0.33.57+), which mints schema-v2 claims (signed body carries
+# artifact_kind; SCI hashes kind) for both package and app artifacts. Runs once
+# per artifact, since the manifest declares three (two packages, one app). Use
 # after any source change that affects SCI (modules, assets, deps, version).
 #
 # The author-claims are then committed; the orchestrator emits the cert-claim
@@ -62,7 +64,7 @@ author-claim:
 	fi
 	KEY_FILE="${DRIFT_SIGN_KEY_FILE:-${HOME}/.config/drift/keys/default.seed}"
 	[[ -f "${KEY_FILE}" ]] || { echo "error: signing key not found: ${KEY_FILE}" >&2; exit 1; }
-	for ART in mariadb-wire-proto mariadb-rpc; do
+	for ART in mariadb-wire-proto mariadb-rpc mariadb-failpoint-proxy; do
 	  echo "[author-claim] minting drift/${ART}.author-claim (schema v2)"
 	  "$DRIFT" author \
 	    --manifest "$(pwd)/drift/manifest.json" \
@@ -97,9 +99,10 @@ reseal:
 	@just trust-check
 	@echo "[reseal] done — review & commit: drift/manifest.json, drift/lock.json, drift/*.author-claim"
 
-# Build, sign, and publish both packages to DEPLOY_DEST.
-# When called from certification gates, DRIFT_TOOLCHAIN_ROOT is set and drift
-# is resolved from it. For standalone dev use, falls back to drift on PATH.
+# Build, sign, and publish both packages to DEPLOY_DEST and the app to
+# APP_DEPLOY_DEST. When called from certification gates, DRIFT_TOOLCHAIN_ROOT
+# is set and drift is resolved from it. For standalone dev use, falls back to
+# drift on PATH.
 #
 # Under trust-v1 (0.32.x+), this consumes drift/<pkg>.author-claim (committed)
 # and emits cert-claim sidecars per artifact. The cert-claim requires either
@@ -125,12 +128,12 @@ deploy *ARGS:
 	else
 	  DRIFT="drift"
 	fi
-	mkdir -p "{{DEPLOY_DEST}}"
+	mkdir -p "{{DEPLOY_DEST}}" "{{APP_DEPLOY_DEST}}"
 	EXTRA=""
 	if [[ "{{ARGS}}" != *--cert-suite* ]]; then
 	  EXTRA="--cert-suite-id mariadb-client/dev --cert-suite-no-evidence"
 	fi
-	"$DRIFT" deploy --dest "{{DEPLOY_DEST}}" ${EXTRA} {{ARGS}}
+	"$DRIFT" deploy --dest "{{DEPLOY_DEST}}" --app-dest "{{APP_DEPLOY_DEST}}" ${EXTRA} {{ARGS}}
 
 # --- Certification gates (orchestrator interface) ---
 # These three commands are the repo's public certification surface.
@@ -261,6 +264,25 @@ compile-check FILE:
 	trap 'rm -rf "$WORK"' EXIT
 	python3 tools/emit_test_plan.py compile --file "{{FILE}}" --out "$WORK/plan.json"
 	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK"
+
+# Build a kind:app artifact from LOCAL SOURCE — no deploy, no signing, no publish.
+# Sources/deps + entry_point come from drift/manifest.json. Binary lands at
+# build/local-app/<APP>. For dev/smoke use only (unsigned, not certified).
+#   just build-app mariadb-failpoint-proxy
+build-app APP="mariadb-failpoint-proxy":
+	#!/usr/bin/env bash
+	set -uo pipefail
+	: "${DRIFT_TOOLCHAIN_ROOT:?set DRIFT_TOOLCHAIN_ROOT to a toolchain >= 0.33.17}"
+	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	DEST="build/local-app"
+	mkdir -p "$DEST"
+	WORK="$(mktemp -d /tmp/drift-mdb-app.XXXXXX)"
+	trap 'rm -rf "$WORK"' EXIT
+	python3 tools/emit_test_plan.py app --app "{{APP}}" --out "$WORK/plan.json"
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK"
+	cp "$WORK/{{APP}}" "$DEST/{{APP}}"
+	echo "built $DEST/{{APP}} (local, unsigned)"
 
 # --- Local MariaDB dev instances ---
 

@@ -265,7 +265,7 @@ fn scenario_reset_reusability() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_guard_session_closed();
 	if a != 0 { return a; }
 	val b = scenario_guard_active_statement();

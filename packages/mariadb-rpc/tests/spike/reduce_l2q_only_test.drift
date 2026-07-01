@@ -17,7 +17,7 @@ const PASSWORD: String = "rootpw";
 const DB: String = "appdb";
 const TIMEOUT_MS: Int = 1000;
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
 	match wire.connect(&opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1; },

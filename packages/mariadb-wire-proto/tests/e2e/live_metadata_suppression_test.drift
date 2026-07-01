@@ -231,7 +231,7 @@ fn scenario_ok_response_unaffected() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = scenario_single_resultset_metadata_suppressed();
 	if a != 0 { return a; }
 	val b = scenario_multi_resultset_metadata_suppressed();

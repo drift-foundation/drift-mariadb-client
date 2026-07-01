@@ -232,7 +232,7 @@ fn scenario_acquire_use_release() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val _ = console.println("=== spike: ManagedConnection (minimal) ===");
 	val a = scenario_open_close();
 	if a != 0 { return a; }

@@ -157,7 +157,7 @@ fn expect_null_cell_preserved() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_decode_basic_resultset();
 	if a != 0 { return a; }
 	val b = expect_missing_terminator_error();

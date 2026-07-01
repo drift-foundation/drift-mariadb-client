@@ -26,7 +26,7 @@ fn _cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
 	return rpc.build_connection_config(move b);
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	match _cfg() {
 		core.Result::Err(_) => { return 10; },
 		core.Result::Ok(c) => {

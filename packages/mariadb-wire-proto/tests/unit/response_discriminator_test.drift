@@ -74,7 +74,7 @@ fn expect_short_payload_error() nothrow -> Int {
 	}
 }
 
-fn main() nothrow -> Int {
+pub fn main() nothrow -> Int {
 	val a = expect_ok_route();
 	if a != 0 { return a; }
 	val b = expect_err_route();
