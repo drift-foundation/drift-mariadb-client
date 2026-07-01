@@ -160,11 +160,21 @@ test:
 	set -uo pipefail
 	: "${DRIFT_TOOLCHAIN_ROOT:?DRIFT_TOOLCHAIN_ROOT must be set for certification}"
 	RUNNER="${DRIFT_TOOLCHAIN_ROOT}/lib/tools/drift_test_run.py"
+	FLK="${DRIFT_TOOLCHAIN_ROOT}/bin/flocker"
 	[[ -f "$RUNNER" ]] || { echo "error: shared executor not found at $RUNNER (need toolchain >= 0.33.17)" >&2; exit 1; }
+	[[ -x "$FLK" ]] || { echo "error: flocker not found at $FLK (need toolchain >= 0.33.17)" >&2; exit 1; }
 	WORK="$(mktemp -d -t drift-mdb-test-XXXXXX)"
-	trap 'rm -rf "$WORK"' EXIT
+	PROXY_WORK="$(mktemp -d -t drift-mdb-proxy-gate-XXXXXX)"
+	trap 'rm -rf "$WORK" "$PROXY_WORK"' EXIT
 	python3 tools/emit_test_plan.py test --out "$WORK/plan.json"
-	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" --heartbeat {{HEARTBEAT_SECS}}
+	python3 "$RUNNER" --plan "$WORK/plan.json" --work-dir "$WORK" --heartbeat {{HEARTBEAT_SECS}} || exit 1
+	# S8: run the actual mariadb-failpoint-proxy binary as a real subprocess
+	# (build/start/drive-a-real-client/stop), not just its in-process
+	# framing/control logic — see work/mariadb-rpc-failpoints/PROXY-GATE-HARNESS.md.
+	# Same DB resource-key convention as emit_test_plan.py's DB_GROUP, so this
+	# doesn't race a concurrent gate's own mdb114-a access.
+	echo "=== proxy-process gate smoke (S8): mariadb-failpoint-proxy as a real subprocess ==="
+	"$FLK" --key mariadb-mdb114-a -j 1 --heartbeat {{HEARTBEAT_SECS}} -- python3 tools/proxy_gate_smoke.py --work-dir "$PROXY_WORK"
 
 # Certification gate: RPC-level protocol contamination stress (needs DB).
 # `deploy` (harness) publishes the signed .zdmp packages; the emitted plan then

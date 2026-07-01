@@ -1,6 +1,6 @@
 # Proxy gate harness follow-up
 
-Status: REQUIRED before treating `mariadb-failpoint-proxy` as certification-ready downstream test tooling. Tracked separately from S7 on purpose — S7 (done, see PLAN.md) proved the fault action end to end via `just check-one` against a manually-started proxy; this doc is specifically about making `just test` exercise the actual subprocess automatically. Do not let this slip once downstream teams (bookkeeper/Microflows) start relying on the proxy during cert — a manually-run proof is not gate coverage.
+Status: DONE (S8, see PLAN.md). `tools/proxy_gate_smoke.py`, wired into `just test` via `flocker --key mariadb-mdb114-a`. Both the v1 gate smoke and the later S7-dependent second case below are implemented. Kept this doc as the historical record of the requirement rather than deleting it — if `just test` ever stops exercising the actual subprocess (e.g. someone routes around `proxy_gate_smoke.py`), treat that as a regression against everything below.
 
 ## Problem
 
