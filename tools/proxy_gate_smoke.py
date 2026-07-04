@@ -279,14 +279,40 @@ def control_request(op_obj, timeout=2.0):
 
 
 def wait_ready(proc, deadline_s):
-    """Poll control `health` until ok:true, the subprocess exits early, or
-    the deadline elapses."""
+    """Poll control `health` until ok:true AND its data_listener/backend_listener
+    match what WE expect, the subprocess exits early, or the deadline elapses.
+
+    Checking those echoed fields (not just ok:true) matters: this is exactly
+    how the port-collision incident in PLAN.md's §14 entry slipped past —
+    another session's already-running proxy was squatting on our expected
+    control port, so it happily answered ok:true for OUR health poll while
+    OUR OWN freshly-spawned `proc` had already failed to bind (listen_failed)
+    and was in the process of exiting. `proc.poll()` above is a real check,
+    but it's a race: on the very first loop iteration `proc` may not have
+    exited yet, so the wrong process's ok:true response can win before our
+    own failure becomes visible. Comparing the listener strings closes that
+    race — they only match when it's genuinely our subprocess answering, not
+    a foreign one — and fails loudly with a clear diagnosis instead of
+    silently proceeding to run a client test against the wrong proxy (whose
+    failure, seen later, gives no hint that a port collision was the cause)."""
+    expected = {
+        "data_listener": f"{DATA_HOST}:{DATA_PORT}",
+        "backend_listener": f"{BACKEND_HOST}:{BACKEND_PORT}",
+    }
     start = time.monotonic()
     while time.monotonic() - start < deadline_s:
         if proc.poll() is not None:
             return False
         resp = control_request({"op": "health"})
         if resp and resp.get("ok"):
+            mismatches = {k: (want, resp.get(k)) for k, want in expected.items() if resp.get(k) != want}
+            if mismatches:
+                _fail(
+                    f"control health answered ok:true but NOT from the proxy we just started "
+                    f"(PID {proc.pid}) — mismatched field(s) {mismatches}. A different process "
+                    f"is almost certainly already listening on {CONTROL_HOST}:{CONTROL_PORT} "
+                    f"(or {DATA_HOST}:{DATA_PORT}); see PLAN.md's port-collision entry."
+                )
             return True
         time.sleep(0.05)
     return False
