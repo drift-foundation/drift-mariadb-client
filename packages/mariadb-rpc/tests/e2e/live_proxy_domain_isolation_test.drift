@@ -19,8 +19,8 @@
 // curated LIVE_TESTS; wired as its own case in tools/proxy_gate_smoke.py (S8).
 //
 //   just build-app mariadb-failpoint-proxy
-//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
-//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 43307 &
+//   build/local-app/mariadb-failpoint-proxy --data-port 45306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 45307 &
 //   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_domain_isolation_test.drift
 //
 // Flow: clear -> arm match.nth=1 -> a "non-target domain" connection goes
@@ -45,8 +45,8 @@ import std.console as console;
 import mariadb.rpc as rpc;
 
 const PROXY_HOST: String = "127.0.0.1";
-const PROXY_DATA_PORT: Int = 43306;
-const PROXY_CONTROL_PORT: Int = 43307;
+const PROXY_DATA_PORT: Int = 45306;
+const PROXY_CONTROL_PORT: Int = 45307;
 // The real backend the proxy itself forwards to — a direct connection here
 // models "the non-target domain," which never touches the proxy at all.
 const BACKEND_HOST: String = "127.0.0.1";

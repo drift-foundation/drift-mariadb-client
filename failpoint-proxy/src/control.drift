@@ -20,6 +20,7 @@ import std.core as core;
 import std.io as io;
 import std.net as net;
 import std.concurrent as conc;
+import std.sync as sync;
 import std.format as format;
 import std.text as text;
 import std.json as json;
@@ -37,7 +38,11 @@ export {
 	ACTION_DROP_AND_HOLD_AFTER_FORWARD
 };
 
-const ACCEPT_TIMEOUT_MS: Int = 3600000;
+// Bounded (not "block for up to an hour" as earlier versions had it): the
+// accept loop re-checks the shared shutdown flag once per timeout, so this
+// value is the worst-case latency between a SIGTERM/SIGINT and this loop
+// noticing — see run_control_loop and PLAN.md's graceful-shutdown entry.
+const ACCEPT_TIMEOUT_MS: Int = 200;
 const ACCEPT_BACKOFF_MS: Int = 100;
 const IO_TIMEOUT_MS: Int = 60000;
 const CLOSE_TIMEOUT_MS: Int = 1000;
@@ -98,7 +103,12 @@ pub struct RegistrySlot {
 
 pub struct Registry {
 	pub slot: conc.Mutex<RegistrySlot>,
-	pub data_listener: String
+	pub data_listener: String,
+	// Echoed by `health`/`status` so a harness can detect a wrong-backend
+	// collision (e.g. a stray leftover proxy instance on the expected data
+	// port, but forwarding to a DIFFERENT backend than the harness expects)
+	// without needing raw packet inspection — see docs/failpoint-proxy-usage.md.
+	pub backend_listener: String
 }
 
 // What the data path should do once a COMMIT causes a failpoint to fire.
@@ -111,10 +121,10 @@ pub struct FireResult {
 	pub hold_ms: Int
 }
 
-pub fn new_registry(data_listener: String) nothrow -> conc.Arc<Registry> {
+pub fn new_registry(data_listener: String, backend_listener: String) nothrow -> conc.Arc<Registry> {
 	var entries: Array<FailpointEntry> = [];
 	val slot = RegistrySlot(entries = move entries, next_id = 0);
-	val reg = Registry(slot = conc.mutex(move slot), data_listener = data_listener);
+	val reg = Registry(slot = conc.mutex(move slot), data_listener = data_listener, backend_listener = backend_listener);
 	return conc.arc(move reg);
 }
 
@@ -179,7 +189,7 @@ fn _err_response(code: String, msg: String) nothrow -> String {
 	return json.encode_compact(&node);
 }
 
-fn _entry_status_object(e: &FailpointEntry, data_listener: &String) nothrow -> json.JsonObject {
+fn _entry_status_object(e: &FailpointEntry, data_listener: &String, backend_listener: &String) nothrow -> json.JsonObject {
 	var o = json.new_object();
 	o.set("id", json.JsonNode::Number(raw = format.format_int(e.id)));
 	o.set("label", json.JsonNode::String(value = e.label.clone()));
@@ -190,6 +200,7 @@ fn _entry_status_object(e: &FailpointEntry, data_listener: &String) nothrow -> j
 	o.set("action", json.JsonNode::String(value = e.action.clone()));
 	o.set("hold_ms", json.JsonNode::Number(raw = format.format_int(e.hold_ms)));
 	o.set("data_listener", json.JsonNode::String(value = data_listener.clone()));
+	o.set("backend_listener", json.JsonNode::String(value = backend_listener.clone()));
 	o.set("matched_client", json.JsonNode::String(value = e.matched_client.clone()));
 	o.set("matched_command", json.JsonNode::String(value = e.matched_command.clone()));
 	o.set("matched_sql", json.JsonNode::String(value = e.matched_sql.clone()));
@@ -268,6 +279,7 @@ fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String
 fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String {
 	val id = root.select().field("id").as_int_or(-1);
 	val data_listener = reg.get().data_listener.clone();
+	val backend_listener = reg.get().backend_listener.clone();
 	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
 	var guard = conc.lock(mu_ref);
 	val s = guard.get_mut();
@@ -283,7 +295,7 @@ fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> Str
 	if idx < 0 { return _err_response("unknown-id", "no such failpoint id"); }
 	match s.entries.get(idx) {
 		Optional::Some(e) => {
-			var o = _entry_status_object(e, &data_listener);
+			var o = _entry_status_object(e, &data_listener, &backend_listener);
 			o.set("ok", json.JsonNode::Bool(value = true));
 			val node = o.to_node();
 			return json.encode_compact(&node);
@@ -294,6 +306,7 @@ fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> Str
 
 fn _handle_list(reg: &conc.Arc<Registry>) nothrow -> String {
 	val data_listener = reg.get().data_listener.clone();
+	val backend_listener = reg.get().backend_listener.clone();
 	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
 	var guard = conc.lock(mu_ref);
 	val s = guard.get_mut();
@@ -302,7 +315,7 @@ fn _handle_list(reg: &conc.Arc<Registry>) nothrow -> String {
 	while i < s.entries.len {
 		match s.entries.get(i) {
 			Optional::Some(e) => {
-				val obj = _entry_status_object(e, &data_listener);
+				val obj = _entry_status_object(e, &data_listener, &backend_listener);
 				arr.push(obj.to_node());
 			},
 			Optional::None => {}
@@ -376,9 +389,11 @@ fn _handle_clear(reg: &conc.Arc<Registry>) nothrow -> String {
 // reachable — see PLAN.md §7 ("health means the data listener is bound").
 fn _handle_health(reg: &conc.Arc<Registry>) nothrow -> String {
 	val data_listener = reg.get().data_listener.clone();
+	val backend_listener = reg.get().backend_listener.clone();
 	var o = json.new_object();
 	o.set("ok", json.JsonNode::Bool(value = true));
 	o.set("data_listener", json.JsonNode::String(value = data_listener));
+	o.set("backend_listener", json.JsonNode::String(value = backend_listener));
 	o.set("ready", json.JsonNode::Bool(value = true));
 	val node = o.to_node();
 	return json.encode_compact(&node);
@@ -595,10 +610,15 @@ fn _handle_control_client(client_stream: net.TcpStream, reg: conc.Arc<Registry>,
 }
 
 // Control accept loop: one detached handler vthread per control connection
-// (control ops are rare; simplicity over throughput here).
-pub fn run_control_loop(listener: &net.TcpListener, reg: conc.Arc<Registry>, logger: &log.Logger) nothrow -> Int {
+// (control ops are rare; simplicity over throughput here). Exits once
+// `shutting_down` is set (checked once per bounded ACCEPT_TIMEOUT_MS accept
+// call) — part of graceful SIGTERM/SIGINT shutdown, see main.drift's
+// service_main. Already-spawned control-connection handlers are NOT waited
+// on here; this proxy's shutdown is close-immediately, no drain, matching
+// its existing abrupt-close fault-action semantics.
+pub fn run_control_loop(listener: &net.TcpListener, reg: conc.Arc<Registry>, logger: &log.Logger, shutting_down: &conc.Arc<conc.AtomicBool>) nothrow -> Int {
 	var next_conn_id = 0;
-	while true {
+	while not shutting_down.get().load(sync.MemoryOrder::Acquire()) {
 		match listener.accept(_dur(ACCEPT_TIMEOUT_MS)) {
 			core.Result::Ok(cs) => {
 				next_conn_id = next_conn_id + 1;
@@ -619,5 +639,6 @@ pub fn run_control_loop(listener: &net.TcpListener, reg: conc.Arc<Registry>, log
 			}
 		}
 	}
+	logger.info("control_accept_loop_stopped");
 	return 0;
 }

@@ -86,24 +86,28 @@ Identical either way — three listeners configured explicitly:
 | `--control-host` / `--control-port` | `127.0.0.1` / `43307` | Where your test harness arms/inspects failpoints (raw TCP, JSON Lines — see below) |
 
 `--help`/`-h` prints usage and exits immediately; otherwise the process runs
-until killed — **use `SIGKILL`, not `SIGTERM`**. The proxy has no
-graceful-shutdown flag or signal handler of its own, and on toolchains before
-`0.33.68+abi19` a plain `SIGTERM`/`SIGINT` (Ctrl-C) actively made things
-*worse*: a Drift runtime bug left the reactor's signalfd undrained, causing a
-permanent busy-spin that pegged a CPU core forever instead of stopping the
-process (found and reported from this repo; see
+until stopped with a plain `SIGTERM` or `SIGINT` (Ctrl-C) — both now exit it
+**gracefully**: stop accepting new connections, close both listeners, exit
+0, typically in well under a second (no draining of already-open proxied
+connections — matches the proxy's existing abrupt-close fault-action
+semantics elsewhere). `SIGKILL` still works but shouldn't be needed.
+
+This requires a certified toolchain of `0.33.68+abi19` or later. On older
+toolchains, a Drift runtime bug (found and reported from this repo — see
 `work/mariadb-rpc-failpoints/TOOLCHAIN-signalfd-busyloop-question.md`, fixed
-upstream in staged `drift-0.33.68+abi19`, validated here with a real
-subprocess, ASAN, and valgrind/memcheck — no busy-spin, no sanitizer-reported
-errors, still fully functional after the signal). Even on the fixed
-toolchain, `SIGTERM` only stops busy-spinning — it does **not** terminate the
-process: Drift's signal model requires an explicit `conc.await_signal()`
-call to observe and act on a process signal, which this proxy doesn't make,
-so the process keeps running (by design, not a regression) until something
-uses `SIGKILL`. Structured JSON Lines events go to stderr (`proxy_start`,
-`client_accept`, `backend_connect`, `commit_observed`, `failpoint_arm`,
-`failpoint_fire`, `failpoint_clear`, `conn_close`, ...) — low-noise, and
-never SQL text, auth bytes, or packet payloads.
+upstream in `0.33.68+abi19`) left the reactor's signalfd undrained on
+SIGTERM/SIGINT with no signal waiter registered, causing a permanent
+busy-spin that pegged a CPU core forever instead of stopping the process —
+`SIGKILL` was the only way to stop it. Versions of this proxy before `0.2.2`
+also didn't register a signal waiter at all (`conc.await_signal()`), so even
+on a fixed toolchain the busy-spin was gone but the process still never
+exited on its own. Both are fixed now: use a `0.33.68+abi19`-or-later
+toolchain and `mariadb-failpoint-proxy` `0.2.2`-or-later for a clean,
+fast `SIGTERM`/`SIGINT` shutdown. Structured JSON Lines events go to stderr
+(`proxy_start`, `client_accept`, `backend_connect`, `commit_observed`, `failpoint_arm`,
+`failpoint_fire`, `failpoint_clear`, `conn_close`, `shutdown_signal`,
+`accept_loop_stopped`, `control_accept_loop_stopped`, `proxy_shutdown_complete`, ...)
+— low-noise, and never SQL text, auth bytes, or packet payloads.
 
 Bind both listeners to loopback unless you specifically need a remote test
 environment — see [Security](#security) below.
@@ -180,11 +184,17 @@ machine-readable `"error"` code, never a string to pattern-match on
 
 Readiness check — `ready:true` means the data listener is bound (not merely
 that the process exists). Poll this instead of a raw connect-and-hope when
-waiting for the proxy to come up.
+waiting for the proxy to come up. `backend_listener` echoes the real
+MariaDB host:port this instance forwards to — check it against what your
+harness expects before arming: a stray leftover proxy instance from an
+unrelated run can be squatting on your expected data port while pointed at
+a *different* backend, silently misdirecting your traffic instead of
+failing loudly. (Prefer unique or ephemeral ports per harness/CI job over
+the doc's example ports below to avoid this class of collision entirely.)
 
 ```json
 --> {"op":"health"}
-<-- {"ok":true,"ready":true,"data_listener":"127.0.0.1:43306"}
+<-- {"ok":true,"ready":true,"data_listener":"127.0.0.1:43306","backend_listener":"127.0.0.1:3306"}
 ```
 
 ### `clear`
@@ -277,7 +287,7 @@ meaningless there).
 
 ```json
 --> {"op":"status","id":1}
-<-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","domain":"bookkeeper_db","armed":false,"fired":true,"fire_count":1,"action":"drop_server_response_after_forward","hold_ms":0,"data_listener":"127.0.0.1:43306","matched_client":"127.0.0.1:49218","matched_command":"COM_QUERY","matched_sql":"COMMIT","matched_nth":1,"bytes_forwarded_to_server":11,"server_response_bytes_dropped":-1}
+<-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","domain":"bookkeeper_db","armed":false,"fired":true,"fire_count":1,"action":"drop_server_response_after_forward","hold_ms":0,"data_listener":"127.0.0.1:43306","backend_listener":"127.0.0.1:3306","matched_client":"127.0.0.1:49218","matched_command":"COM_QUERY","matched_sql":"COMMIT","matched_nth":1,"bytes_forwarded_to_server":11,"server_response_bytes_dropped":-1}
 ```
 
 There's also a `list` op (same object shape as `status`, as a `"failpoints"`

@@ -71,7 +71,23 @@ RpcCommitErrorKind::AmbiguousWrite, no hang (the client's own read timeout
 is what fires, well before the proxy's own hold elapses and self-closes),
 and the pool still discards the poisoned lease and reconnects cleanly.
 
-Exit 0 if all five cases pass; nonzero otherwise, with a message identifying
+Case 6/7 (graceful shutdown on SIGTERM/SIGINT — regression coverage for the
+drift-lang signalfd busy-spin CORE_BUG this repo reported, fixed upstream in
+certified `0.33.68+abi19`, PLUS this proxy's OWN `conc.await_signal()`
+handling added in response to a downstream app team's report that even with
+the reactor fix, mariadb-failpoint-proxy 0.1.0/0.2.1 never exited on SIGTERM
+— it registered no waiter, so the signal was simply stashed and ignored
+forever, matching `--help`'s old "no built-in shutdown flag" text). Starts a
+fresh proxy, sends the signal, and asserts it exits with code 0 within
+SHUTDOWN_EXIT_TIMEOUT_S (comfortably above the observed ~0.2s clean-exit
+time, matching bookkeeper/uflowsd, but far below the ~7s the pre-fix
+busy-spin needed before a SIGKILL fallback — a real regression back to
+"SIGTERM does nothing" would blow this bound clearly, not pass by luck).
+Also asserts the proxy's own log shows the full shutdown lifecycle:
+shutdown_signal, accept_loop_stopped, control_accept_loop_stopped,
+proxy_shutdown_complete.
+
+Exit 0 if all seven cases pass; nonzero otherwise, with a message identifying
 which case/assertion failed. Tears the proxy subprocess down reliably
 (SIGTERM, grace period, SIGKILL fallback) even when a case fails — including
 when the shared executor itself hangs building the proxy or running a
@@ -101,10 +117,22 @@ APP_NAME = "mariadb-failpoint-proxy"
 # Same fixed ports the manual S4/S7 smoke tests hardcode (they are not
 # parameterized via argv) — this harness must use the identical values so
 # those existing test files connect to the subprocess it starts.
+#
+# Deliberately NOT 43306/43307, the ports shown as the illustrative example
+# in docs/failpoint-proxy-usage.md: a real collision happened on this exact
+# pair on a shared dev box (another concurrent session's proxy, almost
+# certainly started by literally copying that doc example, was squatting on
+# both ports with a different --backend-port, which made this repo's own
+# `just test` fail with a cryptic listen_failed deep in the S8 gate's log).
+# Using a distinct pair for THIS repo's own CI doesn't eliminate collision
+# risk in general (any fixed number can collide with another fixed number —
+# see docs/failpoint-proxy-usage.md's guidance to prefer unique/ephemeral
+# ports per harness), but it does stop us colliding with anyone else who
+# follows our own docs' copy-paste example, which is what just happened.
 DATA_HOST = "127.0.0.1"
-DATA_PORT = 43306
+DATA_PORT = 45306
 CONTROL_HOST = "127.0.0.1"
-CONTROL_PORT = 43307
+CONTROL_PORT = 45307
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 34114  # mdb114-a, per emit_test_plan.py's DB_GROUP comment
 
@@ -145,6 +173,22 @@ CASES = [
      "packages/mariadb-rpc/tests/e2e/live_proxy_domain_isolation_test.drift", EVENTS_FIRED),
     ("case5", "drop-and-hold: timeout-flavored ambiguous COMMIT",
      "packages/mariadb-rpc/tests/e2e/live_proxy_commit_timeout_ambiguous_test.drift", EVENTS_FIRED),
+]
+
+# Bound on time-to-exit after a shutdown signal. Comfortably above the
+# observed ~0.2s clean-exit time (matches bookkeeper/uflowsd's own signal
+# waiters), but far below the ~7s the pre-fix busy-spin needed before a
+# SIGKILL fallback — a real regression back to "SIGTERM does nothing" blows
+# this bound clearly, it doesn't pass by luck.
+SHUTDOWN_EXIT_TIMEOUT_S = 3.0
+REQUIRED_SHUTDOWN_EVENTS = [
+    "shutdown_signal", "accept_loop_stopped", "control_accept_loop_stopped", "proxy_shutdown_complete",
+]
+# (case name, human label, signal to send). Each gets its own fresh proxy
+# instance — see check_graceful_shutdown.
+SHUTDOWN_SIGNALS = [
+    ("case6", "graceful shutdown on SIGTERM", signal.SIGTERM),
+    ("case7", "graceful shutdown on SIGINT", signal.SIGINT),
 ]
 
 
@@ -303,6 +347,46 @@ def run_case(name, label, binpath, work_dir, client_test, required_events):
     print(f"[proxy-gate] {name}: PASS", file=sys.stderr)
 
 
+def check_graceful_shutdown(name, label, sig, binpath, work_dir):
+    """Fresh proxy instance -> wait ready -> send `sig` directly (not the
+    stop_proxy grace+SIGKILL-fallback helper — this measures the real,
+    unfallback-assisted exit) -> assert it exits with code 0 within
+    SHUTDOWN_EXIT_TIMEOUT_S -> assert its own log shows the full shutdown
+    lifecycle. Regression coverage for both the drift-lang signalfd
+    busy-spin CORE_BUG (fixed in certified 0.33.68+abi19) and this proxy's
+    own conc.await_signal() handling — see the module docstring."""
+    print(f"[proxy-gate] {name}: {label}", file=sys.stderr)
+    log_path = work_dir / f"proxy_{name}.jsonl"
+    proc, log_f = start_proxy(binpath, log_path)
+    try:
+        if not wait_ready(proc, READY_TIMEOUT_S):
+            print(log_path.read_text(errors="ignore"), file=sys.stderr)
+            _fail(f"proxy did not become ready (control health) within timeout — {name}")
+        start = time.monotonic()
+        proc.send_signal(sig)
+        try:
+            rc = proc.wait(timeout=SHUTDOWN_EXIT_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - start
+            print(log_path.read_text(errors="ignore"), file=sys.stderr)
+            proc.kill()
+            proc.wait()
+            _fail(f"{name}: proxy did not exit within {SHUTDOWN_EXIT_TIMEOUT_S}s of {sig.name} "
+                  f"(busy-spin/no-shutdown regression?) — waited {elapsed:.2f}s")
+        elapsed = time.monotonic() - start
+        if rc != 0:
+            print(log_path.read_text(errors="ignore"), file=sys.stderr)
+            _fail(f"{name}: proxy exited {elapsed:.2f}s after {sig.name} but with nonzero code {rc}")
+        print(f"[proxy-gate] {name}: exited {elapsed:.2f}s after {sig.name} (exit 0)", file=sys.stderr)
+    finally:
+        log_f.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert_events_present(log_path, REQUIRED_SHUTDOWN_EVENTS)
+    print(f"[proxy-gate] {name}: PASS", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--work-dir", required=True, help="scratch directory for the build + client-test artifacts + proxy logs")
@@ -315,6 +399,9 @@ def main():
         if i > 0:
             time.sleep(BETWEEN_CASES_SETTLE_S)
         run_case(name, label, binpath, work_dir, client_test, required_events)
+    for name, label, sig in SHUTDOWN_SIGNALS:
+        time.sleep(BETWEEN_CASES_SETTLE_S)
+        check_graceful_shutdown(name, label, sig, binpath, work_dir)
     print("[proxy-gate] all cases PASS", file=sys.stderr)
 
 

@@ -9,8 +9,8 @@
 // not fold that into this test.
 //
 //   just build-app mariadb-failpoint-proxy
-//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
-//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 43307 &
+//   build/local-app/mariadb-failpoint-proxy --data-port 45306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 45307 &
 //   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_pool_commit_ambiguous_test.drift
 //
 // Flow: clear the proxy's failpoint registry -> arm a one-shot exact-COMMIT
@@ -46,8 +46,8 @@ import mariadb.rpc.managed as managed;
 import mariadb.rpc.pool as pool;
 
 const PROXY_HOST: String = "127.0.0.1";
-const PROXY_DATA_PORT: Int = 43306;
-const PROXY_CONTROL_PORT: Int = 43307;
+const PROXY_DATA_PORT: Int = 45306;
+const PROXY_CONTROL_PORT: Int = 45307;
 const LIVE_USER: String = "root";
 const LIVE_PASSWORD: String = "rootpw";
 const LIVE_DB: String = "appdb";

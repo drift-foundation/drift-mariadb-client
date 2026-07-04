@@ -4,11 +4,11 @@
 // MANUAL — not in the gate's curated LIVE_TESTS. It requires the proxy running in
 // front of the dev DB:
 //   just build-app mariadb-failpoint-proxy
-//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
+//   build/local-app/mariadb-failpoint-proxy --data-port 45306 \
 //       --backend-host 127.0.0.1 --backend-port 34114 &
 //   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_passthrough_smoke_test.drift
 //
-// Connects to the PROXY port (43306), not the DB directly. Exit 0 means the full
+// Connects to the PROXY port (45306), not the DB directly. Exit 0 means the full
 // connect->auth->query->COMMIT round-trip passed through the proxy; the proxy's
 // own stderr shows one JSON Lines event with ev:"commit_observed".
 module mariadb.rpc.tests.e2e.live_proxy_passthrough_smoke_test;
@@ -17,7 +17,7 @@ import std.core as core;
 import mariadb.rpc as rpc;
 
 const PROXY_HOST: String = "127.0.0.1";
-const PROXY_PORT: Int = 43306;
+const PROXY_PORT: Int = 45306;
 const LIVE_USER: String = "root";
 const LIVE_PASSWORD: String = "rootpw";
 const LIVE_DB: String = "appdb";

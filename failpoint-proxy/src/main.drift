@@ -16,11 +16,20 @@
 // house style (string-valued attrs). Low-noise and structured — NEVER logs raw
 // SQL, auth bytes, or packet payloads; only event names, ids, coarse reasons,
 // and byte/commit counts. Events: proxy_start, client_accept, backend_connect,
-// commit_observed, conn_close (this file); failpoint_arm, failpoint_fire,
-// failpoint_clear, control_op, control_close (control.drift). There is no
-// separate "server response dropped" event — the swallowed-response byte
-// count is intentionally unmeasured (see control.drift's
+// commit_observed, conn_close, shutdown_signal, signal_ignored,
+// accept_loop_stopped, proxy_shutdown_complete (this file); failpoint_arm,
+// failpoint_fire, failpoint_clear, control_op, control_close,
+// control_accept_loop_stopped (control.drift). There is no separate "server
+// response dropped" event — the swallowed-response byte count is
+// intentionally unmeasured (see control.drift's
 // server_response_bytes_dropped sentinel), so it has nothing to log.
+//
+// Shutdown: SIGTERM/SIGINT trigger a graceful exit (stop accepting, close
+// both listeners, exit — no drain of already-open proxied connections) via
+// a `conc.await_signal()` coordinator on the root VT; see service_main.
+// Requires a toolchain >= 0.33.68+abi19 (drift-lang's signalfd busy-spin fix
+// — see work/mariadb-rpc-failpoints/TOOLCHAIN-signalfd-busyloop-question.md
+// — this proxy's own signal waiter is a separate, additional fix on top).
 //
 // It is a kind:app artifact built and certified from this repo, consumed by app
 // test harnesses as an external process (it slots in like uflowsd). NOT a
@@ -56,9 +65,17 @@ const CONTROL_PORT_DEFAULT: Int = 43307;
 
 const CHUNK: Int = 16384;
 const LISTEN_TIMEOUT_MS: Int = 5000;
-const ACCEPT_TIMEOUT_MS: Int = 3600000;
+// Bounded (not "block for up to an hour" as earlier versions had it): the
+// accept loop re-checks the shared shutdown flag once per timeout, so this
+// value is the worst-case latency between a SIGTERM/SIGINT and this loop
+// noticing — see _accept_loop and service_main's shutdown coordinator.
+const ACCEPT_TIMEOUT_MS: Int = 200;
 const CONNECT_TIMEOUT_MS: Int = 5000;
 const CLOSE_TIMEOUT_MS: Int = 1000;
+// Upper bound on how long the shutdown coordinator waits for each accept
+// loop to notice `shutting_down` and return, before giving up on that join
+// and proceeding anyway — a stuck accept loop must not hang process exit.
+const SHUTDOWN_JOIN_TIMEOUT_MS: Int = 3000;
 // Long read timeout: reads retry on WOULD_BLOCK so an idle-but-open connection
 // is never torn down on a timeout; teardown happens on EOF or a real error.
 const IO_TIMEOUT_MS: Int = 60000;
@@ -399,9 +416,15 @@ fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_po
 // cancellation path. The handler gets its own cloned Logger (a borrow can't
 // cross into a detached closure). conn_id is assigned on this single accept
 // vthread, so the counter needs no synchronization.
-fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: Int, logger: &log.Logger, reg: conc.Arc<control.Registry>) nothrow -> Int {
+//
+// Exits once `shutting_down` is set (checked once per bounded
+// ACCEPT_TIMEOUT_MS accept call) — part of graceful SIGTERM/SIGINT shutdown,
+// see service_main's coordinator. Already-spawned per-connection handler
+// vthreads are NOT waited on here; shutdown is close-immediately, no drain,
+// matching this proxy's existing abrupt-close fault-action semantics.
+fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: Int, logger: &log.Logger, reg: conc.Arc<control.Registry>, shutting_down: &conc.Arc<conc.AtomicBool>) nothrow -> Int {
 	var next_conn_id = 0;
-	while true {
+	while not shutting_down.get().load(sync.MemoryOrder::Acquire()) {
 		match listener.accept(_dur(ACCEPT_TIMEOUT_MS)) {
 			core.Result::Ok(cs) => {
 				next_conn_id = next_conn_id + 1;
@@ -428,6 +451,7 @@ fn _accept_loop(listener: &net.TcpListener, backend_host: String, backend_port: 
 			}
 		}
 	}
+	logger.info("accept_loop_stopped");
 	return 0;
 }
 
@@ -440,7 +464,7 @@ fn _has_flag(argv: &Array<String>, key: String) nothrow -> Bool {
 	return false;
 }
 
-const USAGE: String = "mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy\n\nUsage: mariadb-failpoint-proxy [--data-host H] [--data-port P] [--backend-host H] [--backend-port P] [--control-host H] [--control-port P]\n\nRuns until killed; there is no built-in shutdown flag. See work/mariadb-rpc-failpoints/PLAN.md.";
+const USAGE: String = "mariadb-failpoint-proxy — test-only MariaDB wire fault-injection proxy\n\nUsage: mariadb-failpoint-proxy [--data-host H] [--data-port P] [--backend-host H] [--backend-port P] [--control-host H] [--control-port P]\n\nSIGTERM/SIGINT stop it gracefully (stop accepting, close listeners, exit) — no built-in reload/config flag. See work/mariadb-rpc-failpoints/PLAN.md.";
 
 // Entry point (referenced from drift/manifest.json as
 // mariadb.failpoint.proxy::service_main).
@@ -506,20 +530,68 @@ pub fn service_main(argv: Array<String>) nothrow -> Int {
 					// Registry is created only after the data listener is bound, so
 					// `health` reporting ready:true is always true by construction
 					// (see control.drift's _handle_health comment).
-					val registry = control.new_registry(_hostport(data_host, data_port));
+					val registry = control.new_registry(_hostport(data_host, data_port), _hostport(backend_host, backend_port));
 					logger.info("proxy_start", {"data_host": data_host, "data_port": format.format_int(data_port), "backend_host": backend_host, "backend_port": format.format_int(backend_port), "control_host": control_host, "control_port": format.format_int(control_port)});
+
+					// Shared shutdown flag: both accept loops poll it once per
+					// bounded ACCEPT_TIMEOUT_MS accept() call and return once it's
+					// set. Both loops now run on their OWN spawned vthread — the
+					// root VT (this one) becomes the shutdown coordinator below,
+					// since a single vthread must own the process-wide
+					// `conc.await_signal()` waiter (see std_concurrent.md's
+					// single-waiter rule).
+					val shutting_down: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
 
 					var control_logger = logger.derive("failpoint-proxy-control").build();
 					var registry_for_control = registry.clone();
-					var control_cb: core.Callback0<Int> = core.callback0(| | captures(move control_listener, move control_logger, move registry_for_control) => {
-						return control.run_control_loop(&control_listener, move registry_for_control, &control_logger);
+					var shutting_down_for_control = shutting_down.clone();
+					var control_cb: core.Callback0<Int> = core.callback0(| | captures(move control_listener, move control_logger, move registry_for_control, move shutting_down_for_control) => {
+						return control.run_control_loop(&control_listener, move registry_for_control, &control_logger, &shutting_down_for_control);
 					});
-					val _ = conc.spawn(move control_cb);
+					var control_vt: conc.VirtualThread<Int> = conc.spawn(move control_cb);
 
-					// main() runs as the root virtual thread, so socket I/O here parks
-					// on the same reactor as any spawned VT — run the data accept loop
-					// directly (the control accept loop above runs detached).
-					return _accept_loop(&listener, backend_host, backend_port, &logger, registry);
+					var data_logger = logger.derive("failpoint-proxy").build();
+					var registry_for_data = registry.clone();
+					var shutting_down_for_data = shutting_down.clone();
+					var data_cb: core.Callback0<Int> = core.callback0(| | captures(move listener, move data_logger, move registry_for_data, move shutting_down_for_data, copy backend_host, copy backend_port) => {
+						return _accept_loop(&listener, backend_host, backend_port, &data_logger, move registry_for_data, &shutting_down_for_data);
+					});
+					var data_vt: conc.VirtualThread<Int> = conc.spawn(move data_cb);
+
+					// Shutdown coordinator (root VT): block on the process-wide
+					// signal waiter. SIGUSR1 is reserved by the runtime for
+					// application use (e.g. a reload trigger) and isn't meaningful
+					// to this proxy, so it's logged and ignored — call
+					// await_signal() again for the next edge rather than treating
+					// it as shutdown. SIGINT/SIGTERM flip the shared flag so both
+					// accept loops notice on their next bounded accept() timeout,
+					// then this VT joins both (bounded — a stuck accept loop must
+					// not hang process exit) before returning. No drain: already-
+					// spawned per-connection/per-control-request handler vthreads
+					// are not waited on, matching this proxy's existing abrupt-
+					// close fault-action semantics elsewhere.
+					var shutdown_signal = "";
+					var awaiting_shutdown = true;
+					while awaiting_shutdown {
+						match conc.await_signal() {
+							conc.ProcessSignal::Interrupt => { shutdown_signal = "SIGINT"; awaiting_shutdown = false; },
+							conc.ProcessSignal::Terminate => { shutdown_signal = "SIGTERM"; awaiting_shutdown = false; },
+							conc.ProcessSignal::User1 => { logger.info("signal_ignored", {"signal": "SIGUSR1"}); }
+						}
+					}
+					logger.info("shutdown_signal", {"signal": shutdown_signal});
+					shutting_down.get().store(true, sync.MemoryOrder::Release());
+
+					match data_vt.join_timeout(_dur(SHUTDOWN_JOIN_TIMEOUT_MS)) {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { logger.error("shutdown_join_timeout", {"loop": "data"}); }
+					}
+					match control_vt.join_timeout(_dur(SHUTDOWN_JOIN_TIMEOUT_MS)) {
+						core.Result::Ok(_) => {},
+						core.Result::Err(_) => { logger.error("shutdown_join_timeout", {"loop": "control"}); }
+					}
+					logger.info("proxy_shutdown_complete", {"signal": shutdown_signal});
+					return 0;
 				}
 			}
 		}

@@ -48,7 +48,7 @@ fn _resp_array_len(resp: &String, key: String) nothrow -> Int {
 // arm defaults to match.nth = 1: armed:true immediately, status shows
 // armed/not-fired/fire_count 0 before any COMMIT is observed.
 fn scenario_arm_and_status() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"t1\",\"match\":{\"nth\":1}}";
 	val arm_resp = control.handle_line(&reg, &arm_req);
 	if not _resp_bool(&arm_resp, "ok") { return 101; }
@@ -65,7 +65,7 @@ fn scenario_arm_and_status() nothrow -> Int {
 
 // nth = 1 (default): the very next observed COMMIT fires.
 fn scenario_fire_nth1() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"once\",\"match\":{\"nth\":1}}";
 	val _arm_resp = control.handle_line(&reg, &arm_req);
 	val client = "127.0.0.1:50000";
@@ -86,7 +86,7 @@ fn scenario_fire_nth1() nothrow -> Int {
 // nth = 2 (the H1 Singular.start-then-complete shape): the first COMMIT
 // passes through unfired, only the second fires.
 fn scenario_fire_nth2() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"second\",\"match\":{\"nth\":2}}";
 	val _arm_resp = control.handle_line(&reg, &arm_req);
 	val client = "127.0.0.1:50001";
@@ -110,7 +110,7 @@ fn scenario_fire_nth2() nothrow -> Int {
 
 // assert_all_fired: ok:false with armed_count while unfired, ok:true after.
 fn scenario_assert_all_fired() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
 	val _r = control.handle_line(&reg, &arm_req);
 	val assert_req = "{\"op\":\"assert_all_fired\"}";
@@ -132,7 +132,7 @@ fn scenario_assert_all_fired() nothrow -> Int {
 // an empty set: assert_all_fired on a fresh (never-armed) registry is ok:false
 // with error "not-armed" and armed_count 0.
 fn scenario_assert_all_fired_never_armed() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val assert_req = "{\"op\":\"assert_all_fired\"}";
 	val resp = control.handle_line(&reg, &assert_req);
 	if _resp_bool(&resp, "ok") { return 451; }
@@ -145,7 +145,7 @@ fn scenario_assert_all_fired_never_armed() nothrow -> Int {
 // reports armed_count 0 (so a test that forgot to arm fails loudly, not
 // silently passes on an empty set).
 fn scenario_clear() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
 	val _r = control.handle_line(&reg, &arm_req);
 	val clear_req = "{\"op\":\"clear\"}";
@@ -167,7 +167,7 @@ fn scenario_clear() nothrow -> Int {
 }
 
 fn scenario_bad_json() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val bad = "not json at all";
 	val resp = control.handle_line(&reg, &bad);
 	if _resp_bool(&resp, "ok") { return 601; }
@@ -176,7 +176,7 @@ fn scenario_bad_json() nothrow -> Int {
 }
 
 fn scenario_unknown_op() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val req = "{\"op\":\"bogus\"}";
 	val resp = control.handle_line(&reg, &req);
 	if _resp_bool(&resp, "ok") { return 701; }
@@ -185,7 +185,7 @@ fn scenario_unknown_op() nothrow -> Int {
 }
 
 fn scenario_unknown_id() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val req = "{\"op\":\"status\",\"id\":999}";
 	val resp = control.handle_line(&reg, &req);
 	if _resp_bool(&resp, "ok") { return 801; }
@@ -194,7 +194,7 @@ fn scenario_unknown_id() nothrow -> Int {
 }
 
 fn scenario_bad_args() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val req = "{\"op\":\"arm\"}";
 	val resp = control.handle_line(&reg, &req);
 	if _resp_bool(&resp, "ok") { return 901; }
@@ -207,7 +207,7 @@ fn scenario_bad_args() nothrow -> Int {
 // default, the caller must state a duration that outlasts whatever client
 // timeout it's proving against).
 fn scenario_hold_requires_hold_ms() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val missing = "{\"op\":\"arm\",\"label\":\"h\",\"action\":\"drop_and_hold_after_forward\"}";
 	val r1 = control.handle_line(&reg, &missing);
 	if _resp_bool(&r1, "ok") { return 1101; }
@@ -231,7 +231,7 @@ fn scenario_hold_requires_hold_ms() nothrow -> Int {
 // status, and observe_commit's FireResult carries the same action/hold_ms
 // through to the data path.
 fn scenario_hold_arm_and_fire() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"hold1\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":6000,\"match\":{\"nth\":1}}";
 	val arm_resp = control.handle_line(&reg, &arm_req);
 	if not _resp_bool(&arm_resp, "ok") { return 1201; }
@@ -259,7 +259,7 @@ fn scenario_hold_arm_and_fire() nothrow -> Int {
 // The original immediate-close action still defaults with no explicit
 // `action` field, and status/FireResult echo it explicitly (not blank).
 fn scenario_default_action_echoed() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val arm_req = "{\"op\":\"arm\",\"label\":\"default1\",\"match\":{\"nth\":1}}";
 	val _arm_resp = control.handle_line(&reg, &arm_req);
 	val status_req = "{\"op\":\"status\",\"id\":1}";
@@ -270,7 +270,7 @@ fn scenario_default_action_echoed() nothrow -> Int {
 }
 
 fn scenario_list_and_health() nothrow -> Int {
-	val reg = control.new_registry("127.0.0.1:43306");
+	val reg = control.new_registry("127.0.0.1:43306", "127.0.0.1:3306");
 	val a1 = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
 	val a2 = "{\"op\":\"arm\",\"label\":\"b\",\"match\":{\"nth\":1}}";
 	val _r1 = control.handle_line(&reg, &a1);
@@ -285,6 +285,7 @@ fn scenario_list_and_health() nothrow -> Int {
 	if not _resp_bool(&health_resp, "ok") { return 1002; }
 	if not _resp_bool(&health_resp, "ready") { return 1003; }
 	if _resp_string(&health_resp, "data_listener") != "127.0.0.1:43306" { return 1004; }
+	if _resp_string(&health_resp, "backend_listener") != "127.0.0.1:3306" { return 1005; }
 	return 0;
 }
 
