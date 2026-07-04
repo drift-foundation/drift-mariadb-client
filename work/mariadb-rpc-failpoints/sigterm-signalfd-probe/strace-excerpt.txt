@@ -1,0 +1,79 @@
+Trimmed excerpts from `strace -f -tt` against a running mariadb-failpoint-proxy
+subprocess (built from this repo at commit 92fcc3e, certified toolchain
+drift-lang@5c6e03f / abi19). Full trace was 20,694,892 lines over the
+~167s the trace ran; these are the three interesting slices. PIDs are
+thread ids under the traced process (2774216 main, 2774217/18/19 others).
+
+=====================================================================
+1) Startup: signal blocking + signalfd registration, before any app code runs
+=====================================================================
+
+2774216 17:30:49.913506 read(3, "\177ELF\2\1\1\0\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0\0\0\0\0\0\0\0\0"..., 832) = 832
+2774216 17:30:49.913776 read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0000\247\2\0\0\0\0\0"..., 832) = 832
+2774216 17:30:49.913990 rt_sigaction(SIGPIPE, {sa_handler=SIG_IGN, sa_mask=[PIPE], sa_flags=SA_RESTORER|SA_RESTART, sa_restorer=0x7e7337245f60}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=0}, 8) = 0
+2774216 17:30:49.914006 rt_sigprocmask(SIG_BLOCK, [INT USR1 TERM], NULL, 8) = 0
+2774216 17:30:49.914014 signalfd4(-1, [INT USR1 TERM], 8, SFD_NONBLOCK) = 3
+2774216 17:30:49.914131 rt_sigprocmask(SIG_BLOCK, [USR2], NULL, 8) = 0
+2774216 17:30:49.914139 rt_sigaction(SIGRT_1, {sa_handler=0x7e73372a1030, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_SIGINFO, sa_restorer=0x7e7337245f60}, NULL, 8) = 0
+2774216 17:30:49.914147 rt_sigprocmask(SIG_UNBLOCK, [RTMIN RT_1], NULL, 8) = 0
+2774216 17:30:49.914170 rt_sigprocmask(SIG_BLOCK, ~[], [INT USR1 USR2 TERM], 8) = 0
+2774216 17:30:49.914197 rt_sigprocmask(SIG_SETMASK, [INT USR1 USR2 TERM], NULL, 8) = 0
+2774216 17:30:49.914261 rt_sigprocmask(SIG_BLOCK, ~[], [INT USR1 USR2 TERM], 8) = 0
+...
+2774218 17:30:49.914655 epoll_ctl(6, EPOLL_CTL_ADD, 7, {events=EPOLLIN, data=0x7}) = 0
+2774218 17:30:49.914664 epoll_ctl(6, EPOLL_CTL_ADD, 3, {events=EPOLLIN, data=0x3}) = 0   <-- signalfd (fd 3) added to the reactor's epoll set (fd 6)
+
+Note fd 3 is reused: it briefly was the dynamic linker's own read of the ELF
+header, closed, then reopened as the signalfd. This IS runtime bootstrap —
+these calls happen before service_main()'s own logic (listener bind, etc.)
+
+=====================================================================
+2) The transition: correctly blocking for ~15.9s, then SIGTERM breaks it
+=====================================================================
+
+2774218 17:30:49.914845 epoll_wait(6, [{events=EPOLLIN, data=0x7}], 16, 3599999) = 1
+2774218 17:30:49.914854 read(7, "\1\0\0\0\0\0\0\0", 8) = 8
+2774218 17:30:49.914863 read(7, 0x7e73369fd930, 8) = -1 EAGAIN (Resource temporarily unavailable)
+2774218 17:30:49.914871 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3599999) = 1   <-- one spurious/startup wakeup on fd3, harmless
+                                                                                          (16 second gap follows -- process correctly BLOCKS here, ~0% CPU)
+2774218 17:31:05.800471 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1   <-- kill -TERM sent at 17:31:05.799896649 (see below);
+2774218 17:31:05.800491 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1       this is ~0.6ms later -- signal delivered, signalfd
+2774218 17:31:05.800505 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1       goes readable, epoll_wait wakes -- and NEVER SLEEPS AGAIN
+2774218 17:31:05.800516 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1
+2774218 17:31:05.800523 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1
+2774218 17:31:05.800530 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1
+2774218 17:31:05.800537 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3584114) = 1
+
+Shell side, same invocation:
+  $ date +%s.%N && kill -TERM 2774216 && echo "SIGTERM sent at $(date +%s.%N)"
+  SIGTERM sent at 1783121465.799896649   (= Fri Jul 3 17:31:05 MDT 2026)
+
+=====================================================================
+3) Steady state: tight busy-spin, ~10us/iteration, forever, no read(3, ...) ever
+=====================================================================
+
+2774218 17:31:22.175806 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3567738) = 1
+2774218 17:31:22.175816 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3567738) = 1
+2774218 17:31:22.175826 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3567738) = 1
+2774218 17:31:22.175835 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3567738) = 1
+2774218 17:31:22.175845 epoll_wait(6, [{events=EPOLLIN, data=0x3}], 16, 3567738) = 1
+... (identical, ~10us apart, until the process was SIGKILLed ~2m47s after SIGTERM)
+
+=====================================================================
+Aggregate counts over the full trace (17:30:49.913506 - 17:33:36.983512, ~167s)
+=====================================================================
+
+  total syscalls logged:                                20,694,892
+  epoll_wait(...) returning signalfd (fd 3) ready:       20,694,853  (~124,000/sec)
+  read(3, ...) calls anywhere after signalfd4() created:          0
+
+=====================================================================
+Per-thread signal masks at the time of the hang (from /proc/<pid>/task/*/status,
+captured independently, matches the strace rt_sigprocmask calls above)
+=====================================================================
+
+tid 2770083: SigBlk=0000000000004a02 -> INT, USR1, USR2, TERM
+tid 2770084: SigBlk=0000000000004202 -> INT, USR1, TERM        (this one's wchan was do_sigtimedwait -- waiting on USR2 alone, unrelated to TERM)
+tid 2770085: SigBlk=0000000000004a02 -> INT, USR1, USR2, TERM
+tid 2770086: SigBlk=0000000000004a02 -> INT, USR1, USR2, TERM
+SigIgn (all threads): 0000000000001000 -> PIPE

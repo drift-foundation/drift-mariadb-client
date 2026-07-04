@@ -202,6 +202,73 @@ fn scenario_bad_args() nothrow -> Int {
 	return 0;
 }
 
+// drop_and_hold_after_forward requires hold_ms in (0, MAX] — missing, zero,
+// negative, and over-max are all bad-args (PLAN.md §14: no proxy-side
+// default, the caller must state a duration that outlasts whatever client
+// timeout it's proving against).
+fn scenario_hold_requires_hold_ms() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val missing = "{\"op\":\"arm\",\"label\":\"h\",\"action\":\"drop_and_hold_after_forward\"}";
+	val r1 = control.handle_line(&reg, &missing);
+	if _resp_bool(&r1, "ok") { return 1101; }
+	if _resp_string(&r1, "error") != "bad-args" { return 1102; }
+
+	val zero = "{\"op\":\"arm\",\"label\":\"h\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":0}";
+	val r2 = control.handle_line(&reg, &zero);
+	if _resp_bool(&r2, "ok") { return 1103; }
+
+	val negative = "{\"op\":\"arm\",\"label\":\"h\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":-5}";
+	val r3 = control.handle_line(&reg, &negative);
+	if _resp_bool(&r3, "ok") { return 1104; }
+
+	val over_max = "{\"op\":\"arm\",\"label\":\"h\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":300001}";
+	val r4 = control.handle_line(&reg, &over_max);
+	if _resp_bool(&r4, "ok") { return 1105; }
+	return 0;
+}
+
+// A valid drop_and_hold_after_forward arm succeeds, echoes hold_ms/action in
+// status, and observe_commit's FireResult carries the same action/hold_ms
+// through to the data path.
+fn scenario_hold_arm_and_fire() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"hold1\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":6000,\"match\":{\"nth\":1}}";
+	val arm_resp = control.handle_line(&reg, &arm_req);
+	if not _resp_bool(&arm_resp, "ok") { return 1201; }
+
+	val status_req = "{\"op\":\"status\",\"id\":1}";
+	val before = control.handle_line(&reg, &status_req);
+	if _resp_string(&before, "action") != "drop_and_hold_after_forward" { return 1202; }
+	if _resp_int(&before, "hold_ms") != 6000 { return 1203; }
+
+	val client = "127.0.0.1:50010";
+	match control.observe_commit(&reg, &client) {
+		Optional::Some(f) => {
+			if f.action != "drop_and_hold_after_forward" { return 1204; }
+			if f.hold_ms != 6000 { return 1205; }
+		},
+		Optional::None => { return 1206; }
+	}
+
+	val after = control.handle_line(&reg, &status_req);
+	if not _resp_bool(&after, "fired") { return 1207; }
+	if _resp_string(&after, "action") != "drop_and_hold_after_forward" { return 1208; }
+	return 0;
+}
+
+// The original immediate-close action still defaults with no explicit
+// `action` field, and status/FireResult echo it explicitly (not blank).
+fn scenario_default_action_echoed() nothrow -> Int {
+	val reg = control.new_registry("127.0.0.1:43306");
+	val arm_req = "{\"op\":\"arm\",\"label\":\"default1\",\"match\":{\"nth\":1}}";
+	val _arm_resp = control.handle_line(&reg, &arm_req);
+	val status_req = "{\"op\":\"status\",\"id\":1}";
+	val before = control.handle_line(&reg, &status_req);
+	if _resp_string(&before, "action") != "drop_server_response_after_forward" { return 1301; }
+	if _resp_int(&before, "hold_ms") != 0 { return 1302; }
+	return 0;
+}
+
 fn scenario_list_and_health() nothrow -> Int {
 	val reg = control.new_registry("127.0.0.1:43306");
 	val a1 = "{\"op\":\"arm\",\"label\":\"a\",\"match\":{\"nth\":1}}";
@@ -244,5 +311,11 @@ pub fn main() nothrow -> Int {
 	if i != 0 { return i; }
 	val j = scenario_list_and_health();
 	if j != 0 { return j; }
+	val k = scenario_hold_requires_hold_ms();
+	if k != 0 { return k; }
+	val l = scenario_hold_arm_and_fire();
+	if l != 0 { return l; }
+	val m = scenario_default_action_echoed();
+	if m != 0 { return m; }
 	return 0;
 }

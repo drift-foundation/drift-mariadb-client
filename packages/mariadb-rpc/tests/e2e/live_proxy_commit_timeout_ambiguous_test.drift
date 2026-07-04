@@ -1,0 +1,386 @@
+// Proves the timeout-flavored ambiguous-COMMIT-ack-loss boundary classifies
+// identically to the reset-flavored one already proven by
+// live_proxy_pool_commit_ambiguous_test.drift (S7).
+//
+// Background (work/mariadb-rpc-failpoints/PLAN.md §6/§14): the proxy's
+// default fault action closes the client side immediately after forwarding
+// the COMMIT (FIN/RST) — the wire layer sees an immediate read-side
+// transport failure. An app team asked whether the SLOW/HUNG-network flavor
+// — proxy forwards the full COMMIT, then holds the connection open
+// (responds to neither side) until the client's own commit-I/O read timeout
+// elapses — classifies the same way: does `RpcCommitError.kind` still come
+// back `AmbiguousWrite`, does the client not hang, and does the pool still
+// discard the poisoned connection and reconnect cleanly? This test answers
+// that empirically using the proxy's `drop_and_hold_after_forward` action.
+//
+// COMMIT_READ_TIMEOUT_MS/PROXY_HOLD_MS below stand in for a real caller's
+// commit-I/O timeout (e.g. bookkeeper's is 5000ms) and the proxy hold armed
+// against it — the specific millisecond values don't matter to the
+// classification question this test answers, only that hold > client
+// timeout (PLAN.md §14: the proxy never guesses this relationship, the
+// caller must arm it explicitly), so smaller values are used here to keep
+// this test's wall-clock cost bounded. The gap between them is intentionally
+// wide (2000ms vs 6000ms, not a near-miss) so the elapsed-time assertion
+// below has comfortable margin on both sides.
+//
+// Asserting only the error kind and reconnect (like S7 does for the
+// reset-flavored close) is NOT enough to prove the timeout flavor
+// specifically: if `drop_and_hold_after_forward` had a bug that made it
+// silently behave like the immediate-close action, this test would still
+// see AmbiguousWrite and a clean reconnect and falsely pass. So this test
+// additionally times how long commit() actually takes to fail (see
+// MIN_EXPECTED_ELAPSED_MS/MAX_EXPECTED_ELAPSED_MS below) — proving the
+// failure took about as long as the CLIENT's own read timeout, not the
+// near-instant failure a reset/immediate-close would produce, and not the
+// full PROXY_HOLD_MS (which would mean the proxy's own close fired instead
+// of the client's timeout).
+//
+// MANUAL — not in the gate's curated LIVE_TESTS (same reason as
+// live_proxy_pool_commit_ambiguous_test.drift: it needs an already-running
+// proxy in front of the dev DB). Run via tools/proxy_gate_smoke.py (case 5)
+// or by hand:
+//
+//   just build-app mariadb-failpoint-proxy
+//   build/local-app/mariadb-failpoint-proxy --data-port 43306 \
+//       --backend-host 127.0.0.1 --backend-port 34114 --control-port 43307 &
+//   just check-one packages/mariadb-rpc/tests/e2e/live_proxy_commit_timeout_ambiguous_test.drift
+//
+// Flow mirrors S7 except for the armed action and the added timing check:
+// clear the proxy's failpoint registry -> arm a one-shot exact-COMMIT
+// `drop_and_hold_after_forward` failpoint with `hold_ms` = PROXY_HOLD_MS
+// (comfortably longer than this connection's own read timeout) -> acquire
+// the pool's sole connection (min_idle=0, so this is the FIRST real connect)
+// -> call commit(), timing it, and assert it fails with
+// RpcCommitErrorKind::AmbiguousWrite (not a hang, not a different error
+// kind) after an elapsed time consistent with the CLIENT's own read timeout
+// (not reset-mode's near-instant failure, not PROXY_HOLD_MS) -> drop the
+// lease (pool's release path discards it since is_alive() is now false) ->
+// assert the proxy fired exactly once over the control API -> acquire again
+// and assert a plain commit() now succeeds (fresh physical connection,
+// one-shot already spent). That second acquire typically happens WHILE the
+// proxy is still holding the first, now-abandoned connection open — see the
+// comment at the second acquire below.
+module mariadb.rpc.tests.e2e.live_proxy_commit_timeout_ambiguous_test;
+
+import std.core as core;
+import std.io as io;
+import std.net as net;
+import std.concurrent as conc;
+import std.text as text;
+import std.json as json;
+import std.format as format;
+import std.time as time;
+import std.console as console;
+import mariadb.rpc as rpc;
+import mariadb.rpc.managed as managed;
+import mariadb.rpc.pool as pool;
+
+const PROXY_HOST: String = "127.0.0.1";
+const PROXY_DATA_PORT: Int = 43306;
+const PROXY_CONTROL_PORT: Int = 43307;
+const LIVE_USER: String = "root";
+const LIVE_PASSWORD: String = "rootpw";
+const LIVE_DB: String = "appdb";
+const TIMEOUT_MS: Int = 2000;
+// The client-side commit I/O timeout under test — this is what must fire
+// (not the proxy) to classify the connection as ambiguous.
+const COMMIT_READ_TIMEOUT_MS: Int = 2000;
+// The proxy's hold duration for the armed failpoint: must outlast
+// COMMIT_READ_TIMEOUT_MS so the client's own timeout is what's observed,
+// not a proxy-initiated close racing it. Deliberately a wide multiple (3x)
+// of COMMIT_READ_TIMEOUT_MS, not a near-miss, so MIN/MAX_EXPECTED_ELAPSED_MS
+// below have comfortable margin on both sides.
+const PROXY_HOLD_MS: Int = 6000;
+// Window commit() is expected to take to fail, bracketing
+// COMMIT_READ_TIMEOUT_MS with slack on both sides. The lower bound rules out
+// reset-mode's near-instant failure (drop_and_hold silently behaving like
+// the immediate-close action); the upper bound rules out PROXY_HOLD_MS
+// itself firing (the proxy's own close winning the race instead of the
+// client's read timeout) — see the module comment above.
+const MIN_EXPECTED_ELAPSED_MS: Int = 1500;
+const MAX_EXPECTED_ELAPSED_MS: Int = 4000;
+// Overall deadline for one control-plane request/response, spanning however
+// many individual WOULD_BLOCK-bounded read/write calls it takes — a single
+// read's timeout does not by itself cap the total wait if the peer keeps
+// returning WOULD_BLOCK indefinitely.
+const CONTROL_OVERALL_TIMEOUT_MS: Int = 5000;
+
+fn _rpc_cfg() nothrow -> core.Result<rpc.RpcConnectionConfig, rpc.RpcConfigError> {
+	var b = rpc.new_connection_config_builder();
+	b.with_host(PROXY_HOST);
+	b.with_port(PROXY_DATA_PORT);
+	b.with_user(LIVE_USER);
+	b.with_password(LIVE_PASSWORD);
+	b.with_database(LIVE_DB);
+	b.with_connect_timeout_ms(TIMEOUT_MS);
+	b.with_read_timeout_ms(COMMIT_READ_TIMEOUT_MS);
+	b.with_write_timeout_ms(TIMEOUT_MS);
+	b.with_autocommit(false);
+	b.with_strict_reuse(true);
+	return rpc.build_connection_config(move b);
+}
+
+fn _pool_cfg() nothrow -> pool.PoolConfig {
+	var pc = pool.default_pool_config();
+	pc.min_idle = 0;
+	pc.max_conns = 1;
+	pc.keepalive_interval_ms = 0;
+	pc.idle_timeout_ms = 60000;
+	// Explicit bound: the config default is None ("block forever"), which
+	// would turn a regression in the release/discard path this test exercises
+	// into a hang instead of a loud failure.
+	pc.acquire_timeout = Optional::Some(conc.Duration(millis = TIMEOUT_MS));
+	return move pc;
+}
+
+// -----------------------------------------------------------------------
+// Minimal control-plane client: raw TCP, one JSON Lines request/response.
+// Deliberately self-contained rather than depending on the failpoint-proxy
+// app's control.drift — that module belongs to a different manifest artifact
+// (kind:app), not a dependency mariadb-rpc's own package/test build resolves.
+// Duplicated verbatim from live_proxy_pool_commit_ambiguous_test.drift (S7),
+// consistent with the other live_proxy_* tests' documented choice not to
+// factor a shared test-support module for this.
+// -----------------------------------------------------------------------
+
+fn _write_all(stream: &mut net.TcpStream, bytes: &mut Array<Byte>, n: Int) nothrow -> Bool {
+	val start = time.now_monotonic();
+	var off = 0;
+	while off < n {
+		if time.elapsed_ms(&start) >= CONTROL_OVERALL_TIMEOUT_MS { return false; }
+		match stream.write_bytes(bytes, off, n - off, conc.Duration(millis = TIMEOUT_MS)) {
+			core.Result::Ok(w) => {
+				if w <= 0 { return false; }
+				off = off + w;
+			},
+			core.Result::Err(e) => {
+				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return false; }
+			}
+		}
+	}
+	return true;
+}
+
+// Send one JSON line, block for the one-line response (synchronous
+// request/response, per PLAN.md §7). Returns the response text (no
+// trailing newline) or an Err tag.
+fn _control_request(req: String) nothrow -> core.Result<String, String> {
+	val addr = net.socket_addr(PROXY_HOST, PROXY_CONTROL_PORT);
+	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+		core.Result::Err(_) => { return core.Result::Err("connect-failed"); },
+		core.Result::Ok(s) => {
+			var stream = move s;
+			val line = req + "\n";
+			var bytes = core.string_to_utf8_bytes(&line);
+			val n = bytes.len;
+			if not _write_all(&mut stream, &mut bytes, n) {
+				val _ = stream.close(conc.Duration(millis = 1000));
+				return core.Result::Err("write-failed-or-timeout");
+			}
+			var acc: Array<Byte> = [];
+			var lf = -1;
+			val read_start = time.now_monotonic();
+			while lf < 0 {
+				if time.elapsed_ms(&read_start) >= CONTROL_OVERALL_TIMEOUT_MS {
+					val _ = stream.close(conc.Duration(millis = 1000));
+					return core.Result::Err("response-timeout");
+				}
+				var buf = io.buffer(4096);
+				match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+					core.Result::Ok(rn) => {
+						if rn <= 0 {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("eof-before-newline");
+						}
+						var i = 0;
+						while i < rn {
+							acc.push(io.buffer_read(&mut buf, i));
+							i = i + 1;
+						}
+						var j = 0;
+						while j < acc.len and lf < 0 {
+							if acc[j] == cast<Byte>(10) { lf = j; }
+							j = j + 1;
+						}
+					},
+					core.Result::Err(e) => {
+						if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else {
+							val _ = stream.close(conc.Duration(millis = 1000));
+							return core.Result::Err("read-failed");
+						}
+					}
+				}
+			}
+			val _ = stream.close(conc.Duration(millis = 1000));
+			match text.utf8_from_bytes_range(&acc, 0, lf) {
+				core.Result::Ok(s2) => { return core.Result::Ok(s2); },
+				core.Result::Err(_) => { return core.Result::Err("utf8-decode-failed"); }
+			}
+		}
+	}
+}
+
+fn _json_bool(resp: &String, key: String) nothrow -> Bool {
+	match json.parse(resp) {
+		core.Result::Ok(root) => { return root.select().field(key).as_bool_or(false); },
+		core.Result::Err(_) => { return false; }
+	}
+}
+
+fn _best_effort_clear() nothrow -> Void {
+	val _ = _control_request("{\"op\":\"clear\"}");
+	return;
+}
+
+// Everything from here on assumes the failpoint is already armed on the
+// (shared, long-lived) proxy process. Factored out of main() so every
+// failure path funnels through ONE best-effort clear call in the caller,
+// instead of needing to remember it at every early return — a failed run
+// must not leave the proxy sitting armed or fired for whatever manual test
+// runs next. `p` only needs `&ConnectionPool`: acquire() is `&self` and
+// internally synchronized (see managed.drift's ConnectionSource comment).
+fn _run_after_arm(p: &pool.ConnectionPool) nothrow -> Int {
+	match p.acquire() {
+		core.Result::Err(e) => { console.println("[main] acquire#1 failed: " + e.tag); return 6; },
+		core.Result::Ok(lv1) => {
+			var lease1 = move lv1;
+			var rc = 0;
+			match lease1.conn() {
+				core.Result::Err(_) => { rc = 7; },
+				core.Result::Ok(c) => {
+					val commit_start = time.now_monotonic();
+					match c.commit() {
+						core.Result::Ok(_) => {
+							console.println("[main] UNEXPECTED: commit succeeded (failpoint did not fire)");
+							rc = 8;
+						},
+						core.Result::Err(ce) => {
+							val elapsed_ms = time.elapsed_ms(&commit_start);
+							console.println("[main] commit failed after " + format.format_int(elapsed_ms) + "ms");
+							match ce.kind {
+								rpc.RpcCommitErrorKind::AmbiguousWrite => {
+									console.println("[main] commit -> AmbiguousWrite (expected — timeout classifies the same as reset)");
+									// The core proof this test exists for: the error kind
+									// alone can't distinguish "the client's own read timeout
+									// fired" from "drop_and_hold silently behaved like the
+									// immediate-close action" — both report AmbiguousWrite.
+									// Elapsed time does: reset-mode fails in low single-digit
+									// ms (see live_proxy_pool_commit_ambiguous_test.drift),
+									// while a genuine client-side read timeout takes about
+									// COMMIT_READ_TIMEOUT_MS.
+									if elapsed_ms < MIN_EXPECTED_ELAPSED_MS {
+										console.println("[main] but commit returned too fast (" + format.format_int(elapsed_ms) + "ms < " + format.format_int(MIN_EXPECTED_ELAPSED_MS) + "ms) — looks like reset-mode timing, not a genuine client-side read timeout");
+										rc = 15;
+									} else if elapsed_ms >= MAX_EXPECTED_ELAPSED_MS {
+										console.println("[main] but commit took " + format.format_int(elapsed_ms) + "ms (>= " + format.format_int(MAX_EXPECTED_ELAPSED_MS) + "ms) — too close to PROXY_HOLD_MS (" + format.format_int(PROXY_HOLD_MS) + "ms); looks like the proxy's own hold-then-close fired instead of the client's read timeout");
+										rc = 16;
+									} else {
+										console.println("[main] elapsed time is consistent with the CLIENT's own read timeout firing (not reset-mode's near-instant failure, not the proxy's hold elapsing)");
+									}
+								},
+								rpc.RpcCommitErrorKind::NotSent => { console.println("[main] commit -> NotSent (unexpected), cause_tag=" + ce.cause_tag); rc = 9; },
+								rpc.RpcCommitErrorKind::ServerRejected => { console.println("[main] commit -> ServerRejected (unexpected), cause_tag=" + ce.cause_tag); rc = 9; }
+							}
+						}
+					}
+				}
+			}
+			// Drop the poisoned lease: the pool's release path checks
+			// is_alive() (false after the ambiguous-write read failure) and
+			// discards rather than requeues it — no explicit "discard" call
+			// needed. acquire#2 below is bounded by pool_cfg's
+			// acquire_timeout, so if this release/discard path regressed and
+			// the slot is never freed, this test fails loudly instead of
+			// hanging.
+			val _ = move lease1;
+			if rc != 0 { return rc; }
+		}
+	}
+
+	match _control_request("{\"op\":\"assert_all_fired\"}") {
+		core.Result::Err(tag) => { console.println("[main] assert_all_fired request failed: " + tag); return 10; },
+		core.Result::Ok(assert_resp) => {
+			if not _json_bool(&assert_resp, "ok") { console.println("[main] assert_all_fired not ok: " + assert_resp); return 11; }
+		}
+	}
+
+	// Next acquire must reconnect cleanly (fresh physical connection — the
+	// poisoned one was discarded, not requeued) and commit normally: the
+	// one-shot failpoint already fired and auto-disarmed. This typically
+	// happens WHILE the proxy is still holding the first (now abandoned)
+	// connection open — commit#1 above returned as soon as the CLIENT's own
+	// read timeout fired (COMMIT_READ_TIMEOUT_MS), well before PROXY_HOLD_MS
+	// elapses and the proxy self-closes that old connection on its own. The
+	// property this proves is stronger than "the proxy already cleaned up":
+	// the pool frees its slot and reconnects independently of whatever the
+	// proxy is still doing with the discarded connection.
+	match p.acquire() {
+		core.Result::Err(e) => { console.println("[main] acquire#2 failed: " + e.tag); return 12; },
+		core.Result::Ok(lv2) => {
+			var lease2 = move lv2;
+			var rc2 = 0;
+			match lease2.conn() {
+				core.Result::Err(_) => { rc2 = 13; },
+				core.Result::Ok(c2) => {
+					match c2.commit() {
+						core.Result::Ok(_) => { console.println("[main] recovery commit ok"); },
+						core.Result::Err(ce2) => { console.println("[main] recovery commit FAILED, cause_tag=" + ce2.cause_tag); rc2 = 14; }
+					}
+				}
+			}
+			val _ = move lease2;
+			if rc2 != 0 { return rc2; }
+		}
+	}
+	return 0;
+}
+
+pub fn main() nothrow -> Int {
+	console.println("=== live_proxy_commit_timeout_ambiguous_test ===");
+
+	// Independent of whatever another manual run left armed/fired.
+	match _control_request("{\"op\":\"clear\"}") {
+		core.Result::Err(tag) => { console.println("[main] control clear failed: " + tag + " (is the proxy running on " + PROXY_HOST + ":" + format.format_int(PROXY_CONTROL_PORT) + "?)"); return 1; },
+		core.Result::Ok(clear_resp) => {
+			if not _json_bool(&clear_resp, "ok") { console.println("[main] clear not ok: " + clear_resp); return 1; }
+		}
+	}
+
+	match _rpc_cfg() {
+		core.Result::Err(_) => { console.println("[main] rpc config build failed"); return 2; },
+		core.Result::Ok(cfg) => {
+			var pc = _pool_cfg();
+			match pool.open(move cfg, move pc) {
+				core.Result::Err(e) => { console.println("[main] pool open failed: " + e.tag); return 3; },
+				core.Result::Ok(v) => {
+					var p = move v;
+
+					// Arm BEFORE the pool ever opens a connection: min_idle=0 means
+					// pool.open() seeded nothing, so the arm ack is guaranteed to be
+					// live before the first (and only) COMMIT this test issues.
+					val arm_req = "{\"op\":\"arm\",\"label\":\"commit-timeout-ambiguous\",\"action\":\"drop_and_hold_after_forward\",\"hold_ms\":" + format.format_int(PROXY_HOLD_MS) + ",\"match\":{\"nth\":1}}";
+					match _control_request(arm_req) {
+						core.Result::Err(tag) => { console.println("[main] arm request failed: " + tag); val _ = p.close(); return 4; },
+						core.Result::Ok(arm_resp) => {
+							if not _json_bool(&arm_resp, "ok") { console.println("[main] arm not ok: " + arm_resp); val _ = p.close(); return 5; }
+						}
+					}
+
+					// The failpoint is now armed on the shared proxy: any failure
+					// from here on must best-effort clear it before returning, so a
+					// failed run doesn't leave stale armed/fired state for whatever
+					// manual test runs next.
+					val rc = _run_after_arm(&p);
+					val _ = p.close();
+					if rc != 0 {
+						_best_effort_clear();
+						return rc;
+					}
+
+					console.println("[main] PASS");
+					return 0;
+				}
+			}
+		}
+	}
+}

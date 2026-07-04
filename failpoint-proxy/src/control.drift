@@ -32,7 +32,9 @@ export {
 	new_registry,
 	observe_commit,
 	handle_line,
-	run_control_loop
+	run_control_loop,
+	ACTION_DROP_AFTER_FORWARD,
+	ACTION_DROP_AND_HOLD_AFTER_FORWARD
 };
 
 const ACCEPT_TIMEOUT_MS: Int = 3600000;
@@ -43,6 +45,21 @@ const CHUNK: Int = 4096;
 // Robust reader cap (PLAN.md §7): past this, a line without '\n' is rejected
 // as too-long rather than growing the accumulator without bound.
 const MAX_LINE_BYTES: Int = 1000000;
+
+// v1's original fault action: reset-style ambiguous ack loss (client sees an
+// immediate read-side transport failure — see PLAN.md §6/§9).
+pub const ACTION_DROP_AFTER_FORWARD: String = "drop_server_response_after_forward";
+// Timeout-style ambiguous ack loss (PLAN.md §14): forward the full COMMIT,
+// then hold the connection open (respond to neither direction) for
+// `hold_ms`, so the client's own commit-I/O timeout is what fires, not a
+// proxy-initiated close/reset. `hold_ms` is mandatory and bounded
+// (MIN_HOLD_MS..MAX_HOLD_MS) — a fixed proxy-side default would silently
+// couple the proxy to whatever a caller's commit timeout happens to be
+// today; the caller must state it explicitly so the hold always outlasts
+// the timeout it's proving against.
+pub const ACTION_DROP_AND_HOLD_AFTER_FORWARD: String = "drop_and_hold_after_forward";
+const MIN_HOLD_MS: Int = 1;
+const MAX_HOLD_MS: Int = 300000;
 
 // -----------------------------------------------------------------------
 // Registry
@@ -68,7 +85,10 @@ pub struct FailpointEntry {
 	pub matched_sql: String,
 	pub matched_nth: Int,
 	pub bytes_forwarded_to_server: Int,
-	pub server_response_bytes_dropped: Int
+	pub server_response_bytes_dropped: Int,
+	// Only meaningful when action == ACTION_DROP_AND_HOLD_AFTER_FORWARD; 0
+	// for the immediate-close action.
+	pub hold_ms: Int
 }
 
 pub struct RegistrySlot {
@@ -86,7 +106,9 @@ pub struct FireResult {
 	pub id: Int,
 	pub label: String,
 	pub db_domain: String,
-	pub matched_nth: Int
+	pub matched_nth: Int,
+	pub action: String,
+	pub hold_ms: Int
 }
 
 pub fn new_registry(data_listener: String) nothrow -> conc.Arc<Registry> {
@@ -124,12 +146,18 @@ pub fn observe_commit(reg: &conc.Arc<Registry>, client: &String) nothrow -> Opti
 				// exactly that text (PLAN.md §5/§9), so this is exact for
 				// the intended consumer rather than a generic measurement.
 				e.bytes_forwarded_to_server = 11;
-				// The proxy deliberately never reads the swallowed server
-				// response (reading it would itself risk forwarding part of
-				// it), so the dropped byte count is intentionally
-				// unmeasured. -1 is a documented "not measured" sentinel.
+				// server_response_bytes_dropped is intentionally unmeasured
+				// (-1 sentinel) for both actions, but for different reasons:
+				// the immediate-close action never reads the swallowed
+				// response at all (reading it would itself risk forwarding
+				// part of it before the sockets close); the drop-and-hold
+				// action DOES read and discard server bytes for the
+				// duration of the hold (see main.drift's _pump_passthrough
+				// — it has to, to drain the socket and detect the eventual
+				// close), but never counts or forwards them either. -1
+				// means "not measured" either way, not "never read".
 				e.server_response_bytes_dropped = -1;
-				result = Optional::Some(FireResult(id = e.id, label = e.label.clone(), db_domain = e.db_domain.clone(), matched_nth = e.matched_nth));
+				result = Optional::Some(FireResult(id = e.id, label = e.label.clone(), db_domain = e.db_domain.clone(), matched_nth = e.matched_nth, action = e.action.clone(), hold_ms = e.hold_ms));
 				done = true;
 			}
 		}
@@ -159,6 +187,8 @@ fn _entry_status_object(e: &FailpointEntry, data_listener: &String) nothrow -> j
 	o.set("armed", json.JsonNode::Bool(value = e.armed));
 	o.set("fired", json.JsonNode::Bool(value = e.fired));
 	o.set("fire_count", json.JsonNode::Number(raw = format.format_int(e.fire_count)));
+	o.set("action", json.JsonNode::String(value = e.action.clone()));
+	o.set("hold_ms", json.JsonNode::Number(raw = format.format_int(e.hold_ms)));
 	o.set("data_listener", json.JsonNode::String(value = data_listener.clone()));
 	o.set("matched_client", json.JsonNode::String(value = e.matched_client.clone()));
 	o.set("matched_command", json.JsonNode::String(value = e.matched_command.clone()));
@@ -169,9 +199,10 @@ fn _entry_status_object(e: &FailpointEntry, data_listener: &String) nothrow -> j
 	return move o;
 }
 
-// v1 supports exactly one match shape (COM_QUERY COMMIT) and one action
-// (drop_server_response_after_forward) — see PLAN.md §6/§9. `arm` validates
-// against that fixed shape rather than accepting arbitrary matchers.
+// v1 supports exactly one match shape (COM_QUERY COMMIT) and two actions —
+// ACTION_DROP_AFTER_FORWARD (reset-style) and ACTION_DROP_AND_HOLD_AFTER_FORWARD
+// (timeout-style, requires `hold_ms`) — see PLAN.md §6/§9/§14. `arm` validates
+// against those fixed shapes rather than accepting arbitrary matchers.
 fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String {
 	val label = root.select().field("label").as_string_or("");
 	if label == "" { return _err_response("bad-args", "label is required"); }
@@ -180,14 +211,22 @@ fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String
 	val command = m.field("command").as_string_or("COM_QUERY");
 	val sql = m.field("sql").as_string_or("COMMIT");
 	val nth = m.field("nth").as_int_or(1);
-	val action = root.select().field("action").as_string_or("drop_server_response_after_forward");
+	val action = root.select().field("action").as_string_or(ACTION_DROP_AFTER_FORWARD);
 	val times = root.select().field("times").as_int_or(1);
 
 	if not text.equals_ignore_case(&command, "COM_QUERY") { return _err_response("bad-args", "match.command must be COM_QUERY"); }
 	if not text.equals_ignore_case(&sql, "COMMIT") { return _err_response("bad-args", "match.sql must be COMMIT"); }
 	if nth < 1 { return _err_response("bad-args", "match.nth must be >= 1"); }
-	if action != "drop_server_response_after_forward" { return _err_response("bad-args", "unsupported action"); }
+	if action != ACTION_DROP_AFTER_FORWARD and action != ACTION_DROP_AND_HOLD_AFTER_FORWARD { return _err_response("bad-args", "unsupported action"); }
 	if times != 1 { return _err_response("bad-args", "times must be 1"); }
+
+	var hold_ms = 0;
+	if action == ACTION_DROP_AND_HOLD_AFTER_FORWARD {
+		hold_ms = root.select().field("hold_ms").as_int_or(0);
+		if hold_ms < MIN_HOLD_MS or hold_ms > MAX_HOLD_MS {
+			return _err_response("bad-args", "hold_ms is required (" + format.format_int(MIN_HOLD_MS) + ".." + format.format_int(MAX_HOLD_MS) + ") for " + ACTION_DROP_AND_HOLD_AFTER_FORWARD);
+		}
+	}
 
 	val mu_ref: &conc.Mutex<RegistrySlot> = &reg.get().slot;
 	var guard = conc.lock(mu_ref);
@@ -212,7 +251,8 @@ fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String
 		matched_sql = "",
 		matched_nth = 0,
 		bytes_forwarded_to_server = 0,
-		server_response_bytes_dropped = 0
+		server_response_bytes_dropped = 0,
+		hold_ms = hold_ms
 	);
 	s.entries.push(move entry);
 

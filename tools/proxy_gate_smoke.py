@@ -61,7 +61,17 @@ proves this with a direct-vs-proxied connection to the SAME backend rather
 than bookkeeper's actual two domains — simulating those is app/workflows-
 owned, see docs/failpoint-proxy-usage.md.
 
-Exit 0 if all four cases pass; nonzero otherwise, with a message identifying
+Case 5 (drop-and-hold: the timeout-flavored ambiguous COMMIT, PLAN.md §14):
+live_proxy_commit_timeout_ambiguous_test.drift. An app team asked whether a
+HUNG/SLOW-network ambiguous commit (proxy holds the connection open,
+responding to neither side, until the CLIENT's own commit-I/O timeout fires)
+classifies the same way as the reset-flavored one cases 2-4 exercise (proxy
+closes/resets immediately after forwarding). This proves it does: same
+RpcCommitErrorKind::AmbiguousWrite, no hang (the client's own read timeout
+is what fires, well before the proxy's own hold elapses and self-closes),
+and the pool still discards the poisoned lease and reconnects cleanly.
+
+Exit 0 if all five cases pass; nonzero otherwise, with a message identifying
 which case/assertion failed. Tears the proxy subprocess down reliably
 (SIGTERM, grace period, SIGKILL fallback) even when a case fails — including
 when the shared executor itself hangs building the proxy or running a
@@ -133,6 +143,8 @@ CASES = [
      "packages/mariadb-rpc/tests/e2e/live_proxy_nth_commit_ambiguous_test.drift", EVENTS_FIRED),
     ("case4", "domain isolation: direct traffic doesn't consume, proxied traffic does",
      "packages/mariadb-rpc/tests/e2e/live_proxy_domain_isolation_test.drift", EVENTS_FIRED),
+    ("case5", "drop-and-hold: timeout-flavored ambiguous COMMIT",
+     "packages/mariadb-rpc/tests/e2e/live_proxy_commit_timeout_ambiguous_test.drift", EVENTS_FIRED),
 ]
 
 

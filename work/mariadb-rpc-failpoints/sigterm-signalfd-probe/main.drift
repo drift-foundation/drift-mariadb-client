@@ -1,0 +1,19 @@
+// Minimal repro for the signalfd-never-drained busy-loop/no-exit bug — see
+// ../TOOLCHAIN-signalfd-busyloop-question.md. No sockets, no spawned virtual
+// threads, no application logic at all: just one blocking sleep. Build and
+// run directly with driftc (no manifest/package needed):
+//
+//   driftc --entry main::main -o sigterm-min main.drift
+//   ./sigterm-min &
+//   kill -TERM $!    # process keeps running, busy-spinning, forever
+module main;
+
+import std.console as console;
+import std.concurrent as conc;
+
+pub fn main() nothrow -> Int {
+	console.println("sleeping...");
+	conc.sleep(conc.Duration(millis = 60000));
+	console.println("woke up");
+	return 0;
+}

@@ -86,8 +86,21 @@ Identical either way — three listeners configured explicitly:
 | `--control-host` / `--control-port` | `127.0.0.1` / `43307` | Where your test harness arms/inspects failpoints (raw TCP, JSON Lines — see below) |
 
 `--help`/`-h` prints usage and exits immediately; otherwise the process runs
-until killed (plain `SIGTERM` is sufficient — there is no graceful-shutdown
-flag). Structured JSON Lines events go to stderr (`proxy_start`,
+until killed — **use `SIGKILL`, not `SIGTERM`**. The proxy has no
+graceful-shutdown flag or signal handler of its own, and on toolchains before
+`0.33.68+abi19` a plain `SIGTERM`/`SIGINT` (Ctrl-C) actively made things
+*worse*: a Drift runtime bug left the reactor's signalfd undrained, causing a
+permanent busy-spin that pegged a CPU core forever instead of stopping the
+process (found and reported from this repo; see
+`work/mariadb-rpc-failpoints/TOOLCHAIN-signalfd-busyloop-question.md`, fixed
+upstream in staged `drift-0.33.68+abi19`, validated here with a real
+subprocess, ASAN, and valgrind/memcheck — no busy-spin, no sanitizer-reported
+errors, still fully functional after the signal). Even on the fixed
+toolchain, `SIGTERM` only stops busy-spinning — it does **not** terminate the
+process: Drift's signal model requires an explicit `conc.await_signal()`
+call to observe and act on a process signal, which this proxy doesn't make,
+so the process keeps running (by design, not a regression) until something
+uses `SIGKILL`. Structured JSON Lines events go to stderr (`proxy_start`,
 `client_accept`, `backend_connect`, `commit_observed`, `failpoint_arm`,
 `failpoint_fire`, `failpoint_clear`, `conn_close`, ...) — low-noise, and
 never SQL text, auth bytes, or packet payloads.
@@ -191,14 +204,44 @@ optional human tag echoed back in `status` (doesn't affect matching —
 routing is what actually separates domains, see above); `match.nth` defaults
 to `1` and counts matching COMMITs from **this ack**, not from
 connection-open (so pool warmup traffic before you arm doesn't throw off the
-count). `action`/`times` are effectively fixed in v1 —
-`drop_server_response_after_forward` / `1` — include them for clarity or
-omit them; either way only that shape is currently supported.
+count). `times` is effectively fixed at `1` in v1 — include it for clarity
+or omit it; only that value is currently supported.
 
-```json
---> {"op":"arm","label":"ledger-commit-unknown-1","domain":"bookkeeper_db","match":{"command":"COM_QUERY","sql":"COMMIT","nth":1}}
-<-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","armed":true}
-```
+`action` selects which ack-loss flavor to model — `times` stays `1` either way:
+
+- **`drop_server_response_after_forward`** (default). Reset-style: the proxy
+  closes/resets the client side immediately after forwarding the COMMIT, so
+  the client sees an immediate read-side transport failure.
+
+  ```json
+  --> {"op":"arm","label":"ledger-commit-unknown-1","domain":"bookkeeper_db","match":{"command":"COM_QUERY","sql":"COMMIT","nth":1}}
+  <-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","armed":true}
+  ```
+
+- **`drop_and_hold_after_forward`**. Timeout-style: the proxy forwards the
+  COMMIT, then holds the connection open — responding to **neither** side —
+  for the given `hold_ms` before self-closing. This proves the slow/hung-network
+  flavor of ack loss: does a commit-read **timeout** classify identically to a
+  reset (same `RpcCommitError.kind == AmbiguousWrite`, no hang, connection
+  poisoned, pool reconnects), or does it diverge? `hold_ms` is **required**
+  (range `1..300000`) — there is no proxy-side default, because a fixed
+  default would silently couple the proxy to whatever a caller's commit
+  timeout happens to be today. Set it comfortably longer than the client
+  config under test, e.g. `commit_read_timeout_ms + 1000`: if the client's
+  commit-I/O timeout is bookkeeper's 5000ms, arm `hold_ms >= 6000`. Live
+  proof against a real subprocess (client read-timeout fires first, proxy's
+  own hold-then-close happens strictly later, no divergence found):
+  `packages/mariadb-rpc/tests/e2e/live_proxy_commit_timeout_ambiguous_test.drift`
+  (also run automatically by [S8](#s8-this-repos-own-ci-runs-the-real-binary), case 5).
+
+  ```json
+  --> {"op":"arm","label":"ledger-commit-unknown-timeout","domain":"bookkeeper_db","match":{"nth":1},"action":"drop_and_hold_after_forward","hold_ms":6000}
+  <-- {"ok":true,"id":2,"label":"ledger-commit-unknown-timeout","armed":true}
+  ```
+
+  Give the connection's own read timeout enough headroom below `hold_ms` that
+  your test isn't racing the proxy's self-close — see the worked example
+  above. `status`/`list` echo both `action` and `hold_ms` for observability.
 
 ### `assert_all_fired`
 
@@ -222,14 +265,19 @@ empty set.
 Full detail for one failpoint by `id` (returned from `arm`). `unknown-id` if
 it doesn't exist (e.g. after `clear`). `bytes_forwarded_to_server` is exact
 for a bare `COMMIT` (`wire.commit()` always emits exactly that text);
-`server_response_bytes_dropped` is always `-1` — the proxy deliberately
-never reads the swallowed response (reading it would itself risk forwarding
-part of it), so that count is intentionally unmeasured, not a real
-measurement.
+`server_response_bytes_dropped` is always `-1`, meaning "not measured" —
+but the reason differs by action. For `drop_server_response_after_forward`,
+the proxy never reads the swallowed response at all (reading it would
+itself risk forwarding part of it before the sockets close). For
+`drop_and_hold_after_forward`, the proxy DOES read and discard server bytes
+for the duration of the hold (it has to, to drain the socket and detect the
+eventual close) — it just never counts or forwards them. `action`/`hold_ms`
+echo what was armed (`hold_ms` is `0` for the default action, since it's
+meaningless there).
 
 ```json
 --> {"op":"status","id":1}
-<-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","domain":"bookkeeper_db","armed":false,"fired":true,"fire_count":1,"data_listener":"127.0.0.1:43306","matched_client":"127.0.0.1:49218","matched_command":"COM_QUERY","matched_sql":"COMMIT","matched_nth":1,"bytes_forwarded_to_server":11,"server_response_bytes_dropped":-1}
+<-- {"ok":true,"id":1,"label":"ledger-commit-unknown-1","domain":"bookkeeper_db","armed":false,"fired":true,"fire_count":1,"action":"drop_server_response_after_forward","hold_ms":0,"data_listener":"127.0.0.1:43306","matched_client":"127.0.0.1:49218","matched_command":"COM_QUERY","matched_sql":"COMMIT","matched_nth":1,"bytes_forwarded_to_server":11,"server_response_bytes_dropped":-1}
 ```
 
 There's also a `list` op (same object shape as `status`, as a `"failpoints"`

@@ -3,9 +3,13 @@
 // This file: transparent bidirectional forwarding between a MariaDB client and
 // a real MariaDB server, client->server packet framing that observes an exact
 // `COMMIT` without matching raw TCP chunks (framing.drift), and the fault
-// action itself — on a firing COMMIT (per the control-plane registry in
-// control.drift), forward only through that COMMIT packet's end, swallow the
-// server's response, and close both sockets. The JSON Lines control plane
+// actions themselves — on a firing COMMIT (per the control-plane registry in
+// control.drift), forward only through that COMMIT packet's end and swallow
+// the server's response, then either (a) close both sockets immediately
+// (ACTION_DROP_AFTER_FORWARD — reset-style ambiguous ack loss) or (b) hold
+// both sockets open, responding to neither side, for an armed `hold_ms`
+// before closing (ACTION_DROP_AND_HOLD_AFTER_FORWARD — timeout-style
+// ambiguous ack loss, PLAN.md §14). The JSON Lines control plane
 // (arm/status/list/assert_all_fired/clear/health) lives in control.drift.
 //
 // Logging: structured JSON Lines via the stdlib logger (std.log), matching the
@@ -196,7 +200,16 @@ fn _forward_all(dst: &conc.Arc<net.TcpStream>, bytes: &mut Array<Byte>, n: Int) 
 // each read (before forwarding that read) therefore means any bytes read once
 // the flag is true are safely known to be the swallowed response, never
 // legitimate earlier traffic.
-fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, swallow: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
+//
+// `hold` distinguishes the two swallow-time behaviors: for the immediate-close
+// action, this pump returns as soon as it sees `swallow` (the caller then
+// closes both sockets right away — see _pump_client_to_server). For the
+// drop-and-hold action, returning here would close the pair immediately and
+// defeat the hold, so instead this keeps looping and silently discarding
+// server bytes — the pair stays open until _pump_client_to_server's own
+// hold_ms sleep elapses and _handle_client closes both sockets, which
+// unblocks this read with an error/EOF and lets it return normally.
+fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, swallow: &conc.Arc<conc.AtomicBool>, hold: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
 	var total = 0;
 	while true {
 		var buf = io.buffer(CHUNK);
@@ -204,11 +217,16 @@ fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream
 			core.Result::Ok(n) => {
 				if n <= 0 { return PumpResult(reason = "eof", bytes = total, commits = 0); }
 				if swallow.get().load(sync.MemoryOrder::Acquire()) {
-					return PumpResult(reason = "failpoint-swallowed", bytes = total, commits = 0);
+					if hold.get().load(sync.MemoryOrder::Acquire()) {
+						// drop-and-hold: discard silently and keep going.
+					} else {
+						return PumpResult(reason = "failpoint-swallowed", bytes = total, commits = 0);
+					}
+				} else {
+					var bytes = _buf_to_array(&mut buf, n);
+					if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = 0); }
+					total = total + n;
 				}
-				var bytes = _buf_to_array(&mut buf, n);
-				if not _forward_all(dst, &mut bytes, n) { return PumpResult(reason = "write-error", bytes = total, commits = 0); }
-				total = total + n;
 			},
 			core.Result::Err(e) => {
 				if e.kind == net.NET_ERROR_KIND_WOULD_BLOCK { } else { return PumpResult(reason = "read-error", bytes = total, commits = 0); }
@@ -228,10 +246,17 @@ fn _pump_passthrough(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream
 // kernel coalescing, e.g. a coalesced `[COMMIT][SELECT ...]` read) are discarded
 // rather than forwarded, so the fault action stays precise at the COMMIT
 // boundary even though a synchronous mariadb-rpc client is not expected to
-// produce this shape in practice — then this pump closes both sockets itself
-// and returns immediately, matching "whichever direction ends first closes the
-// pair" (see _handle_client).
-fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, logger: &log.Logger, conn_id: Int, reg: &conc.Arc<control.Registry>, client_addr: &String, swallow: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
+// produce this shape in practice.
+//
+// Two fault actions diverge here (PLAN.md §6/§14): ACTION_DROP_AFTER_FORWARD
+// closes both sockets itself and returns immediately, matching "whichever
+// direction ends first closes the pair" (see _handle_client).
+// ACTION_DROP_AND_HOLD_AFTER_FORWARD instead sets `hold` and sleeps for the
+// armed `hold_ms` before returning WITHOUT closing anything itself — the
+// sockets stay open (client gets neither a response nor a close) for the
+// full hold, and _handle_client's own unconditional close-after-c2s-returns
+// is what tears the pair down once the hold elapses.
+fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpStream>, logger: &log.Logger, conn_id: Int, reg: &conc.Arc<control.Registry>, client_addr: &String, swallow: &conc.Arc<conc.AtomicBool>, hold: &conc.Arc<conc.AtomicBool>) nothrow -> PumpResult {
 	var framer = framing.new_framer();
 	var total = 0;
 	var commits = 0;
@@ -250,6 +275,8 @@ fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpS
 				var fire_domain = "";
 				var fire_nth = 0;
 				var fire_end = -1;
+				var fire_action = "";
+				var fire_hold_ms = 0;
 				// Stop at the first fire: once a failpoint fires we sever the
 				// connection, so any further commits observed in this same
 				// over-read chunk were never actually delivered to the
@@ -265,6 +292,8 @@ fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpS
 							fire_label = f.label;
 							fire_domain = f.db_domain;
 							fire_nth = f.matched_nth;
+							fire_action = f.action;
+							fire_hold_ms = f.hold_ms;
 							match feed.commit_ends.get(k) {
 								Optional::Some(end_off) => { fire_end = *end_off; },
 								Optional::None => {}
@@ -276,13 +305,20 @@ fn _pump_client_to_server(src: &conc.Arc<net.TcpStream>, dst: &conc.Arc<net.TcpS
 				}
 				// Set BEFORE forwarding: see _pump_passthrough's comment on why
 				// this ordering makes the swallow check race-free.
-				if did_fire { swallow.get().store(true, sync.MemoryOrder::Release()); }
+				if did_fire {
+					swallow.get().store(true, sync.MemoryOrder::Release());
+					if fire_action == control.ACTION_DROP_AND_HOLD_AFTER_FORWARD { hold.get().store(true, sync.MemoryOrder::Release()); }
+				}
 				var fwd_n = n;
 				if did_fire and fire_end >= 0 { fwd_n = fire_end; }
 				if not _forward_all(dst, &mut bytes, fwd_n) { return PumpResult(reason = "write-error", bytes = total, commits = commits); }
 				total = total + fwd_n;
 				if did_fire {
-					logger.info("failpoint_fire", {"conn_id": format.format_int(conn_id), "id": format.format_int(fire_id), "label": fire_label, "domain": fire_domain, "matched_nth": format.format_int(fire_nth)});
+					logger.info("failpoint_fire", {"conn_id": format.format_int(conn_id), "id": format.format_int(fire_id), "label": fire_label, "domain": fire_domain, "matched_nth": format.format_int(fire_nth), "action": fire_action});
+					if fire_action == control.ACTION_DROP_AND_HOLD_AFTER_FORWARD {
+						conc.sleep(_dur(fire_hold_ms));
+						return PumpResult(reason = "failpoint-fired-hold", bytes = total, commits = commits);
+					}
 					_close_pair(src, dst);
 					return PumpResult(reason = "failpoint-fired", bytes = total, commits = commits);
 				}
@@ -314,22 +350,27 @@ fn _handle_client(client_stream: net.TcpStream, backend_host: String, backend_po
 			var server_stream = move s;
 			val client_arc = conc.arc(move client_stream);
 			val server_arc = conc.arc(move server_stream);
-			// Shared per-connection fault flag: c2s sets it the instant a
+			// Shared per-connection fault flags: c2s sets `swallow` the instant a
 			// failpoint fires (before forwarding the triggering COMMIT), s2c
 			// polls it to know the response for that COMMIT must be dropped.
+			// `hold` additionally distinguishes the drop-and-hold action (s2c
+			// keeps discarding instead of returning/closing — see
+			// _pump_passthrough) from the immediate-close action.
 			val swallow: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
+			val hold: conc.Arc<conc.AtomicBool> = conc.arc(conc.atomic_bool(false));
 
 			var s_for_s2c = server_arc.clone();
 			var c_for_s2c = client_arc.clone();
 			var swallow_for_s2c = swallow.clone();
-			var s2c_cb: core.Callback0<PumpResult> = core.callback0(| | captures(move s_for_s2c, move c_for_s2c, move swallow_for_s2c) => {
-				val r = _pump_passthrough(&s_for_s2c, &c_for_s2c, &swallow_for_s2c);
+			var hold_for_s2c = hold.clone();
+			var s2c_cb: core.Callback0<PumpResult> = core.callback0(| | captures(move s_for_s2c, move c_for_s2c, move swallow_for_s2c, move hold_for_s2c) => {
+				val r = _pump_passthrough(&s_for_s2c, &c_for_s2c, &swallow_for_s2c, &hold_for_s2c);
 				_close_pair(&s_for_s2c, &c_for_s2c);
 				return r;
 			});
 			var s2c_vt: conc.VirtualThread<PumpResult> = conc.spawn(move s2c_cb);
 
-			val c2s = _pump_client_to_server(&client_arc, &server_arc, logger, conn_id, &reg, &client_addr, &swallow);
+			val c2s = _pump_client_to_server(&client_arc, &server_arc, logger, conn_id, &reg, &client_addr, &swallow, &hold);
 			_close_pair(&client_arc, &server_arc);
 
 			var s2c = PumpResult(reason = "eof", bytes = 0, commits = 0);
