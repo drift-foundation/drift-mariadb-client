@@ -61,7 +61,7 @@ fn _read_exact(stream: &net.TcpStream, n: Int, timeout_ms: Int) nothrow -> core.
 	while out.len < n {
 		val rem = n - out.len;
 			var buf = io.buffer(rem);
-			match stream.read(&mut buf, duration_ms(timeout_ms)) {
+			match stream.read(buf, duration_ms(timeout_ms)) {
 				core.Result::Ok(nread) => {
 					val got = nread;
 					if got <= 0 { return core.Result::Err(_error("wire-read-eof", out.len)); }
@@ -88,7 +88,7 @@ fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>, timeout_ms: Int) noth
 			io.buffer_write(&mut chunk, i, bytes[off + i]);
 			i = i + 1;
 		}
-		match stream.write(&chunk, duration_ms(timeout_ms)) {
+		match stream.write(chunk, duration_ms(timeout_ms)) {
 			core.Result::Ok(w) => {
 				if w <= 0 { return core.Result::Err(_error("wire-write-failed", off)); }
 				off = off + w;
@@ -105,7 +105,7 @@ fn _read_packet_raw(stream: &net.TcpStream, timeout_ms: Int) nothrow -> core.Res
 		core.Result::Ok(v) => { hdr_bytes = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	match packet_header.decode_packet_header(&hdr_bytes) {
+	match packet_header.decode_packet_header(hdr_bytes) {
 		core.Result::Ok(v) => { return core.Result::Ok(move v); },
 		core.Result::Err(_) => { return core.Result::Err(_error("wire-header-decode-failed", 0)); }
 	}
@@ -124,7 +124,7 @@ pub fn read_packet_payload(stream: &net.TcpStream, timeout_ms: Int) nothrow -> c
 
 pub fn session_read_packet(session: &mut WireSession) nothrow -> core.Result<Array<Byte>, PacketDecodeError> {
 	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
-	match _read_packet_raw(&session.stream, session.io_timeout_ms) {
+	match _read_packet_raw(session.stream, session.io_timeout_ms) {
 		core.Result::Ok(v) => { hdr = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
@@ -134,13 +134,13 @@ pub fn session_read_packet(session: &mut WireSession) nothrow -> core.Result<Arr
 		return core.Result::Err(_error("wire-sequence-mismatch", cast<Int>(hdr.sequence_id)));
 	}
 	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
-	return _read_exact(&session.stream, hdr.payload_len, session.io_timeout_ms);
+	return _read_exact(session.stream, hdr.payload_len, session.io_timeout_ms);
 }
 
 pub fn session_write_packet(session: &mut WireSession, payload: &Array<Byte>) nothrow -> core.Result<Void, PacketDecodeError> {
 	val seq = session.expected_seq_id;
 	session.expected_seq_id = cast<Byte>(cast<Int>(session.expected_seq_id) + 1);
-	return write_packet(&session.stream, payload, seq, session.io_timeout_ms);
+	return write_packet(session.stream, payload, seq, session.io_timeout_ms);
 }
 
 pub fn session_reset_seq(session: &mut WireSession) nothrow -> Void {
@@ -154,7 +154,7 @@ pub fn write_packet(stream: &net.TcpStream, payload: &Array<Byte>, seq: Byte, ti
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
 	var packet: Array<Byte> = [];
-	_append_bytes(&mut packet, &hdr);
-	_append_bytes(&mut packet, payload);
-	return _write_all(stream, &packet, timeout_ms);
+	_append_bytes(packet, hdr);
+	_append_bytes(packet, payload);
+	return _write_all(stream, packet, timeout_ms);
 }

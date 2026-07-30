@@ -35,7 +35,7 @@ pub fn main() nothrow -> Int {
 				core.Result::Err(_) => { return 11; },
 				core.Result::Ok(v) => {
 					var conn = move v;
-					val st = wire.session_state(&conn.wire_session);
+					val st = wire.session_state(conn.wire_session);
 					if not st.reusable { return 21; }
 					if st.autocommit_enabled { return 22; }
 					if st.in_transaction { return 23; }

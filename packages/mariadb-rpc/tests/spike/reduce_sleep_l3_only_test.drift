@@ -21,7 +21,7 @@ pub fn main() nothrow -> Int {
 	// Probe: does one baseline sleep BEFORE any I/O prime the runtime?
 	val tp = time.now_monotonic();
 	val _ = conc.sleep(conc.Duration(millis = 50));
-	console.println("baseline sleep(50ms) elapsed=" + format.format_int(time.elapsed_ms(&tp)));
+	console.println("baseline sleep(50ms) elapsed=" + format.format_int(time.elapsed_ms(tp)));
 
 	var b = rpc.new_connection_config_builder();
 	b.with_host(HOST);
@@ -44,14 +44,14 @@ pub fn main() nothrow -> Int {
 					console.println("connected");
 					val t1 = time.now_monotonic();
 					val _ = conc.sleep(conc.Duration(millis = 550));
-					console.println("[after connect]   sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t1)));
-					val _ = rpc.close(&mut conn);
+					console.println("[after connect]   sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(t1)));
+					val _ = rpc.close(conn);
 					val t2 = time.now_monotonic();
 					val _ = conc.sleep(conc.Duration(millis = 550));
-					console.println("[after close]     sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t2)));
+					console.println("[after close]     sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(t2)));
 					val t3 = time.now_monotonic();
 					val _ = conc.sleep(conc.Duration(millis = 550));
-					console.println("[after close x2]  sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t3)));
+					console.println("[after close x2]  sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(t3)));
 					return 0;
 				}
 			}

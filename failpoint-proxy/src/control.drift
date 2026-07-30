@@ -186,7 +186,7 @@ fn _err_response(code: String, msg: String) nothrow -> String {
 	o.set("error", json.JsonNode::String(value = code));
 	o.set("message", json.JsonNode::String(value = msg));
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 fn _entry_status_object(e: &FailpointEntry, data_listener: &String, backend_listener: &String) nothrow -> json.JsonObject {
@@ -225,8 +225,8 @@ fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String
 	val action = root.select().field("action").as_string_or(ACTION_DROP_AFTER_FORWARD);
 	val times = root.select().field("times").as_int_or(1);
 
-	if not text.equals_ignore_case(&command, "COM_QUERY") { return _err_response("bad-args", "match.command must be COM_QUERY"); }
-	if not text.equals_ignore_case(&sql, "COMMIT") { return _err_response("bad-args", "match.sql must be COMMIT"); }
+	if not text.equals_ignore_case(command, "COM_QUERY") { return _err_response("bad-args", "match.command must be COM_QUERY"); }
+	if not text.equals_ignore_case(sql, "COMMIT") { return _err_response("bad-args", "match.sql must be COMMIT"); }
 	if nth < 1 { return _err_response("bad-args", "match.nth must be >= 1"); }
 	if action != ACTION_DROP_AFTER_FORWARD and action != ACTION_DROP_AND_HOLD_AFTER_FORWARD { return _err_response("bad-args", "unsupported action"); }
 	if times != 1 { return _err_response("bad-args", "times must be 1"); }
@@ -273,7 +273,7 @@ fn _handle_arm(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String
 	o.set("label", json.JsonNode::String(value = label));
 	o.set("armed", json.JsonNode::Bool(value = true));
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> String {
@@ -295,10 +295,10 @@ fn _handle_status(reg: &conc.Arc<Registry>, root: &json.JsonNode) nothrow -> Str
 	if idx < 0 { return _err_response("unknown-id", "no such failpoint id"); }
 	match s.entries.get(idx) {
 		Optional::Some(e) => {
-			var o = _entry_status_object(e, &data_listener, &backend_listener);
+			var o = _entry_status_object(e, data_listener, backend_listener);
 			o.set("ok", json.JsonNode::Bool(value = true));
 			val node = o.to_node();
-			return json.encode_compact(&node);
+			return json.encode_compact(node);
 		},
 		Optional::None => { return _err_response("unknown-id", "no such failpoint id"); }
 	}
@@ -315,7 +315,7 @@ fn _handle_list(reg: &conc.Arc<Registry>) nothrow -> String {
 	while i < s.entries.len {
 		match s.entries.get(i) {
 			Optional::Some(e) => {
-				val obj = _entry_status_object(e, &data_listener, &backend_listener);
+				val obj = _entry_status_object(e, data_listener, backend_listener);
 				arr.push(obj.to_node());
 			},
 			Optional::None => {}
@@ -326,7 +326,7 @@ fn _handle_list(reg: &conc.Arc<Registry>) nothrow -> String {
 	o.set("ok", json.JsonNode::Bool(value = true));
 	o.set("failpoints", arr.to_node());
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 fn _handle_assert_all_fired(reg: &conc.Arc<Registry>) nothrow -> String {
@@ -367,7 +367,7 @@ fn _handle_assert_all_fired(reg: &conc.Arc<Registry>) nothrow -> String {
 	o.set("armed_count", json.JsonNode::Number(raw = format.format_int(armed_count)));
 	o.set("not_fired", not_fired.to_node());
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 // Full registry reset (armed + fired history), for test isolation between
@@ -381,7 +381,7 @@ fn _handle_clear(reg: &conc.Arc<Registry>) nothrow -> String {
 	var o = json.new_object();
 	o.set("ok", json.JsonNode::Bool(value = true));
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 // The data listener is bound before the control listener starts serving
@@ -396,7 +396,7 @@ fn _handle_health(reg: &conc.Arc<Registry>) nothrow -> String {
 	o.set("backend_listener", json.JsonNode::String(value = backend_listener));
 	o.set("ready", json.JsonNode::Bool(value = true));
 	val node = o.to_node();
-	return json.encode_compact(&node);
+	return json.encode_compact(node);
 }
 
 // Pure request/response core: one JSON line in, one JSON line out (no
@@ -407,8 +407,8 @@ pub fn handle_line(reg: &conc.Arc<Registry>, line: &String) nothrow -> String {
 		core.Result::Err(_) => { return _err_response("bad-json", "invalid json"); },
 		core.Result::Ok(root) => {
 			val op = root.select().field("op").as_string_or("");
-			if op == "arm" { return _handle_arm(reg, &root); }
-			if op == "status" { return _handle_status(reg, &root); }
+			if op == "arm" { return _handle_arm(reg, root); }
+			if op == "status" { return _handle_status(reg, root); }
 			if op == "list" { return _handle_list(reg); }
 			if op == "assert_all_fired" { return _handle_assert_all_fired(reg); }
 			if op == "clear" { return _handle_clear(reg); }
@@ -531,9 +531,9 @@ fn _log_control_event(logger: &log.Logger, conn_id: Int, op: String, resp: &Stri
 
 fn _write_line(stream: &conc.Arc<net.TcpStream>, line: &String) nothrow -> Bool {
 	val with_nl = line.clone() + "\n";
-	var bytes = core.string_to_utf8_bytes(&with_nl);
+	var bytes = core.string_to_utf8_bytes(with_nl);
 	val n = bytes.len;
-	return _forward_all(stream, &mut bytes, n);
+	return _forward_all(stream, bytes, n);
 }
 
 // One control connection: accumulate bytes until '\n', dispatch each
@@ -548,17 +548,17 @@ fn _handle_control_client(client_stream: net.TcpStream, reg: conc.Arc<Registry>,
 	val arc = conc.arc(move cs);
 	var acc: Array<Byte> = [];
 	while true {
-		val lf = _find_lf(&acc);
+		val lf = _find_lf(acc);
 		if lf >= 0 {
-			val line_bytes = _copy_range(&acc, 0, lf);
-			val remainder = _copy_range(&acc, lf + 1, acc.len);
+			val line_bytes = _copy_range(acc, 0, lf);
+			val remainder = _copy_range(acc, lf + 1, acc.len);
 			acc = move remainder;
-			match text.utf8_from_bytes(&line_bytes) {
+			match text.utf8_from_bytes(line_bytes) {
 				core.Result::Ok(line) => {
-					val op = _extract_op_for_log(&line);
-					val resp = handle_line(&reg, &line);
-					_log_control_event(logger, conn_id, op, &resp);
-					if not _write_line(&arc, &resp) {
+					val op = _extract_op_for_log(line);
+					val resp = handle_line(reg, line);
+					_log_control_event(logger, conn_id, op, resp);
+					if not _write_line(arc, resp) {
 						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
 						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "write-error"});
 						return 0;
@@ -566,7 +566,7 @@ fn _handle_control_client(client_stream: net.TcpStream, reg: conc.Arc<Registry>,
 				},
 				core.Result::Err(_) => {
 					val resp = _err_response("bad-json", "line is not valid utf-8");
-					if not _write_line(&arc, &resp) {
+					if not _write_line(arc, resp) {
 						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
 						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "write-error"});
 						return 0;
@@ -576,20 +576,20 @@ fn _handle_control_client(client_stream: net.TcpStream, reg: conc.Arc<Registry>,
 		} else {
 			if acc.len > MAX_LINE_BYTES {
 				val resp = _err_response("too-long", "line exceeds max length");
-				val _ = _write_line(&arc, &resp);
+				val _ = _write_line(arc, resp);
 				val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
 				logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "too-long"});
 				return 0;
 			}
 			var buf = io.buffer(CHUNK);
-			match arc.get().read(&mut buf, _dur(IO_TIMEOUT_MS)) {
+			match arc.get().read(buf, _dur(IO_TIMEOUT_MS)) {
 				core.Result::Ok(n) => {
 					if n <= 0 {
 						val _ = arc.get().close(_dur(CLOSE_TIMEOUT_MS));
 						logger.info("control_close", {"conn_id": format.format_int(conn_id), "reason": "eof"});
 						return 0;
 					}
-					val chunk = _buf_to_array(&mut buf, n);
+					val chunk = _buf_to_array(buf, n);
 					var i = 0;
 					while i < n {
 						acc.push(chunk[i]);
@@ -627,7 +627,7 @@ pub fn run_control_loop(listener: &net.TcpListener, reg: conc.Arc<Registry>, log
 				var reg_for_conn = reg.clone();
 				var logger_for_conn = logger.derive("failpoint-proxy-control").build();
 				var cb: core.Callback0<Int> = core.callback0(| | captures(move client_stream, move reg_for_conn, move logger_for_conn, copy conn_id) => {
-					return _handle_control_client(move client_stream, move reg_for_conn, &logger_for_conn, conn_id);
+					return _handle_control_client(move client_stream, move reg_for_conn, logger_for_conn, conn_id);
 				});
 				val _ = conc.spawn(move cb);
 			},

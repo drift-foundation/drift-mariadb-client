@@ -32,47 +32,47 @@ fn _drain_expect_statement_end(statement: &mut proto.Statement, err_base: Int) n
 
 fn scenario_query_skip_and_commit() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
-			match proto.query(&mut conn, &"CALL sp_multi_rs()") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1001; },
+			match proto.query(conn, "CALL sp_multi_rs()") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1001; },
 				core.Result::Ok(stmt) => {
 						var statement = move stmt;
-						match proto.next_event(&mut statement) {
+						match proto.next_event(statement) {
 							core.Result::Ok(ev) => {
 								match ev {
 									proto.StatementEvent::Row(_) => {},
-									default => { val _ = proto.close(&mut conn); return 1002; }
+									default => { val _ = proto.close(conn); return 1002; }
 								}
 							},
-							default => { val _ = proto.close(&mut conn); return 1002; }
+							default => { val _ = proto.close(conn); return 1002; }
 						}
-					match proto.skip_result(&mut statement) {
+					match proto.skip_result(statement) {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1003; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 1003; }
 					}
-						match proto.next_event(&mut statement) {
+						match proto.next_event(statement) {
 							core.Result::Ok(ev) => {
 								match ev {
 									proto.StatementEvent::Row(_) => {},
-									default => { val _ = proto.close(&mut conn); return 1004; }
+									default => { val _ = proto.close(conn); return 1004; }
 								}
 							},
-							default => { val _ = proto.close(&mut conn); return 1004; }
+							default => { val _ = proto.close(conn); return 1004; }
 						}
-					match proto.skip_remaining(&mut statement) {
+					match proto.skip_remaining(statement) {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1005; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 1005; }
 					}
 				}
 			}
-			match proto.commit(&mut conn) {
+			match proto.commit(conn) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1006; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1006; }
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}
@@ -80,30 +80,30 @@ fn scenario_query_skip_and_commit() nothrow -> Int {
 
 fn scenario_drop_auto_drain() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1100; },
 		core.Result::Ok(session) => {
 			var conn = move session;
-			match proto.query(&mut conn, &"CALL sp_multi_rs()") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1101; },
+			match proto.query(conn, "CALL sp_multi_rs()") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1101; },
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::Row(_) => {},
-								default => { val _ = proto.close(&mut conn); return 1102; }
+								default => { val _ = proto.close(conn); return 1102; }
 							}
 						},
-						default => { val _ = proto.close(&mut conn); return 1102; }
+						default => { val _ = proto.close(conn); return 1102; }
 					}
 				}
 			}
-			match proto.commit(&mut conn) {
+			match proto.commit(conn) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1103; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1103; }
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}
@@ -111,53 +111,53 @@ fn scenario_drop_auto_drain() nothrow -> Int {
 
 fn scenario_tx_roundtrip() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1200; },
 		core.Result::Ok(session) => {
 			var conn = move session;
-			match proto.set_autocommit(&mut conn, false) {
+			match proto.set_autocommit(conn, false) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1201; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1201; }
 			}
-			match proto.query(&mut conn, &"CALL sp_1()") {
+			match proto.query(conn, "CALL sp_1()") {
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
-					val rc = _drain_expect_statement_end(&mut statement, 1202);
-					if rc != 0 { val _ = proto.close(&mut conn); return rc; }
+					val rc = _drain_expect_statement_end(statement, 1202);
+					if rc != 0 { val _ = proto.close(conn); return rc; }
 				},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1203; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1203; }
 			}
-			match proto.query(&mut conn, &"CALL sp_error()") {
+			match proto.query(conn, "CALL sp_error()") {
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
 					while true {
-						match proto.next_event(&mut statement) {
-							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1204; },
+						match proto.next_event(statement) {
+							core.Result::Err(_) => { val _ = proto.close(conn); return 1204; },
 							core.Result::Ok(ev) => {
 								match ev {
 									proto.StatementEvent::StatementErr(_) => { break; },
-									proto.StatementEvent::StatementEnd(_) => { val _ = proto.close(&mut conn); return 1205; },
+									proto.StatementEvent::StatementEnd(_) => { val _ = proto.close(conn); return 1205; },
 									default => {}
 								}
 							}
 						}
 					}
 				},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1206; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1206; }
 			}
-			match proto.rollback(&mut conn) {
+			match proto.rollback(conn) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1207; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1207; }
 			}
-			match proto.set_autocommit(&mut conn, true) {
+			match proto.set_autocommit(conn, true) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1208; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1208; }
 			}
-			match proto.reset_for_pool_reuse(&mut conn) {
+			match proto.reset_for_pool_reuse(conn) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1209; }
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1209; }
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}

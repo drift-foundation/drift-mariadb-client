@@ -27,7 +27,8 @@ just perf-record-baseline  # record new baseline for this machine
 
 ## Preconditions
 
-- `DRIFT_TOOLCHAIN_ROOT` set to a 0.32.x+ toolchain (provides `drift` and `driftc`)
+- `DRIFT_TOOLCHAIN_ROOT` set to a **0.33.91+ / ABI 22** toolchain (provides `drift`
+  and `driftc`; the scenarios and packages use the 0.33.91 borrow rules)
 - `DRIFT_SIGN_KEY_FILE` set — `just deploy` uses it to sign each artifact's
   trust-v1 `.cert-claim.<kid>.json` sidecar
 - `drift/mariadb-{wire-proto,rpc}.author-claim` committed (run `just author-claim`

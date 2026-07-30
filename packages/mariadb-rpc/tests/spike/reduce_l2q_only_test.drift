@@ -19,18 +19,18 @@ const TIMEOUT_MS: Int = 1000;
 
 pub fn main() nothrow -> Int {
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1; },
 		core.Result::Ok(s) => {
 			var session = move s;
 			val sql = "SELECT 1";
-			match wire.query(&mut session, &sql) {
-				core.Result::Err(_) => { val _ = wire.close(&mut session); return 2; },
+			match wire.query(session, sql) {
+				core.Result::Err(_) => { val _ = wire.close(session); return 2; },
 				core.Result::Ok(stv) => {
 					var stmt = move stv;
 					var done = false;
 					while not done {
-						match wire.next_event(&mut stmt) {
+						match wire.next_event(stmt) {
 							core.Result::Err(_) => { done = true; },
 							core.Result::Ok(ev) => {
 								match ev {
@@ -47,8 +47,8 @@ pub fn main() nothrow -> Int {
 			console.println("query drained");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			console.println("sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(&t)));
-			val _ = wire.close(&mut session);
+			console.println("sleep(550ms) elapsed=" + format.format_int(time.elapsed_ms(t)));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}

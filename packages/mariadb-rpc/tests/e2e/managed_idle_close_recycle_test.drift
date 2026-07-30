@@ -90,7 +90,7 @@ fn _arm_short_timeout(mc: &managed.ManagedConnection, secs: Int) nothrow -> Int 
 				core.Result::Ok(c) => {
 					var args: Array<rpc.RpcArg> = [];
 					args.push(rpc.arg_int(secs));
-					match c.call(&"sp_set_wait_timeout", &args) {
+					match c.call("sp_set_wait_timeout", args) {
 						core.Result::Ok(s) => { val _ = move s; },
 						core.Result::Err(e) => { console.println("[arm] sp_set_wait_timeout failed: " + e.tag); return 112; }
 					}
@@ -115,14 +115,14 @@ pub fn main() nothrow -> Int {
 				core.Result::Ok(v) => {
 					var mc = move v;
 
-					val arm_rc = _arm_short_timeout(&mc, WAIT_TIMEOUT_SECS);
+					val arm_rc = _arm_short_timeout(mc, WAIT_TIMEOUT_SECS);
 					if arm_rc != 0 { val _ = mc.close(); return arm_rc; }
 					console.println("[arm] conn armed with wait_timeout=" + format.format_int(WAIT_TIMEOUT_SECS) + "s; awaiting server close + poll reconnect");
 
 					var waited = 0;
 					var reconnected = false;
 					while not reconnected {
-						if _reconnects(&counter_arc) >= 1 {
+						if _reconnects(counter_arc) >= 1 {
 							reconnected = true;
 						} else {
 							if waited >= RECYCLE_DEADLINE_MS {

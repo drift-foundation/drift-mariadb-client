@@ -54,7 +54,7 @@ fn _read_exact(stream: &net.TcpStream, n: Int) nothrow -> core.Result<Array<Byte
 	while out.len < n {
 		val rem = n - out.len;
 		var buf = io.buffer(rem);
-		match stream.read(&mut buf, _timeout()) {
+		match stream.read(buf, _timeout()) {
 			core.Result::Ok(nread) => {
 				val got = nread;
 				if got <= 0 { return core.Result::Err(1000); }
@@ -81,7 +81,7 @@ fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>) nothrow -> core.Resul
 			io.buffer_write(&mut chunk, i, bytes[off + i]);
 			i = i + 1;
 		}
-		match stream.write(&chunk, _timeout()) {
+		match stream.write(chunk, _timeout()) {
 			core.Result::Ok(w) => {
 				if w <= 0 { return core.Result::Err(1010); }
 				off = off + w;
@@ -99,7 +99,7 @@ fn _read_packet_payload(stream: &net.TcpStream) nothrow -> core.Result<Array<Byt
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
 	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
-	match packet_header.decode_packet_header(&hdr_bytes) {
+	match packet_header.decode_packet_header(hdr_bytes) {
 		core.Result::Ok(v) => { hdr = move v; },
 		core.Result::Err(_) => { return core.Result::Err(1020); }
 	}
@@ -117,23 +117,23 @@ fn _write_packet(stream: &net.TcpStream, payload: &Array<Byte>, seq: Byte) nothr
 		core.Result::Err(_) => { return core.Result::Err(1030); }
 	}
 	var packet: Array<Byte> = [];
-	_append_bytes(&mut packet, &hdr);
-	_append_bytes(&mut packet, payload);
-	return _write_all(stream, &packet);
+	_append_bytes(packet, hdr);
+	_append_bytes(packet, payload);
+	return _write_all(stream, packet);
 }
 
 fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothrow -> Array<Byte> {
 	val pw = _string_bytes(password);
-	val stage1 = crypto.sha1(&pw);
-	val stage2 = crypto.sha1(&stage1);
+	val stage1 = crypto.sha1(pw);
+	val stage2 = crypto.sha1(stage1);
 	var seeded_input: Array<Byte> = [];
 	var i = 0;
 	while i < 20 and i < scramble.len {
 		seeded_input.push(scramble[i]);
 		i = i + 1;
 	}
-	_append_bytes(&mut seeded_input, &stage2);
-	val seeded = crypto.sha1(&seeded_input);
+	_append_bytes(seeded_input, stage2);
+	val seeded = crypto.sha1(seeded_input);
 	var out: Array<Byte> = [];
 	i = 0;
 	while i < stage1.len and i < seeded.len {
@@ -146,7 +146,7 @@ fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothro
 
 fn _connect() nothrow -> core.Result<net.TcpStream, Int> {
 	val addr = net.socket_addr(LIVE_HOST, LIVE_PORT);
-	match net.connect(&addr, _timeout()) {
+	match net.connect(addr, _timeout()) {
 		core.Result::Ok(s) => { return core.Result::Ok(move s); },
 		core.Result::Err(_) => { return core.Result::Err(1100); }
 	}
@@ -158,7 +158,7 @@ fn _read_hello(stream: &net.TcpStream) nothrow -> core.Result<types.HandshakeHel
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
-	match hello.decode_handshake_hello(&payload) {
+	match hello.decode_handshake_hello(payload) {
 		core.Result::Ok(v) => { return core.Result::Ok(move v); },
 		core.Result::Err(_) => { return core.Result::Err(1110); }
 	}
@@ -170,15 +170,15 @@ fn _empty_hello() nothrow -> types.HandshakeHello {
 }
 
 fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Result<Void, Int> {
-	val token = _sha1_native_password_token(&LIVE_PASSWORD, &h.auth_plugin_data);
+	val token = _sha1_native_password_token(LIVE_PASSWORD, h.auth_plugin_data);
 	val caps = protocol.CLIENT_PROTOCOL_41 | protocol.CLIENT_TRANSACTIONS | protocol.CLIENT_SECURE_CONNECTION | protocol.CLIENT_PLUGIN_AUTH | protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | protocol.CLIENT_MULTI_RESULTS | protocol.CLIENT_CONNECT_WITH_DB;
 	val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = protocol.UTF8MB4_CHARSET_ID, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name, mariadb_ext_capabilities = cast<Uint>(0));
 	var auth_payload: Array<Byte> = [];
-	match auth.encode_handshake_response41(&req) {
+	match auth.encode_handshake_response41(req) {
 		core.Result::Ok(v) => { auth_payload = move v; },
 		core.Result::Err(_) => { return core.Result::Err(1120); }
 	}
-	match _write_packet(stream, &auth_payload, cast<Byte>(1)) {
+	match _write_packet(stream, auth_payload, cast<Byte>(1)) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
@@ -187,11 +187,11 @@ fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Resul
 		core.Result::Ok(v) => { server_first = move v; },
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
-	match resultset.discriminate_first_response(&server_first) {
+	match resultset.discriminate_first_response(server_first) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::OkPacket => {
-					match ok_packet.decode_ok_packet(&server_first) {
+					match ok_packet.decode_ok_packet(server_first) {
 						core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 						core.Result::Err(_) => { return core.Result::Err(1130); }
 					}
@@ -205,11 +205,11 @@ fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Resul
 
 fn _query_expect_ok(stream: &net.TcpStream) nothrow -> Int {
 	var payload: Array<Byte> = [];
-	match com_query.encode_com_query_payload(&"DO 1") {
+	match com_query.encode_com_query_payload("DO 1") {
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(_) => { return 1200; }
 	}
-	match _write_packet(stream, &payload, cast<Byte>(0)) {
+	match _write_packet(stream, payload, cast<Byte>(0)) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(code) => { return code; }
 	}
@@ -218,7 +218,7 @@ fn _query_expect_ok(stream: &net.TcpStream) nothrow -> Int {
 		core.Result::Ok(v) => { first = move v; },
 		core.Result::Err(code) => { return code; }
 	}
-	match resultset.discriminate_first_response(&first) {
+	match resultset.discriminate_first_response(first) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::OkPacket => {},
@@ -227,7 +227,7 @@ fn _query_expect_ok(stream: &net.TcpStream) nothrow -> Int {
 		},
 		core.Result::Err(_) => { return 1202; }
 	}
-	match ok_packet.decode_ok_packet(&first) {
+	match ok_packet.decode_ok_packet(first) {
 		core.Result::Ok(_) => { return 0; },
 		core.Result::Err(_) => { return 1203; }
 	}
@@ -238,17 +238,17 @@ fn worker_run(worker_id: Int) nothrow -> Int {
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var h = _empty_hello();
-			match _read_hello(&stream) {
+			match _read_hello(stream) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = stream.close(_timeout()); return 200000 + worker_id * 100 + code; }
 			}
-			match _auth(&stream, &h) {
+			match _auth(stream, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = stream.close(_timeout()); return 200000 + worker_id * 100 + code; }
 			}
 			var i = 0;
 			while i < QUERIES_PER_WORKER {
-				val rc: Int = _query_expect_ok(&stream);
+				val rc: Int = _query_expect_ok(stream);
 				if rc != 0 {
 					val _ = stream.close(_timeout());
 					return 300000 + worker_id * 100 + rc;

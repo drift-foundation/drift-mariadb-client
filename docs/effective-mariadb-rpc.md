@@ -72,7 +72,7 @@ match rpc.build_connection_config(move b) {
 
 ## Statement model (streaming-first)
 
-- `conn.call(proc_name)` or `conn.call(proc_name, &args)` starts one statement and returns `RpcStatement`.
+- `conn.call(proc_name)` or `conn.call(proc_name, args)` starts one statement and returns `RpcStatement`.
 - Consume results incrementally with:
   - `stmt.next_event()` — returns the next `RpcEvent`.
   - `stmt.skip_result()` — drains current resultset, stops at boundary.
@@ -189,12 +189,12 @@ Long-lived connections need three primitives to write a clean reconnect-on-disco
 ### Reconnect recipe (single-connection, long-lived)
 
 ```drift
-match rpc.call(&mut conn, &proc_name, &args) {
+match rpc.call(conn, proc_name, args) {
     core.Result::Ok(stmt) => { /* stream events */ },
     core.Result::Err(e) => {
-        if rpc.is_transport_error(&e) {
+        if rpc.is_transport_error(e) {
             // Drop the dead conn and rebuild from the same config.
-            val _ = rpc.close(&mut conn);
+            val _ = rpc.close(conn);
             match rpc.connect(config) {
                 core.Result::Ok(new_conn) => { conn = move new_conn; /* retry once */ },
                 core.Result::Err(_) => { /* connect-failed: jittered exponential backoff */ }
@@ -237,7 +237,7 @@ match managed.open(rpc_config, move mc_cfg) {
                     core.Result::Ok(c) => {
                         // c: &mut RpcConnection — exclusive use during the lease.
                         // No lock held; the conn was MOVED out of the wrapper's slot.
-                        rpc.call(c, &"sp_my_proc", &args)
+                        rpc.call(c, "sp_my_proc", args)
                     },
                     core.Result::Err(_) => { /* internal invariant — unreachable in practice */ }
                 }

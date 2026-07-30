@@ -38,11 +38,11 @@ fn _make_logger() nothrow -> log.Logger {
 fn _probe_wire_connect(logger: &log.Logger) nothrow -> Int {
 	val _ = logger.info("probe-wire-connect-start", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"});
 	val opts = wire.WireConnectOptions(host = LIVE_HOST, port = LIVE_PORT, username = LIVE_USER, password = LIVE_PASSWORD, database = LIVE_DB, character_set = wire.DEFAULT_CHARSET_ID, client_capabilities = cast<Uint>(0), connect_timeout_ms = LIVE_TIMEOUT_MS, io_timeout_ms = LIVE_TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { val _ = logger.error("probe-wire-connect-failed", {"scenario": "rpc-live-smoke", "step": "probe-wire-connect"}); return 1; },
 		core.Result::Ok(s) => {
 			var session = move s;
-			val _ = wire.close(&mut session);
+			val _ = wire.close(session);
 			val _ = logger.info("probe-wire-connect-ok", {"scenario": "rpc-live-smoke"});
 			return 0;
 		}
@@ -79,21 +79,21 @@ fn scenario_ping_no_args(logger: &log.Logger) nothrow -> Int {
 				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "ping-no-args", "step": "connect"}); return 1001; },
 				core.Result::Ok(c) => {
 					var conn = move c;
-					val st = wire.session_state(&conn.wire_session);
+					val st = wire.session_state(conn.wire_session);
 					val _ = logger.info("rpc-connect-state", {"scenario": "ping-no-args", "reusable": (st.reusable ? "true" : "false"), "autocommit": (st.autocommit_enabled ? "true" : "false"), "in_tx": (st.in_transaction ? "true" : "false")});
-					match conn.call(&"sp_ping") {
-						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "ping-no-args", "proc": "sp_ping"}); val _ = rpc.close(&mut conn); return 1002; },
+					match conn.call("sp_ping") {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "ping-no-args", "proc": "sp_ping"}); val _ = rpc.close(conn); return 1002; },
 						core.Result::Ok(s) => {
 							var stmt = move s;
-							val rc = _drain_expect_statement_end(&mut stmt, 1003);
-							if rc != 0 { val _ = rpc.close(&mut conn); return rc; }
+							val rc = _drain_expect_statement_end(stmt, 1003);
+							if rc != 0 { val _ = rpc.close(conn); return rc; }
 						}
 					}
 					match conn.commit() {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1004; }
+						core.Result::Err(_) => { val _ = rpc.close(conn); return 1004; }
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -113,40 +113,40 @@ fn scenario_call_with_args(logger: &log.Logger) nothrow -> Int {
 					var args: Array<rpc.RpcArg> = [];
 					args.push(rpc.arg_int(1));
 					args.push(rpc.arg_int(2));
-					match conn.call(&"sp_add", &args) {
-						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1102; },
+					match conn.call("sp_add", args) {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(conn); return 1102; },
 						core.Result::Ok(s) => {
 							var stmt = move s;
 							var saw_row = false;
 							var saw_sum = false;
 							while true {
 								match stmt.next_event() {
-									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "call-with-args", "step": "next-event"}); val _ = rpc.close(&mut conn); return 1103; },
+									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "call-with-args", "step": "next-event"}); val _ = rpc.close(conn); return 1103; },
 									core.Result::Ok(ev) => {
 										match ev {
 											rpc.RpcEvent::Row(row) => {
 												saw_row = true;
 												match row.get_int(0) {
-													core.Result::Err(_) => { val _ = logger.error("rpc-row-get-int-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1107; },
+													core.Result::Err(_) => { val _ = logger.error("rpc-row-get-int-failed", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(conn); return 1107; },
 													core.Result::Ok(v) => { if v == 3 { saw_sum = true; } }
 												}
 											},
 											rpc.RpcEvent::ResultSetEnd => {},
-											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1104; },
+											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(conn); return 1104; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
 										}
 									}
 								}
 							}
-							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1105; }
-							if not saw_sum { val _ = logger.error("rpc-unexpected-sum", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(&mut conn); return 1108; }
+							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(conn); return 1105; }
+							if not saw_sum { val _ = logger.error("rpc-unexpected-sum", {"scenario": "call-with-args", "proc": "sp_add"}); val _ = rpc.close(conn); return 1108; }
 						}
 					}
 					match conn.rollback() {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1106; }
+						core.Result::Err(_) => { val _ = rpc.close(conn); return 1106; }
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -163,40 +163,40 @@ fn scenario_multi_resultset_selective_skip(logger: &log.Logger) nothrow -> Int {
 				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "multi-rs-skip", "step": "connect"}); return 1201; },
 				core.Result::Ok(c) => {
 					var conn = move c;
-					match conn.call(&"sp_multi_rs") {
-						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1202; },
+					match conn.call("sp_multi_rs") {
+						core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(conn); return 1202; },
 						core.Result::Ok(s) => {
 							var stmt = move s;
 							match stmt.skip_result() {
 								core.Result::Ok(_) => {},
-								core.Result::Err(_) => { val _ = logger.error("rpc-skip-result-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(&mut conn); return 1203; }
+								core.Result::Err(_) => { val _ = logger.error("rpc-skip-result-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(conn); return 1203; }
 							}
 							var saw_row = false;
 							while true {
 								match stmt.next_event() {
-									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "multi-rs-skip", "step": "next-event"}); val _ = rpc.close(&mut conn); return 1204; },
+									core.Result::Err(_) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "multi-rs-skip", "step": "next-event"}); val _ = rpc.close(conn); return 1204; },
 									core.Result::Ok(ev) => {
 										match ev {
 											rpc.RpcEvent::Row(_) => { saw_row = true; break; },
 											rpc.RpcEvent::ResultSetEnd => {},
-											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1205; },
+											rpc.RpcEvent::ServerErr(_) => { val _ = logger.error("rpc-server-error", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(conn); return 1205; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
 										}
 									}
 								}
 							}
-							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(&mut conn); return 1206; }
+							if not saw_row { val _ = logger.error("rpc-missing-row", {"scenario": "multi-rs-skip", "proc": "sp_multi_rs"}); val _ = rpc.close(conn); return 1206; }
 							match stmt.skip_remaining() {
 								core.Result::Ok(_) => {},
-								core.Result::Err(_) => { val _ = logger.error("rpc-skip-remaining-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(&mut conn); return 1207; }
+								core.Result::Err(_) => { val _ = logger.error("rpc-skip-remaining-failed", {"scenario": "multi-rs-skip"}); val _ = rpc.close(conn); return 1207; }
 							}
 						}
 					}
 					match conn.rollback() {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1208; }
+						core.Result::Err(_) => { val _ = rpc.close(conn); return 1208; }
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -205,7 +205,7 @@ fn scenario_multi_resultset_selective_skip(logger: &log.Logger) nothrow -> Int {
 }
 
 fn _consume_one_row_then_skip_remaining(conn: &mut rpc.RpcConnection, logger: &log.Logger) nothrow -> Int {
-	match conn.call(&"sp_multi_rs") {
+	match conn.call("sp_multi_rs") {
 		core.Result::Err(_) => { val _ = logger.error("rpc-call-failed", {"scenario": "partial-consume-reset", "proc": "sp_multi_rs"}); return 1302; },
 		core.Result::Ok(s) => {
 			var stmt = move s;
@@ -242,17 +242,17 @@ fn scenario_partial_consume_then_reset(logger: &log.Logger) nothrow -> Int {
 				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "partial-consume-reset", "step": "connect"}); return 1301; },
 				core.Result::Ok(c) => {
 					var conn = move c;
-					val consume_rc = _consume_one_row_then_skip_remaining(&mut conn, logger);
-					if consume_rc != 0 { val _ = rpc.close(&mut conn); return consume_rc; }
+					val consume_rc = _consume_one_row_then_skip_remaining(conn, logger);
+					if consume_rc != 0 { val _ = rpc.close(conn); return consume_rc; }
 					match conn.reset_for_pool_reuse() {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1306; }
+						core.Result::Err(_) => { val _ = rpc.close(conn); return 1306; }
 					}
-					val st = wire.session_state(&conn.wire_session);
-					if not st.reusable { val _ = rpc.close(&mut conn); return 1307; }
-					if not st.autocommit_enabled { val _ = rpc.close(&mut conn); return 1308; }
-					if st.in_transaction { val _ = rpc.close(&mut conn); return 1309; }
-					val _ = rpc.close(&mut conn);
+					val st = wire.session_state(conn.wire_session);
+					if not st.reusable { val _ = rpc.close(conn); return 1307; }
+					if not st.autocommit_enabled { val _ = rpc.close(conn); return 1308; }
+					if st.in_transaction { val _ = rpc.close(conn); return 1309; }
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -269,13 +269,13 @@ fn scenario_invalid_proc_name(logger: &log.Logger) nothrow -> Int {
 				core.Result::Err(_) => { val _ = logger.error("rpc-connect-failed", {"scenario": "invalid-proc-name", "step": "connect"}); return 1401; },
 				core.Result::Ok(c) => {
 					var conn = move c;
-					match conn.call(&"bad;name") {
-						core.Result::Ok(_) => { val _ = logger.error("rpc-call-should-have-failed", {"scenario": "invalid-proc-name", "proc": "bad;name"}); val _ = rpc.close(&mut conn); return 1402; },
+					match conn.call("bad;name") {
+						core.Result::Ok(_) => { val _ = logger.error("rpc-call-should-have-failed", {"scenario": "invalid-proc-name", "proc": "bad;name"}); val _ = rpc.close(conn); return 1402; },
 						core.Result::Err(e) => {
-							if e.tag != "rpc-invalid-proc-name" { val _ = logger.error("rpc-wrong-error-tag", {"scenario": "invalid-proc-name", "got": e.tag}); val _ = rpc.close(&mut conn); return 1403; }
+							if e.tag != "rpc-invalid-proc-name" { val _ = logger.error("rpc-wrong-error-tag", {"scenario": "invalid-proc-name", "got": e.tag}); val _ = rpc.close(conn); return 1403; }
 						}
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -296,51 +296,51 @@ fn scenario_binary_column(logger: &log.Logger) nothrow -> Int {
 					var conn = move c;
 					var args: Array<rpc.RpcArg> = [];
 					args.push(rpc.arg_int(1));
-					match conn.call(&"sp_get_binary", &args) {
-						core.Result::Err(e) => { val _ = logger.error("rpc-call-failed", {"scenario": "binary-column", "proc": "sp_get_binary", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1502; },
+					match conn.call("sp_get_binary", args) {
+						core.Result::Err(e) => { val _ = logger.error("rpc-call-failed", {"scenario": "binary-column", "proc": "sp_get_binary", "tag": e.tag}); val _ = rpc.close(conn); return 1502; },
 						core.Result::Ok(s) => {
 							var stmt = move s;
 							var saw_row = false;
 							var bytes_ok = false;
 							while true {
 								match stmt.next_event() {
-									core.Result::Err(e) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1503; },
+									core.Result::Err(e) => { val _ = logger.error("rpc-next-event-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(conn); return 1503; },
 									core.Result::Ok(ev) => {
 										match ev {
 											rpc.RpcEvent::Row(row) => {
 												saw_row = true;
 												// col 0: id (INT) — text
 												match row.get_int(0) {
-													core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1504; },
-													core.Result::Ok(v) => { if v != 1 { val _ = rpc.close(&mut conn); return 1505; } }
+													core.Result::Err(_) => { val _ = rpc.close(conn); return 1504; },
+													core.Result::Ok(v) => { if v != 1 { val _ = rpc.close(conn); return 1505; } }
 												}
 												// col 1: raw_key (BINARY(16)) — bytes
 												match row.get_bytes(1) {
-													core.Result::Err(e) => { val _ = logger.error("rpc-get-bytes-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(&mut conn); return 1506; },
+													core.Result::Err(e) => { val _ = logger.error("rpc-get-bytes-failed", {"scenario": "binary-column", "tag": e.tag}); val _ = rpc.close(conn); return 1506; },
 													core.Result::Ok(v) => {
-														if v.len != 16 { val _ = rpc.close(&mut conn); return 1507; }
+														if v.len != 16 { val _ = rpc.close(conn); return 1507; }
 														// First byte should be 0x5D
-														if v[0] != cast<Byte>(93) { val _ = rpc.close(&mut conn); return 1508; }
+														if v[0] != cast<Byte>(93) { val _ = rpc.close(conn); return 1508; }
 														bytes_ok = true;
 													}
 												}
 											},
 											rpc.RpcEvent::ResultSetEnd => {},
-											rpc.RpcEvent::ServerErr(e) => { val _ = logger.error("rpc-server-error", {"scenario": "binary-column", "msg": e.message}); val _ = rpc.close(&mut conn); return 1509; },
+											rpc.RpcEvent::ServerErr(e) => { val _ = logger.error("rpc-server-error", {"scenario": "binary-column", "msg": e.message}); val _ = rpc.close(conn); return 1509; },
 											rpc.RpcEvent::StatementEnd(_) => { break; }
 										}
 									}
 								}
 							}
-							if not saw_row { val _ = rpc.close(&mut conn); return 1510; }
-							if not bytes_ok { val _ = rpc.close(&mut conn); return 1511; }
+							if not saw_row { val _ = rpc.close(conn); return 1510; }
+							if not bytes_ok { val _ = rpc.close(conn); return 1511; }
 						}
 					}
 					match conn.rollback() {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 1512; }
+						core.Result::Err(_) => { val _ = rpc.close(conn); return 1512; }
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -350,17 +350,17 @@ fn scenario_binary_column(logger: &log.Logger) nothrow -> Int {
 
 pub fn main() nothrow -> Int {
 	val logger = _make_logger();
-	val a = scenario_ping_no_args(&logger);
+	val a = scenario_ping_no_args(logger);
 	if a != 0 { return a; }
-	val b = scenario_call_with_args(&logger);
+	val b = scenario_call_with_args(logger);
 	if b != 0 { return b; }
-	val c = scenario_multi_resultset_selective_skip(&logger);
+	val c = scenario_multi_resultset_selective_skip(logger);
 	if c != 0 { return c; }
-	val d = scenario_partial_consume_then_reset(&logger);
+	val d = scenario_partial_consume_then_reset(logger);
 	if d != 0 { return d; }
-	val e = scenario_invalid_proc_name(&logger);
+	val e = scenario_invalid_proc_name(logger);
 	if e != 0 { return e; }
-	val f = scenario_binary_column(&logger);
+	val f = scenario_binary_column(logger);
 	if f != 0 { return f; }
 	val _ = logger.flush(conc.Duration(millis = 50));
 	return 0;

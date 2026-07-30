@@ -323,8 +323,8 @@ fn _build_call_sql(proc_name: &String, args: &Array<RpcArg>) nothrow -> core.Res
 		if i > 0 {
 			sql = sql + ", ";
 		}
-			match _encode_arg(&args[i]) {
-				core.Result::Ok(v) => { sql = sql + _dup_string(&v); },
+			match _encode_arg(args[i]) {
+				core.Result::Ok(v) => { sql = sql + _dup_string(v); },
 				core.Result::Err(e) => { return core.Result::Err(e); }
 			}
 		i = i + 1;
@@ -398,24 +398,24 @@ pub fn arg_binary_fixed(v: Array<Byte>, expected_len: Int) nothrow -> core.Resul
 // Any ServerErr is mapped to rpc-server-error. Used for internal
 // commands (SET NAMES) that must succeed cleanly.
 fn _exec_expect_ok(conn: &mut RpcConnection, sql: &String) nothrow -> core.Result<Void, RpcError> {
-	match wire.query(&mut conn.wire_session, sql) {
+	match wire.query(conn.wire_session, sql) {
 		core.Result::Ok(v) => {
 			var stmt = move v;
 			while true {
-				match wire.next_event(&mut stmt) {
-					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(&e.tag))); },
+				match wire.next_event(stmt) {
+					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(e.tag))); },
 					core.Result::Ok(ev) => {
 						match ev {
 							wire.StatementEvent::Row(_) => {},
 							wire.StatementEvent::ResultSetEnd => {},
 							wire.StatementEvent::StatementEnd(_) => { return core.Result::Ok(core.void_value()); },
-							wire.StatementEvent::StatementErr(e2) => { return core.Result::Err(_rpc_error("rpc-server-error", _dup_string(&e2.message))); }
+							wire.StatementEvent::StatementErr(e2) => { return core.Result::Err(_rpc_error("rpc-server-error", _dup_string(e2.message))); }
 						}
 					}
 				}
 			}
 		},
-		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(&e.tag))); }
+		core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(e.tag))); }
 	}
 }
 
@@ -468,30 +468,30 @@ pub fn connect(config: RpcConnectionConfig) nothrow -> core.Result<RpcConnection
 // end-to-end. A budget overrun surfaces as rpc-connect-deadline-exceeded.
 pub fn connect_with_budget(config: RpcConnectionConfig, budget_ms: Optional<Int>) nothrow -> core.Result<RpcConnection, RpcError> {
 	val start = time.now_monotonic();
-	val host = _dup_string(&config.host);
-	val user = _dup_string(&config.user);
-	val password = _dup_string(&config.password);
-	val database = _dup_string(&config.database);
+	val host = _dup_string(config.host);
+	val user = _dup_string(config.user);
+	val password = _dup_string(config.password);
+	val database = _dup_string(config.database);
 	val opts = wire.create_connect_options(host, config.port, user, password, database, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), config.connect_timeout_ms, config.read_timeout_ms);
-	match wire.connect(&opts, budget_ms) {
+	match wire.connect(opts, budget_ms) {
 		core.Result::Ok(v) => {
 			var session = move v;
 			var conn = RpcConnection(wire_session = move session, strict_reuse = config.strict_reuse);
 			// SET NAMES — clamp the session io timeout to the remaining budget first.
-			match _clamp_setup_io(&mut conn, &start, budget_ms, config.read_timeout_ms) {
+			match _clamp_setup_io(conn, start, budget_ms, config.read_timeout_ms) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(&mut conn.wire_session); return core.Result::Err(e); }
+				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(conn.wire_session); return core.Result::Err(e); }
 			}
 			val set_names_sql = "SET NAMES " + config.charset + " COLLATE " + config.collation;
-			match _exec_expect_ok(&mut conn, &set_names_sql) {
+			match _exec_expect_ok(conn, set_names_sql) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(e) => {
 					// Restore the configured timeout for a clean cleanup close, then
 					// classify: budget spent during setup -> deadline; else the
 					// underlying query error.
 					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
-					val _ = wire.close(&mut conn.wire_session);
-					if _budget_exhausted(&start, budget_ms) {
+					val _ = wire.close(conn.wire_session);
+					if _budget_exhausted(start, budget_ms) {
 						return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", "acquire budget exhausted during SET NAMES"));
 					} else {
 						return core.Result::Err(e);
@@ -499,11 +499,11 @@ pub fn connect_with_budget(config: RpcConnectionConfig, budget_ms: Optional<Int>
 				}
 			}
 			// autocommit — re-clamp (time elapsed during SET NAMES).
-			match _clamp_setup_io(&mut conn, &start, budget_ms, config.read_timeout_ms) {
+			match _clamp_setup_io(conn, start, budget_ms, config.read_timeout_ms) {
 				core.Result::Ok(_) => {},
-				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(&mut conn.wire_session); return core.Result::Err(e); }
+				core.Result::Err(e) => { conn.wire_session.io_timeout_ms = config.read_timeout_ms; val _ = wire.close(conn.wire_session); return core.Result::Err(e); }
 			}
-			match wire.set_autocommit(&mut conn.wire_session, config.autocommit) {
+			match wire.set_autocommit(conn.wire_session, config.autocommit) {
 				core.Result::Ok(_) => {
 					// Restore the configured read timeout for normal post-acquire use.
 					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
@@ -511,20 +511,20 @@ pub fn connect_with_budget(config: RpcConnectionConfig, budget_ms: Optional<Int>
 				},
 				core.Result::Err(e) => {
 					conn.wire_session.io_timeout_ms = config.read_timeout_ms;
-					val _ = wire.close(&mut conn.wire_session);
-					if _budget_exhausted(&start, budget_ms) {
+					val _ = wire.close(conn.wire_session);
+					if _budget_exhausted(start, budget_ms) {
 						return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", "acquire budget exhausted during SET autocommit"));
 					} else {
-						return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag)));
+						return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(e.tag)));
 					}
 				}
 			}
 		},
 		core.Result::Err(e) => {
 			if e.tag == "connect-deadline-exceeded" {
-				return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", _dup_string(&e.tag)));
+				return core.Result::Err(_rpc_error("rpc-connect-deadline-exceeded", _dup_string(e.tag)));
 			} else {
-				return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(&e.tag)));
+				return core.Result::Err(_rpc_error("rpc-wire-connect-failed", _dup_string(e.tag)));
 			}
 		}
 	}
@@ -558,15 +558,15 @@ fn _clamp_setup_io(conn: &mut RpcConnection, start: &time.Instant, budget_ms: Op
 implement RpcConnection {
 	pub fn call(self: &mut RpcConnection, proc_name: &String) nothrow -> core.Result<RpcStatement, RpcError> {
 		var args: Array<RpcArg> = [];
-		return self.call(proc_name, &args);
+		return self.call(proc_name, args);
 	}
 
 	pub fn call(self: &mut RpcConnection, proc_name: &String, args: &Array<RpcArg>) nothrow -> core.Result<RpcStatement, RpcError> {
 		match _build_call_sql(proc_name, args) {
 			core.Result::Ok(sql) => {
-				match wire.query(&mut self.wire_session, &sql) {
+				match wire.query(self.wire_session, sql) {
 					core.Result::Ok(v) => { var st = move v; return core.Result::Ok(RpcStatement(inner = move st)); },
-					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(&e.tag))); }
+					core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-query-failed", _dup_string(e.tag))); }
 				}
 			},
 			core.Result::Err(e) => { return core.Result::Err(e); }
@@ -574,37 +574,37 @@ implement RpcConnection {
 	}
 
 	pub fn set_autocommit(self: &mut RpcConnection, enabled: Bool) nothrow -> core.Result<Void, RpcError> {
-		match wire.set_autocommit(&mut self.wire_session, enabled) {
+		match wire.set_autocommit(self.wire_session, enabled) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-set-autocommit-failed", _dup_string(e.tag))); }
 		}
 	}
 
 	pub fn commit(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcCommitError> {
-		match wire.commit(&mut self.wire_session) {
+		match wire.commit(self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(classify_commit_wire_tag(&e.tag)); }
+			core.Result::Err(e) => { return core.Result::Err(classify_commit_wire_tag(e.tag)); }
 		}
 	}
 
 	pub fn rollback(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
-		match wire.rollback(&mut self.wire_session) {
+		match wire.rollback(self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-rollback-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-rollback-failed", _dup_string(e.tag))); }
 		}
 	}
 
 	pub fn reset_for_pool_reuse(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
-		match wire.reset_for_pool_reuse(&mut self.wire_session) {
+		match wire.reset_for_pool_reuse(self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-reset-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-reset-failed", _dup_string(e.tag))); }
 		}
 	}
 
 	pub fn close(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
-		match wire.close(&mut self.wire_session) {
+		match wire.close(self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-close-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-close-failed", _dup_string(e.tag))); }
 		}
 	}
 
@@ -612,9 +612,9 @@ implement RpcConnection {
 	// wire layer marks the session dead, so a subsequent is_alive() returns
 	// false and the next call returns rpc-wire-* without an extra syscall.
 	pub fn ping(self: &mut RpcConnection) nothrow -> core.Result<Void, RpcError> {
-		match wire.ping(&mut self.wire_session) {
+		match wire.ping(self.wire_session) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-ping-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-ping-failed", _dup_string(e.tag))); }
 		}
 	}
 
@@ -623,13 +623,13 @@ implement RpcConnection {
 	// close (NAT timeout, cable yank) leaves is_alive() returning true until
 	// the next syscall discovers the EOF — use ping() for an active probe.
 	pub fn is_alive(self: &RpcConnection) nothrow -> Bool {
-		return wire.session_is_reusable(&self.wire_session);
+		return wire.session_is_reusable(self.wire_session);
 	}
 
 	// Raw OS fd of the underlying TCP stream, for poll_many-based idle-watch in
 	// the pool/managed service fiber. No I/O; valid only while the conn is open.
 	pub fn raw_fd(self: &RpcConnection) nothrow -> Int {
-		return wire.session_raw_fd(&self.wire_session);
+		return wire.session_raw_fd(self.wire_session);
 	}
 }
 
@@ -717,8 +717,8 @@ implement RpcRow {
 
 implement RpcStatement {
 	pub fn next_event(self: &mut RpcStatement) nothrow -> core.Result<RpcEvent, RpcError> {
-		match wire.next_event(&mut self.inner) {
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(&e.tag))); },
+		match wire.next_event(self.inner) {
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-next-event-failed", _dup_string(e.tag))); },
 			core.Result::Ok(v) => {
 				match v {
 					wire.StatementEvent::Row(v2) => { var row = move v2; return core.Result::Ok(RpcEvent::Row(RpcRow(values = move row))); },
@@ -731,16 +731,16 @@ implement RpcStatement {
 	}
 
 	pub fn skip_result(self: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> {
-		match wire.skip_result(&mut self.inner) {
+		match wire.skip_result(self.inner) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-result-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-result-failed", _dup_string(e.tag))); }
 		}
 	}
 
 	pub fn skip_remaining(self: &mut RpcStatement) nothrow -> core.Result<Void, RpcError> {
-		match wire.skip_remaining(&mut self.inner) {
+		match wire.skip_remaining(self.inner) {
 			core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
-			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-remaining-failed", _dup_string(&e.tag))); }
+			core.Result::Err(e) => { return core.Result::Err(_rpc_error("rpc-wire-skip-remaining-failed", _dup_string(e.tag))); }
 		}
 	}
 }
@@ -764,7 +764,7 @@ pub fn raw_fd(conn: &RpcConnection) nothrow -> Int { return conn.raw_fd(); }
 // and row-getter tags return false.
 pub fn is_transport_error(e: &RpcError) nothrow -> Bool {
 	val prefix = "rpc-wire-";
-	return text.starts_with(&e.tag, &prefix);
+	return text.starts_with(e.tag, prefix);
 }
 
 // Maps a wire-layer commit-failure tag (from wire.commit) to an RpcCommitError.

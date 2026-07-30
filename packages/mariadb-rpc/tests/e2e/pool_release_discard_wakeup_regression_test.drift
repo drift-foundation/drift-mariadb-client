@@ -169,7 +169,7 @@ pub fn main() nothrow -> Int {
 								core.Result::Ok(c) => {
 									var args: Array<rpc.RpcArg> = [];
 									args.push(rpc.arg_int(SLEEP_SECS));
-									match c.call(&"sp_sleep", &args) {
+									match c.call("sp_sleep", args) {
 										core.Result::Ok(s) => {
 											// Unexpected: returned before the read timeout. Drop the
 											// statement (drains) and fail as an invalid setup, else the

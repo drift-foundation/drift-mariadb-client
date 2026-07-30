@@ -130,7 +130,7 @@ fn _error(tag: String, offset: Int) nothrow -> PacketDecodeError {
 }
 
 fn _error_with_server(tag: String, offset: Int, err: &ErrPacket) nothrow -> PacketDecodeError {
-	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = err.error_code, server_message = _dup_string(&err.message));
+	return errors.PacketDecodeError(tag = tag, offset = offset, server_error_code = err.error_code, server_message = _dup_string(err.message));
 }
 
 fn _dup_string(s: &String) nothrow -> String {
@@ -175,16 +175,16 @@ fn _string_bytes(s: &String) nothrow -> Array<Byte> {
 // The scramble is the server-provided auth_plugin_data (first 20 bytes).
 fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothrow -> Array<Byte> {
 	val pw = _string_bytes(password);
-	val stage1 = crypto.sha1(&pw);
-	val stage2 = crypto.sha1(&stage1);
+	val stage1 = crypto.sha1(pw);
+	val stage2 = crypto.sha1(stage1);
 	var seeded_input: Array<Byte> = [];
 	var i = 0;
 	while i < 20 and i < scramble.len {
 		seeded_input.push(scramble[i]);
 		i = i + 1;
 	}
-	_append_bytes(&mut seeded_input, &stage2);
-	val seeded = crypto.sha1(&seeded_input);
+	_append_bytes(seeded_input, stage2);
+	val seeded = crypto.sha1(seeded_input);
 	var out: Array<Byte> = [];
 	i = 0;
 	while i < stage1.len and i < seeded.len {
@@ -224,7 +224,7 @@ fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: 
 		plugin_bytes.push(payload[pi]);
 		pi = pi + 1;
 	}
-	val plugin_name = _dup_string_from_bytes(&plugin_bytes);
+	val plugin_name = _dup_string_from_bytes(plugin_bytes);
 	var scramble: Array<Byte> = [];
 	var si = plugin_end + 1;
 	while si < payload.len {
@@ -243,10 +243,10 @@ fn _handle_auth_switch(stream: &net.TcpStream, payload: &Array<Byte>, password: 
 	if plugin_name != AUTH_PLUGIN_MYSQL_NATIVE_PASSWORD {
 		return core.Result::Err(_error("auth-switch-unsupported-plugin", 0));
 	}
-	var token = _sha1_native_password_token(password, &scramble);
+	var token = _sha1_native_password_token(password, scramble);
 	val t_w = _connect_phase_timeout(budget_ms, start, timeout_ms);
 	if t_w <= 0 { return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
-	match transport.write_packet(stream, &token, cast<Byte>(3), t_w) {
+	match transport.write_packet(stream, token, cast<Byte>(3), t_w) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
@@ -480,17 +480,17 @@ fn _init_statement_from_first(statement: &mut Statement, first: &Array<Byte>) no
 // Any Row, ResultSetEnd, or ServerErr is treated as an error.
 // Used for transaction commands (SET autocommit, COMMIT, ROLLBACK).
 fn _query_expect_ok(session: &mut WireSession, sql: String, offset_base: Int) nothrow -> core.Result<OkPacket, PacketDecodeError> {
-	match query(session, &sql) {
+	match query(session, sql) {
 		core.Result::Ok(stmt) => {
 			var statement = move stmt;
 			while true {
-				match next_event(&mut statement) {
+				match next_event(statement) {
 					core.Result::Err(e) => { return core.Result::Err(e); },
 					core.Result::Ok(ev) => {
 						match ev {
 							StatementEvent::Row(_) => { return core.Result::Err(_error("unexpected-row-in-tx-command", offset_base)); },
 							StatementEvent::ResultSetEnd => { return core.Result::Err(_error("unexpected-resultset-in-tx-command", offset_base + 1)); },
-							StatementEvent::StatementErr(server_err) => { return core.Result::Err(_error_with_server("tx-command-server-err", offset_base + 2, &server_err)); },
+							StatementEvent::StatementErr(server_err) => { return core.Result::Err(_error_with_server("tx-command-server-err", offset_base + 2, server_err)); },
 							StatementEvent::StatementEnd(v) => { return core.Result::Ok(v); }
 						}
 					}
@@ -509,7 +509,7 @@ implement core.Destructible for Statement {
 		if self.consumed_terminal {
 			return;
 		}
-		match skip_remaining(&mut self) {
+		match skip_remaining(self) {
 			core.Result::Ok(_) => { return; },
 			core.Result::Err(_) => {
 				_mark_dead(self.session);
@@ -544,21 +544,21 @@ fn _connect_phase_timeout(budget_ms: Optional<Int>, start: &time.Instant, phase_
 pub fn connect(opts: &WireConnectOptions, budget_ms: Optional<Int>) nothrow -> core.Result<WireSession, PacketDecodeError> {
 	val start = time.now_monotonic();
 	val addr = net.socket_addr(opts.host, opts.port);
-	val t_conn = _connect_phase_timeout(budget_ms, &start, opts.connect_timeout_ms);
+	val t_conn = _connect_phase_timeout(budget_ms, start, opts.connect_timeout_ms);
 	if t_conn <= 0 { return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
-	match net.connect(&addr, transport.duration_ms(t_conn)) {
+	match net.connect(addr, transport.duration_ms(t_conn)) {
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var hello_payload: Array<Byte> = [];
-			val t_hello = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			val t_hello = _connect_phase_timeout(budget_ms, start, opts.io_timeout_ms);
 			if t_hello <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
-			match transport.read_packet_payload(&stream, t_hello) {
+			match transport.read_packet_payload(stream, t_hello) {
 				core.Result::Ok(v) => { hello_payload = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var empty_auth_data: Array<Byte> = [];
 			var hello = types.HandshakeHello(protocol_version = cast<Byte>(0), server_version = "", connection_id = cast<Uint>(0), capabilities = cast<Uint>(0), character_set = cast<Byte>(0), status_flags = cast<Uint>(0), auth_plugin_data = move empty_auth_data, auth_plugin_name = "", mariadb_ext_capabilities = cast<Uint>(0));
-			match handshake_hello.decode_handshake_hello(&hello_payload) {
+			match handshake_hello.decode_handshake_hello(hello_payload) {
 				core.Result::Ok(v) => { hello = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
@@ -567,39 +567,39 @@ pub fn connect(opts: &WireConnectOptions, budget_ms: Optional<Int>) nothrow -> c
 				core.Result::Ok(v) => { caps = v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			var token = _sha1_native_password_token(&opts.password, &hello.auth_plugin_data);
+			var token = _sha1_native_password_token(opts.password, hello.auth_plugin_data);
 			val ext_caps = capabilities.negotiate_mariadb_ext_capabilities(hello.mariadb_ext_capabilities);
 			val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = opts.character_set, username = opts.username, auth_response = move token, database = opts.database, auth_plugin_name = hello.auth_plugin_name, mariadb_ext_capabilities = ext_caps);
 			var auth_payload: Array<Byte> = [];
-			match handshake_auth.encode_handshake_response41(&req) {
+			match handshake_auth.encode_handshake_response41(req) {
 				core.Result::Ok(v) => { auth_payload = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
-			val t_write = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			val t_write = _connect_phase_timeout(budget_ms, start, opts.io_timeout_ms);
 			if t_write <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
-			match transport.write_packet(&stream, &auth_payload, cast<Byte>(1), t_write) {
+			match transport.write_packet(stream, auth_payload, cast<Byte>(1), t_write) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			var auth_first: Array<Byte> = [];
-			val t_authread = _connect_phase_timeout(budget_ms, &start, opts.io_timeout_ms);
+			val t_authread = _connect_phase_timeout(budget_ms, start, opts.io_timeout_ms);
 			if t_authread <= 0 { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(_error("connect-deadline-exceeded", 0)); }
-			match transport.read_packet_payload(&stream, t_authread) {
+			match transport.read_packet_payload(stream, t_authread) {
 				core.Result::Ok(v) => { auth_first = move v; },
 				core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 			}
 			if auth_first.len > 0 and auth_first[0] == AUTH_SWITCH_HEADER {
-				match _handle_auth_switch(&stream, &auth_first, &opts.password, opts.io_timeout_ms, budget_ms, &start) {
+				match _handle_auth_switch(stream, auth_first, opts.password, opts.io_timeout_ms, budget_ms, start) {
 					core.Result::Ok(v) => { auth_first = move v; },
 					core.Result::Err(e) => { val _ = stream.close(transport.duration_ms(opts.io_timeout_ms)); return core.Result::Err(e); }
 				}
 			}
 			var state = types.WireSessionState(autocommit_enabled = true, in_transaction = false, reusable = true, last_status_flags = cast<Uint>(0), last_warnings = cast<Uint>(0));
-			match decode_resultset.discriminate_first_response(&auth_first) {
+			match decode_resultset.discriminate_first_response(auth_first) {
 				core.Result::Ok(route) => {
 					match route {
 						decode_resultset.FirstResponseRoute::OkPacket => {
-							match ok_packet_decode.decode_ok_packet(&auth_first) {
+							match ok_packet_decode.decode_ok_packet(auth_first) {
 								core.Result::Ok(ok) => {
 									state.last_status_flags = ok.status_flags;
 									state.last_warnings = ok.warnings;
@@ -611,8 +611,8 @@ pub fn connect(opts: &WireConnectOptions, budget_ms: Optional<Int>) nothrow -> c
 						},
 						decode_resultset.FirstResponseRoute::ErrPacket => {
 							val _ = stream.close(transport.duration_ms(opts.io_timeout_ms));
-							match err_packet_decode.decode_err_packet(&auth_first) {
-								core.Result::Ok(err_pkt) => { return core.Result::Err(_error_with_server("auth-rejected", 0, &err_pkt)); },
+							match err_packet_decode.decode_err_packet(auth_first) {
+								core.Result::Ok(err_pkt) => { return core.Result::Err(_error_with_server("auth-rejected", 0, err_pkt)); },
 								core.Result::Err(_) => { return core.Result::Err(_error("auth-rejected", 0)); }
 							}
 						},
@@ -637,7 +637,7 @@ pub fn close(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecod
 	session.state.reusable = false;
 	transport.session_reset_seq(session);
 	val quit_payload = command_com_quit.encode_com_quit_payload();
-	val _ = transport.session_write_packet(session, &quit_payload);
+	val _ = transport.session_write_packet(session, quit_payload);
 	match session.stream.close(transport.duration_ms(session.io_timeout_ms)) {
 		core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 		core.Result::Err(_) => { return core.Result::Err(_error("close-failed", 0)); }
@@ -694,7 +694,7 @@ pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<Sta
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
 	transport.session_reset_seq(session);
-	match transport.session_write_packet(session, &payload) {
+	match transport.session_write_packet(session, payload) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { _mark_dead(session); return core.Result::Err(e); }
 	}
@@ -706,7 +706,7 @@ pub fn query(session: &mut WireSession, sql: &String) nothrow -> core.Result<Sta
 	session.active_statement = true;
 	var empty_coldefs: Array<ColumnDef> = [];
 	var st = types.Statement(session = session, mode = MODE_DONE, column_count = 0, column_defs_remaining = 0, column_defs = move empty_coldefs, awaiting_coldef_terminator = false, pending_ok = _mk_empty_ok(), pending_err = _mk_empty_err(), consumed_terminal = false);
-	match _init_statement_from_first(&mut st, &first) {
+	match _init_statement_from_first(st, first) {
 		core.Result::Ok(_) => { return core.Result::Ok(move st); },
 		core.Result::Err(e) => {
 			_mark_dead(st.session);
@@ -732,7 +732,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 		}
 		if statement.mode == MODE_PENDING_ERR {
 			_set_statement_terminal(statement);
-			val err = mem.replace(&mut statement.pending_err, types.ErrPacket(error_code = cast<Uint>(0), sql_state = "", message = ""));
+			val err = mem.replace(statement.pending_err, types.ErrPacket(error_code = cast<Uint>(0), sql_state = "", message = ""));
 			return core.Result::Ok(StatementEvent::StatementErr(move err));
 		}
 		if statement.mode == MODE_NEED_NEXT_FIRST {
@@ -741,7 +741,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 				core.Result::Ok(v) => { first = move v; },
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
-			match _init_statement_from_first(statement, &first) {
+			match _init_statement_from_first(statement, first) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
@@ -754,7 +754,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 		if statement.column_defs_remaining > 0 {
 			match transport.session_read_packet(statement.session) {
 				core.Result::Ok(coldef_payload) => {
-					match _decode_column_def(&coldef_payload) {
+					match _decode_column_def(coldef_payload) {
 						core.Result::Ok(cd) => { statement.column_defs.push(move cd); },
 						core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 					}
@@ -770,7 +770,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 				core.Result::Ok(v) => { p = move v; },
 				core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 			}
-			if not _is_eof_terminator(&p) {
+			if not _is_eof_terminator(p) {
 				_mark_dead(statement.session);
 				return core.Result::Err(_error("resultset-missing-coldef-terminator", 0));
 			}
@@ -786,12 +786,12 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 		// Check MORE_RESULTS_EXISTS in status_flags to determine if
 		// another resultset follows (stored proc multi-result) or if
 		// this is the final resultset (emit synthetic OK via PENDING_OK).
-		if _is_eof_terminator(&payload) {
+		if _is_eof_terminator(payload) {
 			var warnings = cast<Uint>(0);
 			var status = cast<Uint>(0);
 			if payload.len >= 5 {
-				warnings = _u16le_at(&payload, 1);
-				status = _u16le_at(&payload, 3);
+				warnings = _u16le_at(payload, 1);
+				status = _u16le_at(payload, 3);
 			}
 			_apply_status(statement.session, status, warnings);
 			if _status_has_more_results(status) {
@@ -802,7 +802,7 @@ pub fn next_event(statement: &mut Statement) nothrow -> core.Result<StatementEve
 			}
 			return core.Result::Ok(StatementEvent::ResultSetEnd());
 		}
-		match decode_resultset.decode_text_row(&payload, statement.column_count) {
+		match decode_resultset.decode_text_row(payload, statement.column_count) {
 			core.Result::Ok(row) => { return core.Result::Ok(StatementEvent::Row(move row)); },
 			core.Result::Err(e) => { _mark_dead(statement.session); return core.Result::Err(e); }
 		}
@@ -884,7 +884,7 @@ pub fn ping(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecode
 	}
 	val payload = command_com_ping.encode_com_ping_payload();
 	var resp: Array<Byte> = [];
-	match _command_send_recv(session, &payload) {
+	match _command_send_recv(session, payload) {
 		core.Result::Ok(v) => { resp = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
@@ -892,7 +892,7 @@ pub fn ping(session: &mut WireSession) nothrow -> core.Result<Void, PacketDecode
 		_mark_dead(session);
 		return core.Result::Err(_error("ping-unexpected-response", 0));
 	}
-	match ok_packet_decode.decode_ok_packet(&resp) {
+	match ok_packet_decode.decode_ok_packet(resp) {
 		core.Result::Ok(ok) => { _apply_status(session, ok.status_flags, ok.warnings); },
 		core.Result::Err(_) => {}
 	}
@@ -906,7 +906,7 @@ pub fn reset_connection(session: &mut WireSession) nothrow -> core.Result<Void, 
 	}
 	val payload = command_com_reset.encode_com_reset_connection_payload();
 	var resp: Array<Byte> = [];
-	match _command_send_recv(session, &payload) {
+	match _command_send_recv(session, payload) {
 		core.Result::Ok(v) => { resp = move v; },
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
@@ -915,21 +915,21 @@ pub fn reset_connection(session: &mut WireSession) nothrow -> core.Result<Void, 
 		return core.Result::Err(_error("reset-connection-empty-response", 0));
 	}
 	if resp[0] == cast<Byte>(0) {
-		match ok_packet_decode.decode_ok_packet(&resp) {
+		match ok_packet_decode.decode_ok_packet(resp) {
 			core.Result::Ok(ok) => { _apply_status(session, ok.status_flags, ok.warnings); },
 			core.Result::Err(_) => {}
 		}
 		return core.Result::Ok(core.void_value());
 	}
 	if resp[0] == cast<Byte>(255) {
-		match err_packet_decode.decode_err_packet(&resp) {
+		match err_packet_decode.decode_err_packet(resp) {
 			core.Result::Ok(err_pkt) => {
 				// Error 1047 = ER_UNKNOWN_COM_ERROR — server doesn't support
 				// COM_RESET_CONNECTION. Caller should fall back to manual reset.
 				if err_pkt.error_code == cast<Uint>(1047) {
 					return core.Result::Err(_error("reset-connection-unsupported", 0));
 				}
-				return core.Result::Err(_error_with_server("reset-connection-server-err", 0, &err_pkt));
+				return core.Result::Err(_error_with_server("reset-connection-server-err", 0, err_pkt));
 			},
 			core.Result::Err(_) => {
 				return core.Result::Err(_error("reset-connection-server-err", 0));

@@ -16,7 +16,7 @@ fn _string_to_bytes(s: &String) nothrow -> Array<Byte> {
 
 fn _row_one_text(v: String) nothrow -> rpc.RpcRow {
 	var cells: Array<wire.ResultSetCell> = [];
-	var bytes = _string_to_bytes(&v);
+	var bytes = _string_to_bytes(v);
 	cells.push(wire.ResultSetCell::Value(move bytes));
 	return rpc.RpcRow(values = move cells);
 }
@@ -68,30 +68,30 @@ pub fn main() nothrow -> Int {
 	}
 	match rn.get_string(0) {
 		core.Result::Ok(_) => { return 13; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-null") { return 14; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-null") { return 14; } }
 	}
 
 	match ri.get_int(1) {
 		core.Result::Ok(_) => { return 15; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-index-out-of-bounds") { return 16; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-index-out-of-bounds") { return 16; } }
 	}
 	match ri.get_int(-1) {
 		core.Result::Ok(_) => { return 17; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-index-out-of-bounds") { return 18; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-index-out-of-bounds") { return 18; } }
 	}
 
 	var rp = _row_one_text("abc");
 	match rp.get_int(0) {
 		core.Result::Ok(_) => { return 19; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-int-failed") { return 20; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-parse-int-failed") { return 20; } }
 	}
 	match rp.get_uint(0) {
 		core.Result::Ok(_) => { return 21; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-uint-failed") { return 22; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-parse-uint-failed") { return 22; } }
 	}
 	match rp.get_float(0) {
 		core.Result::Ok(_) => { return 23; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-parse-float-failed") { return 24; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-parse-float-failed") { return 24; } }
 	}
 
 	// get_bytes() succeeds on any non-NULL cell and returns the original raw bytes.
@@ -119,14 +119,14 @@ pub fn main() nothrow -> Int {
 	var ru = _row_one_bytes(move bad_utf8);
 	match ru.get_string(0) {
 		core.Result::Ok(_) => { return 31; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-utf8-failed") { return 32; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-utf8-failed") { return 32; } }
 	}
 
 	// get_bytes() on NULL cell returns rpc-row-null.
 	var rbn = _row_one_null();
 	match rbn.get_bytes(0) {
 		core.Result::Ok(_) => { return 33; },
-		core.Result::Err(e) => { if not _expect_tag(&e, "rpc-row-null") { return 34; } }
+		core.Result::Err(e) => { if not _expect_tag(e, "rpc-row-null") { return 34; } }
 	}
 
 	return 0;

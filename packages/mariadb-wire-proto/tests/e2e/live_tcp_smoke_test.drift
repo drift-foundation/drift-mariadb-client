@@ -50,7 +50,7 @@ fn _read_exact(stream: &net.TcpStream, n: Int) nothrow -> core.Result<Array<Byte
 	while out.len < n {
 		val rem = n - out.len;
 		var buf = io.buffer(rem);
-		match stream.read(&mut buf, _timeout()) {
+		match stream.read(buf, _timeout()) {
 			core.Result::Ok(n) => {
 				val got = n;
 				if got <= 0 { return core.Result::Err(1000); }
@@ -77,7 +77,7 @@ fn _write_all(stream: &net.TcpStream, bytes: &Array<Byte>) nothrow -> core.Resul
 			io.buffer_write(&mut chunk, i, bytes[off + i]);
 			i = i + 1;
 		}
-		match stream.write(&chunk, _timeout()) {
+		match stream.write(chunk, _timeout()) {
 			core.Result::Ok(w) => {
 				if w <= 0 { return core.Result::Err(1010); }
 				off = off + w;
@@ -95,7 +95,7 @@ fn _read_packet_payload(stream: &net.TcpStream) nothrow -> core.Result<Array<Byt
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
 	var hdr = types.PacketHeader(payload_len = 0, sequence_id = cast<Byte>(0));
-	match packet_header.decode_packet_header(&hdr_bytes) {
+	match packet_header.decode_packet_header(hdr_bytes) {
 		core.Result::Ok(v) => { hdr = move v; },
 		core.Result::Err(_) => { return core.Result::Err(1020); }
 	}
@@ -113,23 +113,23 @@ fn _write_packet(stream: &net.TcpStream, payload: &Array<Byte>, seq: Byte) nothr
 		core.Result::Err(_) => { return core.Result::Err(1030); }
 	}
 	var packet: Array<Byte> = [];
-	_append_bytes(&mut packet, &hdr);
-	_append_bytes(&mut packet, payload);
-	return _write_all(stream, &packet);
+	_append_bytes(packet, hdr);
+	_append_bytes(packet, payload);
+	return _write_all(stream, packet);
 }
 
 fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothrow -> Array<Byte> {
 	val pw = _string_bytes(password);
-	val stage1 = crypto.sha1(&pw);
-	val stage2 = crypto.sha1(&stage1);
+	val stage1 = crypto.sha1(pw);
+	val stage2 = crypto.sha1(stage1);
 	var seeded_input: Array<Byte> = [];
 	var i = 0;
 	while i < 20 and i < scramble.len {
 		seeded_input.push(scramble[i]);
 		i = i + 1;
 	}
-	_append_bytes(&mut seeded_input, &stage2);
-	val seeded = crypto.sha1(&seeded_input);
+	_append_bytes(seeded_input, stage2);
+	val seeded = crypto.sha1(seeded_input);
 	var out: Array<Byte> = [];
 	i = 0;
 	while i < stage1.len and i < seeded.len {
@@ -142,7 +142,7 @@ fn _sha1_native_password_token(password: &String, scramble: &Array<Byte>) nothro
 
 fn _connect() nothrow -> core.Result<net.TcpStream, Int> {
 	val addr = net.socket_addr(LIVE_HOST, LIVE_PORT);
-	match net.connect(&addr, _timeout()) {
+	match net.connect(addr, _timeout()) {
 		core.Result::Ok(s) => { return core.Result::Ok(move s); },
 		core.Result::Err(_) => { return core.Result::Err(1100); }
 	}
@@ -154,22 +154,22 @@ fn _read_hello(stream: &net.TcpStream) nothrow -> core.Result<types.HandshakeHel
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
-	match hello.decode_handshake_hello(&payload) {
+	match hello.decode_handshake_hello(payload) {
 		core.Result::Ok(v) => { return core.Result::Ok(move v); },
 		core.Result::Err(_) => { return core.Result::Err(1110); }
 	}
 }
 
 fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Result<Void, Int> {
-	val token = _sha1_native_password_token(&LIVE_PASSWORD, &h.auth_plugin_data);
+	val token = _sha1_native_password_token(LIVE_PASSWORD, h.auth_plugin_data);
 	val caps = protocol.CLIENT_PROTOCOL_41 | protocol.CLIENT_TRANSACTIONS | protocol.CLIENT_SECURE_CONNECTION | protocol.CLIENT_PLUGIN_AUTH | protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | protocol.CLIENT_MULTI_RESULTS | protocol.CLIENT_CONNECT_WITH_DB;
 	val req = types.HandshakeResponse41(capabilities = caps, max_packet_size = cast<Uint>(16777216), character_set = protocol.UTF8MB4_CHARSET_ID, username = LIVE_USER, auth_response = move token, database = LIVE_DB, auth_plugin_name = h.auth_plugin_name, mariadb_ext_capabilities = cast<Uint>(0));
 	var auth_payload: Array<Byte> = [];
-	match auth.encode_handshake_response41(&req) {
+	match auth.encode_handshake_response41(req) {
 		core.Result::Ok(v) => { auth_payload = move v; },
 		core.Result::Err(_) => { return core.Result::Err(1120); }
 	}
-	match _write_packet(stream, &auth_payload, cast<Byte>(1)) {
+	match _write_packet(stream, auth_payload, cast<Byte>(1)) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
@@ -178,11 +178,11 @@ fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Resul
 		core.Result::Ok(v) => { server_first = move v; },
 		core.Result::Err(code) => { return core.Result::Err(code); }
 	}
-	match resultset.discriminate_first_response(&server_first) {
+	match resultset.discriminate_first_response(server_first) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::OkPacket => {
-					match ok_packet.decode_ok_packet(&server_first) {
+					match ok_packet.decode_ok_packet(server_first) {
 						core.Result::Ok(_) => { return core.Result::Ok(core.void_value()); },
 						core.Result::Err(_) => { return core.Result::Err(1130); }
 					}
@@ -197,11 +197,11 @@ fn _auth(stream: &net.TcpStream, h: &types.HandshakeHello) nothrow -> core.Resul
 
 fn _query_and_expect_resultset(stream: &net.TcpStream, sql: String, min_rows: Int) nothrow -> Int {
 	var payload: Array<Byte> = [];
-	match com_query.encode_com_query_payload(&sql) {
+	match com_query.encode_com_query_payload(sql) {
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(_) => { return 1200; }
 	}
-	match _write_packet(stream, &payload, cast<Byte>(0)) {
+	match _write_packet(stream, payload, cast<Byte>(0)) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(code) => { return code; }
 	}
@@ -210,7 +210,7 @@ fn _query_and_expect_resultset(stream: &net.TcpStream, sql: String, min_rows: In
 		core.Result::Ok(v) => { first = move v; },
 		core.Result::Err(code) => { return code; }
 	}
-	match resultset.discriminate_first_response(&first) {
+	match resultset.discriminate_first_response(first) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::ResultSet => {},
@@ -244,7 +244,7 @@ fn _query_and_expect_resultset(stream: &net.TcpStream, sql: String, min_rows: In
 			saw_coldef_terminator = true;
 		}
 	}
-	match resultset.decode_text_resultset_packets(&packets) {
+	match resultset.decode_text_resultset_packets(packets) {
 		core.Result::Ok(v) => {
 			if v.rows.len < min_rows { return 1203; }
 			return 0;
@@ -255,11 +255,11 @@ fn _query_and_expect_resultset(stream: &net.TcpStream, sql: String, min_rows: In
 
 fn _query_and_expect_err_code(stream: &net.TcpStream, sql: String, code: Uint) nothrow -> Int {
 	var payload: Array<Byte> = [];
-	match com_query.encode_com_query_payload(&sql) {
+	match com_query.encode_com_query_payload(sql) {
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(_) => { return 1300; }
 	}
-	match _write_packet(stream, &payload, cast<Byte>(0)) {
+	match _write_packet(stream, payload, cast<Byte>(0)) {
 		core.Result::Ok(_) => {},
 		core.Result::Err(ec) => { return ec; }
 	}
@@ -268,7 +268,7 @@ fn _query_and_expect_err_code(stream: &net.TcpStream, sql: String, code: Uint) n
 		core.Result::Ok(v) => { first = move v; },
 		core.Result::Err(ec) => { return ec; }
 	}
-	match resultset.discriminate_first_response(&first) {
+	match resultset.discriminate_first_response(first) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::ErrPacket => {},
@@ -277,7 +277,7 @@ fn _query_and_expect_err_code(stream: &net.TcpStream, sql: String, code: Uint) n
 		},
 		core.Result::Err(_) => { return 1302; }
 	}
-	match err_packet.decode_err_packet(&first) {
+	match err_packet.decode_err_packet(first) {
 		core.Result::Ok(v) => {
 			if v.error_code != code { return 1303; }
 			return 0;
@@ -289,7 +289,7 @@ fn _query_and_expect_err_code(stream: &net.TcpStream, sql: String, code: Uint) n
 fn scenario_hello_handshake() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
-			val r = _read_hello(&s);
+			val r = _read_hello(s);
 			val _ = s.close(_timeout());
 			match r {
 				core.Result::Ok(v) => {
@@ -313,12 +313,12 @@ fn scenario_auth_ok() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
 			var rc = 0;
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => { rc = 0; },
 				core.Result::Err(code) => { rc = code; }
 			}
@@ -333,15 +333,15 @@ fn scenario_com_query_ok() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			val rc = _query_and_expect_resultset(&s, "SELECT VERSION()", 1);
+			val rc = _query_and_expect_resultset(s, "SELECT VERSION()", 1);
 			val _ = s.close(_timeout());
 			return rc;
 		},
@@ -353,15 +353,15 @@ fn scenario_com_query_err() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			val rc = _query_and_expect_err_code(&s, "CALL sp_add(1)", cast<Uint>(1318));
+			val rc = _query_and_expect_err_code(s, "CALL sp_add(1)", cast<Uint>(1318));
 			val _ = s.close(_timeout());
 			return rc;
 		},
@@ -373,15 +373,15 @@ fn scenario_sp_ok_scalar() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			val rc = _query_and_expect_resultset(&s, "CALL sp_ping()", 1);
+			val rc = _query_and_expect_resultset(s, "CALL sp_ping()", 1);
 			val _ = s.close(_timeout());
 			return rc;
 		},
@@ -393,15 +393,15 @@ fn scenario_sp_ok_resultset() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			val rc = _query_and_expect_resultset(&s, "CALL sp_rows()", 2);
+			val rc = _query_and_expect_resultset(s, "CALL sp_rows()", 2);
 			val _ = s.close(_timeout());
 			return rc;
 		},
@@ -413,15 +413,15 @@ fn scenario_sp_err() nothrow -> Int {
 	match _connect() {
 		core.Result::Ok(s) => {
 			var h = _empty_hello();
-			match _read_hello(&s) {
+			match _read_hello(s) {
 				core.Result::Ok(v) => { h = move v; },
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			match _auth(&s, &h) {
+			match _auth(s, h) {
 				core.Result::Ok(_) => {},
 				core.Result::Err(code) => { val _ = s.close(_timeout()); return code; }
 			}
-			val rc = _query_and_expect_err_code(&s, "CALL sp_add_x()", cast<Uint>(1305));
+			val rc = _query_and_expect_err_code(s, "CALL sp_add_x()", cast<Uint>(1305));
 			val _ = s.close(_timeout());
 			return rc;
 		},

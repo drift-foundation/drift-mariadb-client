@@ -21,7 +21,7 @@ fn expect_int_encode_decode() nothrow -> Int {
 			Ok(x) => { encoded = move x; },
 			Err(_) => { return 1; }
 		}
-		val decoded_res = lenenc.decode_lenenc_int_at(&encoded, 0);
+		val decoded_res = lenenc.decode_lenenc_int_at(encoded, 0);
 		var decoded_value: Uint = cast<Uint>(0);
 		var decoded_next_offset = -1;
 		match decoded_res {
@@ -70,7 +70,7 @@ fn expect_decode_errors() nothrow -> Int {
 	var truncated2: Array<Byte> = [];
 	truncated2.push(cast<Byte>(252));
 	truncated2.push(cast<Byte>(1));
-	val t2 = lenenc.decode_lenenc_int_at(&truncated2, 0);
+	val t2 = lenenc.decode_lenenc_int_at(truncated2, 0);
 	var c1 = 0;
 	match t2 {
 		Ok(_) => { c1 = 20; },
@@ -83,7 +83,7 @@ fn expect_decode_errors() nothrow -> Int {
 	if c1 != 0 { return c1; }
 	var null_marker: Array<Byte> = [];
 	null_marker.push(cast<Byte>(251));
-	val n = lenenc.decode_lenenc_int_at(&null_marker, 0);
+	val n = lenenc.decode_lenenc_int_at(null_marker, 0);
 	match n {
 		Ok(_) => { return 22; },
 		Err(e) => {
@@ -97,13 +97,13 @@ fn expect_decode_errors() nothrow -> Int {
 
 fn expect_string_roundtrip() nothrow -> Int {
 	val source = "maria";
-	val encoded_res = lenenc.encode_lenenc_string(&source);
+	val encoded_res = lenenc.encode_lenenc_string(source);
 	var encoded: Array<Byte> = [];
 	match encoded_res {
 		Ok(v) => { encoded = move v; },
 		Err(_) => { return 30; }
 	}
-	val decoded_res = lenenc.decode_lenenc_string_at(&encoded, 0);
+	val decoded_res = lenenc.decode_lenenc_string_at(encoded, 0);
 	var decoded_value = "";
 	var decoded_next_offset = -1;
 	match decoded_res {
@@ -122,7 +122,7 @@ fn expect_invalid_utf8_error() nothrow -> Int {
 	var bytes: Array<Byte> = [];
 	bytes.push(cast<Byte>(1));
 	bytes.push(cast<Byte>(255));
-	val decoded = lenenc.decode_lenenc_string_at(&bytes, 0);
+	val decoded = lenenc.decode_lenenc_string_at(bytes, 0);
 	match decoded {
 		Ok(_) => { return 40; },
 		Err(e) => {

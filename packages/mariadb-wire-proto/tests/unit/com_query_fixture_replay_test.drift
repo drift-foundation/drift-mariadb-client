@@ -11,11 +11,11 @@ fn _expect_version_resultset() nothrow -> Int {
 	val expected_query_packet_hex = "0353454c4543542056455253494f4e2829";
 	var expected_query_packet: Array<Byte> = [];
 	var actual_query_packet: Array<Byte> = [];
-	match codec.hex_decode(&expected_query_packet_hex) {
+	match codec.hex_decode(expected_query_packet_hex) {
 		core.Result::Ok(v) => { expected_query_packet = move v; },
 		core.Result::Err(_) => { return 100; }
 	}
-	match com_query.encode_com_query_payload(&sql) {
+	match com_query.encode_com_query_payload(sql) {
 		core.Result::Ok(actual) => {
 			actual_query_packet = move actual;
 		},
@@ -30,11 +30,11 @@ fn _expect_version_resultset() nothrow -> Int {
 
 	val first_response_hex = "0101";
 	var first_response: Array<Byte> = [];
-	match codec.hex_decode(&first_response_hex) {
+	match codec.hex_decode(first_response_hex) {
 		core.Result::Ok(v) => { first_response = move v; },
 		core.Result::Err(_) => { return 110; }
 	}
-	match resultset.discriminate_first_response(&first_response) {
+	match resultset.discriminate_first_response(first_response) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::ResultSet => {},
@@ -55,17 +55,17 @@ fn _expect_version_resultset() nothrow -> Int {
 	var p2: Array<Byte> = [];
 	var p3: Array<Byte> = [];
 	var p4: Array<Byte> = [];
-	match codec.hex_decode(&p0_hex) { core.Result::Ok(v) => { p0 = move v; }, core.Result::Err(_) => { return 120; } }
-	match codec.hex_decode(&p1_hex) { core.Result::Ok(v) => { p1 = move v; }, core.Result::Err(_) => { return 130; } }
-	match codec.hex_decode(&p2_hex) { core.Result::Ok(v) => { p2 = move v; }, core.Result::Err(_) => { return 140; } }
-	match codec.hex_decode(&p3_hex) { core.Result::Ok(v) => { p3 = move v; }, core.Result::Err(_) => { return 150; } }
-	match codec.hex_decode(&p4_hex) { core.Result::Ok(v) => { p4 = move v; }, core.Result::Err(_) => { return 160; } }
+	match codec.hex_decode(p0_hex) { core.Result::Ok(v) => { p0 = move v; }, core.Result::Err(_) => { return 120; } }
+	match codec.hex_decode(p1_hex) { core.Result::Ok(v) => { p1 = move v; }, core.Result::Err(_) => { return 130; } }
+	match codec.hex_decode(p2_hex) { core.Result::Ok(v) => { p2 = move v; }, core.Result::Err(_) => { return 140; } }
+	match codec.hex_decode(p3_hex) { core.Result::Ok(v) => { p3 = move v; }, core.Result::Err(_) => { return 150; } }
+	match codec.hex_decode(p4_hex) { core.Result::Ok(v) => { p4 = move v; }, core.Result::Err(_) => { return 160; } }
 	packets.push(move p0);
 	packets.push(move p1);
 	packets.push(move p2);
 	packets.push(move p3);
 	packets.push(move p4);
-	match resultset.decode_text_resultset_packets(&packets) {
+	match resultset.decode_text_resultset_packets(packets) {
 		core.Result::Ok(v) => {
 			if v.column_count != cast<Uint>(1) { return 6; }
 			if v.rows.len != 1 { return 7; }
@@ -78,11 +78,11 @@ fn _expect_version_resultset() nothrow -> Int {
 fn _expect_err_packet_unknown_database() nothrow -> Int {
 	val first_response_hex = "ff1904233432303030556e6b6e6f776e206461746162617365202761707064623127";
 	var payload: Array<Byte> = [];
-	match codec.hex_decode(&first_response_hex) {
+	match codec.hex_decode(first_response_hex) {
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(_) => { return 200; }
 	}
-	match resultset.discriminate_first_response(&payload) {
+	match resultset.discriminate_first_response(payload) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::ErrPacket => {},
@@ -91,7 +91,7 @@ fn _expect_err_packet_unknown_database() nothrow -> Int {
 		},
 		core.Result::Err(_) => { return 21; }
 	}
-	match err_packet.decode_err_packet(&payload) {
+	match err_packet.decode_err_packet(payload) {
 		core.Result::Ok(v) => {
 			if v.error_code != cast<Uint>(1049) { return 22; }
 			if v.sql_state != "42000" { return 23; }

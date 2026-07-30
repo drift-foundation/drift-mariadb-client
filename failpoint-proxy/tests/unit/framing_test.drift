@@ -15,7 +15,7 @@ fn _query_packet(sql: String) nothrow -> Array<Byte> {
 	var i = 0;
 	val n = sql.byte_length();
 	while i < n {
-		payload.push(core.string_byte_at(&sql, i));
+		payload.push(core.string_byte_at(sql, i));
 		i = i + 1;
 	}
 	val plen = payload.len;
@@ -81,7 +81,7 @@ fn _oversized_with_embedded_commits(payload_len: Int) nothrow -> Array<Byte> {
 fn scenario_whole_packet() nothrow -> Int {
 	var f = framing.new_framer();
 	val pkt = _query_packet("COMMIT");
-	if _feed(&mut f, &pkt) != 1 { return 101; }
+	if _feed(f, pkt) != 1 { return 101; }
 	return 0;
 }
 
@@ -91,16 +91,16 @@ fn scenario_split_reads() nothrow -> Int {
 	val pkt = _query_packet("COMMIT");
 	// Split inside the payload.
 	var f = framing.new_framer();
-	val a = _sub(&pkt, 0, 6);
-	val b = _sub(&pkt, 6, pkt.len);
-	if _feed(&mut f, &a) != 0 { return 201; }
-	if _feed(&mut f, &b) != 1 { return 202; }
+	val a = _sub(pkt, 0, 6);
+	val b = _sub(pkt, 6, pkt.len);
+	if _feed(f, a) != 0 { return 201; }
+	if _feed(f, b) != 1 { return 202; }
 	// Split inside the 4-byte header (only 2 bytes first).
 	var g = framing.new_framer();
-	val c = _sub(&pkt, 0, 2);
-	val d = _sub(&pkt, 2, pkt.len);
-	if _feed(&mut g, &c) != 0 { return 203; }
-	if _feed(&mut g, &d) != 1 { return 204; }
+	val c = _sub(pkt, 0, 2);
+	val d = _sub(pkt, 2, pkt.len);
+	if _feed(g, c) != 0 { return 203; }
+	if _feed(g, d) != 1 { return 204; }
 	return 0;
 }
 
@@ -108,8 +108,8 @@ fn scenario_split_reads() nothrow -> Int {
 fn scenario_coalesced() nothrow -> Int {
 	var f = framing.new_framer();
 	val pkt = _query_packet("COMMIT");
-	val two = _concat(&pkt, &pkt);
-	if _feed(&mut f, &two) != 2 { return 301; }
+	val two = _concat(pkt, pkt);
+	if _feed(f, two) != 2 { return 301; }
 	return 0;
 }
 
@@ -119,12 +119,12 @@ fn scenario_commit_then_partial() nothrow -> Int {
 	var f = framing.new_framer();
 	val commit = _query_packet("COMMIT");
 	val other = _query_packet("SELECT 1");
-	val head = _sub(&other, 0, 3);
-	val combined = _concat(&commit, &head);
-	if _feed(&mut f, &combined) != 1 { return 401; }
+	val head = _sub(other, 0, 3);
+	val combined = _concat(commit, head);
+	if _feed(f, combined) != 1 { return 401; }
 	// Complete the SELECT packet: no new COMMIT.
-	val rest = _sub(&other, 3, other.len);
-	if _feed(&mut f, &rest) != 0 { return 402; }
+	val rest = _sub(other, 3, other.len);
+	if _feed(f, rest) != 0 { return 402; }
 	return 0;
 }
 
@@ -137,8 +137,8 @@ fn scenario_locate_coalesced_commit_then_other() nothrow -> Int {
 	var f = framing.new_framer();
 	val commit = _query_packet("COMMIT");
 	val other = _query_packet("SELECT 1");
-	val combined = _concat(&commit, &other);
-	val result = framing.feed_and_locate_commits(&mut f, &combined, combined.len);
+	val combined = _concat(commit, other);
+	val result = framing.feed_and_locate_commits(f, combined, combined.len);
 	if result.commits != 1 { return 801; }
 	if result.commit_ends.len != 1 { return 802; }
 	match result.commit_ends.get(0) {
@@ -152,12 +152,12 @@ fn scenario_locate_coalesced_commit_then_other() nothrow -> Int {
 fn scenario_non_commit() nothrow -> Int {
 	var f = framing.new_framer();
 	val q = _query_packet("SELECT 1");
-	if _feed(&mut f, &q) != 0 { return 501; }
+	if _feed(f, q) != 0 { return 501; }
 	val rb = _query_packet("ROLLBACK");
-	if _feed(&mut f, &rb) != 0 { return 502; }
+	if _feed(f, rb) != 0 { return 502; }
 	// COMMIT as a substring of a larger statement must not match.
 	val cw = _query_packet("COMMIT AND CHILL");
-	if _feed(&mut f, &cw) != 0 { return 503; }
+	if _feed(f, cw) != 0 { return 503; }
 	return 0;
 }
 
@@ -165,16 +165,16 @@ fn scenario_non_commit() nothrow -> Int {
 fn scenario_commit_variants() nothrow -> Int {
 	var f1 = framing.new_framer();
 	val lower = _query_packet("commit");
-	if _feed(&mut f1, &lower) != 1 { return 601; }
+	if _feed(f1, lower) != 1 { return 601; }
 	var f2 = framing.new_framer();
 	val ws = _query_packet("  COMMIT  ");
-	if _feed(&mut f2, &ws) != 1 { return 602; }
+	if _feed(f2, ws) != 1 { return 602; }
 	var f3 = framing.new_framer();
 	val semi = _query_packet("COMMIT;");
-	if _feed(&mut f3, &semi) != 1 { return 603; }
+	if _feed(f3, semi) != 1 { return 603; }
 	var f4 = framing.new_framer();
 	val mixed = _query_packet(" Commit ; ");
-	if _feed(&mut f4, &mixed) != 1 { return 604; }
+	if _feed(f4, mixed) != 1 { return 604; }
 	return 0;
 }
 
@@ -185,14 +185,14 @@ fn scenario_oversized_realign() nothrow -> Int {
 	var f = framing.new_framer();
 	val big = _oversized_with_embedded_commits(5000);
 	val n = big.len;
-	val c1 = _sub(&big, 0, 2000);
-	val c2 = _sub(&big, 2000, 4000);
-	val c3 = _sub(&big, 4000, n);
-	if _feed(&mut f, &c1) != 0 { return 701; }
-	if _feed(&mut f, &c2) != 0 { return 702; }
-	if _feed(&mut f, &c3) != 0 { return 703; }
+	val c1 = _sub(big, 0, 2000);
+	val c2 = _sub(big, 2000, 4000);
+	val c3 = _sub(big, 4000, n);
+	if _feed(f, c1) != 0 { return 701; }
+	if _feed(f, c2) != 0 { return 702; }
+	if _feed(f, c3) != 0 { return 703; }
 	val commit = _query_packet("COMMIT");
-	if _feed(&mut f, &commit) != 1 { return 704; }
+	if _feed(f, commit) != 1 { return 704; }
 	return 0;
 }
 

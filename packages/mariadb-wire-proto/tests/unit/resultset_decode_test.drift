@@ -7,7 +7,7 @@ import mariadb.wire.proto.types as types;
 fn _push_ascii(target: &mut Array<Byte>, s: String) nothrow -> Void {
 	var i = 0;
 	while i < s.byte_length() {
-		target.push(core.string_byte_at(&s, i));
+		target.push(core.string_byte_at(s, i));
 		i = i + 1;
 	}
 }
@@ -15,7 +15,7 @@ fn _push_ascii(target: &mut Array<Byte>, s: String) nothrow -> Void {
 fn _mk_lenenc_text_cell(s: String) nothrow -> Array<Byte> {
 	var out: Array<Byte> = [];
 	out.push(cast<Byte>(s.byte_length()));
-	_push_ascii(&mut out, move s);
+	_push_ascii(out, move s);
 	return move out;
 }
 
@@ -64,7 +64,7 @@ fn expect_decode_basic_resultset() nothrow -> Int {
 	eof.push(cast<Byte>(2));
 	eof.push(cast<Byte>(0));
 	packets.push(move eof);
-	match resultset.decode_text_resultset_packets(&packets) {
+	match resultset.decode_text_resultset_packets(packets) {
 		Ok(v) => {
 			if v.column_count != cast<Uint>(2) { return 1; }
 			val rows = &v.rows;
@@ -88,7 +88,7 @@ fn expect_missing_terminator_error() nothrow -> Int {
 	p2.push(cast<Byte>(1));
 	p2.push(cast<Byte>(120));
 	packets.push(move p2); // row: "x"
-	match resultset.decode_text_resultset_packets(&packets) {
+	match resultset.decode_text_resultset_packets(packets) {
 		Ok(_) => { return 20; },
 		Err(e) => {
 			if e.tag != "resultset-missing-terminator" {
@@ -114,7 +114,7 @@ fn expect_non_utf8_bytes_decode_ok() nothrow -> Int {
 	payload.push(cast<Byte>(64));   // 0x40
 	payload.push(cast<Byte>(255));  // 0xFF — not valid UTF-8
 
-	match resultset.decode_text_row(&payload, 2) {
+	match resultset.decode_text_row(payload, 2) {
 		core.Result::Err(_) => { return 30; },  // must not fail at decode time
 		core.Result::Ok(row) => {
 			if row.len != 2 { return 31; }
@@ -145,7 +145,7 @@ fn expect_null_cell_preserved() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(cast<Byte>(251));  // NULL marker
 
-	match resultset.decode_text_row(&payload, 1) {
+	match resultset.decode_text_row(payload, 1) {
 		core.Result::Err(_) => { return 40; },
 		core.Result::Ok(row) => {
 			if row.len != 1 { return 41; }

@@ -66,17 +66,17 @@ pub fn main() nothrow -> Int {
 						var args: Array<rpc.RpcArg> = [];
 						args.push(rpc.arg_int(1));
 						args.push(rpc.arg_int(2));
-						match conn.call(&"sp_add", &args) {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 12; },
+						match conn.call("sp_add", args) {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 12; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _consume(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return rc; }
+								val rc = _consume(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return rc; }
 							}
 						}
 						i = i + 1;
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}

@@ -14,7 +14,7 @@ fn expect_ok_roundtrip() nothrow -> Int {
 	if encoded[1] != cast<Byte>(0) { return 4; }
 	if encoded[2] != cast<Byte>(1) { return 5; }
 	if encoded[3] != cast<Byte>(7) { return 6; }
-	val decoded_res = header.decode_packet_header(&encoded);
+	val decoded_res = header.decode_packet_header(encoded);
 	var decoded_payload_len = -1;
 	var decoded_sequence_id = cast<Byte>(0);
 	match decoded_res {
@@ -34,7 +34,7 @@ fn expect_short_decode_error() nothrow -> Int {
 	short.push(cast<Byte>(1));
 	short.push(cast<Byte>(2));
 	short.push(cast<Byte>(3));
-	val decoded_res = header.decode_packet_header(&short);
+	val decoded_res = header.decode_packet_header(short);
 	match decoded_res {
 		Ok(_) => { return 10; },
 		Err(e) => {

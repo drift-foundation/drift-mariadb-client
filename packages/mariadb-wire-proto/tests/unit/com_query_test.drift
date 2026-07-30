@@ -5,7 +5,7 @@ import mariadb.wire.proto.command.com_query as com_query;
 
 fn expect_basic_encode() nothrow -> Int {
 	val sql = "SELECT 1";
-	val encoded_res = com_query.encode_com_query_payload(&sql);
+	val encoded_res = com_query.encode_com_query_payload(sql);
 	match encoded_res {
 		Ok(payload) => {
 			val p: &Array<Byte> = &payload;
@@ -14,7 +14,7 @@ fn expect_basic_encode() nothrow -> Int {
 			var i = 0;
 			val n = sql.byte_length();
 			while i < n {
-				if p[i + 1] != core.string_byte_at(&sql, i) { return 3; }
+				if p[i + 1] != core.string_byte_at(sql, i) { return 3; }
 				i = i + 1;
 			}
 			return 0;
@@ -25,7 +25,7 @@ fn expect_basic_encode() nothrow -> Int {
 
 fn expect_empty_query() nothrow -> Int {
 	val sql = "";
-	val encoded_res = com_query.encode_com_query_payload(&sql);
+	val encoded_res = com_query.encode_com_query_payload(sql);
 	match encoded_res {
 		Ok(payload) => {
 			val p: &Array<Byte> = &payload;

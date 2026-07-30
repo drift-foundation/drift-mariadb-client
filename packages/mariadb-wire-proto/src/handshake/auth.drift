@@ -62,8 +62,8 @@ fn _append_bytes(out: &mut Array<Byte>, bytes: &Array<Byte>) nothrow -> Void {
 pub fn encode_handshake_response41(req: &types.HandshakeResponse41) nothrow -> core.Result<Array<Byte>, errors.PacketDecodeError> {
 	var out: Array<Byte> = [];
 
-	_write_u32le(&mut out, req.capabilities);
-	_write_u32le(&mut out, req.max_packet_size);
+	_write_u32le(out, req.capabilities);
+	_write_u32le(out, req.max_packet_size);
 	out.push(req.character_set);
 
 	// 23-byte reserved field: bytes 0-18 are zero-padded, bytes 19-22 carry
@@ -73,14 +73,14 @@ pub fn encode_handshake_response41(req: &types.HandshakeResponse41) nothrow -> c
 		out.push(cast<Byte>(0));
 		i = i + 1;
 	}
-	_write_u32le(&mut out, req.mariadb_ext_capabilities);
+	_write_u32le(out, req.mariadb_ext_capabilities);
 	i = protocol.HANDSHAKE_RESPONSE_MARIADB_EXT_OFFSET + 4;
 	while i < protocol.HANDSHAKE_RESPONSE_RESERVED_LEN {
 		out.push(cast<Byte>(0));
 		i = i + 1;
 	}
 
-	match _append_nul_terminated_string(&mut out, &req.username, "username") {
+	match _append_nul_terminated_string(out, req.username, "username") {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
@@ -88,20 +88,20 @@ pub fn encode_handshake_response41(req: &types.HandshakeResponse41) nothrow -> c
 	val auth_len_res = lenenc.encode_lenenc_int(cast<Uint>(req.auth_response.len));
 	match auth_len_res {
 		core.Result::Ok(prefix) => {
-			_append_bytes(&mut out, &prefix);
+			_append_bytes(out, prefix);
 		},
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}
-	_append_bytes(&mut out, &req.auth_response);
+	_append_bytes(out, req.auth_response);
 
 	if req.database.byte_length() > 0 {
-		match _append_nul_terminated_string(&mut out, &req.database, "database") {
+		match _append_nul_terminated_string(out, req.database, "database") {
 			core.Result::Ok(_) => {},
 			core.Result::Err(e) => { return core.Result::Err(e); }
 		}
 	}
 
-	match _append_nul_terminated_string(&mut out, &req.auth_plugin_name, "auth-plugin-name") {
+	match _append_nul_terminated_string(out, req.auth_plugin_name, "auth-plugin-name") {
 		core.Result::Ok(_) => {},
 		core.Result::Err(e) => { return core.Result::Err(e); }
 	}

@@ -79,7 +79,7 @@ fn _none_conn() nothrow -> Optional<rpc.RpcConnection> {
 // Take the conn out of a LeasedConn — &mut self.conn IS a valid inline
 // projection (Case A pattern), so this works without the SlotCell trick.
 fn _take_conn(lease: &mut LeasedConn) nothrow -> Optional<rpc.RpcConnection> {
-	return mem.replace(&mut lease.conn, _none_conn());
+	return mem.replace(lease.conn, _none_conn());
 }
 
 // Put a conn back into the slot.
@@ -92,8 +92,8 @@ fn _put_back(slot: &Slot, conn: Optional<rpc.RpcConnection>) nothrow -> Void {
 
 implement core.Destructible for LeasedConn {
 	pub fn destroy(var self: LeasedConn) nothrow -> Void {
-		val taken = _take_conn(&mut self);
-		_put_back(&self.slot, move taken);
+		val taken = _take_conn(self);
+		_put_back(self.slot, move taken);
 		return;
 	}
 }
@@ -137,7 +137,7 @@ pub fn close_slot(slot: Slot) nothrow -> Void {
 		Optional::None => {},
 		Optional::Some(c) => {
 			var conn = move c;
-			val _ = rpc.close(&mut conn);
+			val _ = rpc.close(conn);
 		}
 	}
 	return;
@@ -176,7 +176,7 @@ fn scenario_acquire_use_release() nothrow -> Int {
 				core.Result::Ok(s) => {
 					var slot = move s;
 					// First lease: acquire, ping, drop.
-					match acquire(&slot) {
+					match acquire(slot) {
 						core.Result::Err(e) => {
 							val _ = console.println("[s2] acquire failed: " + e.tag);
 							close_slot(move slot);
@@ -203,7 +203,7 @@ fn scenario_acquire_use_release() nothrow -> Int {
 						}
 					}
 					// Second lease: prove conn was returned to slot.
-					match acquire(&slot) {
+					match acquire(slot) {
 						core.Result::Err(e) => {
 							val _ = console.println("[s2] re-acquire failed: " + e.tag);
 							close_slot(move slot);

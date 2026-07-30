@@ -34,75 +34,75 @@ fn _opts() nothrow -> proto.WireConnectOptions {
 // Scenario 1: single resultset with metadata suppressed.
 fn scenario_single_resultset_metadata_suppressed() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 1000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
 			// Verify metadata suppression was negotiated.
 			if not conn.metadata_suppression_negotiated {
-				val _ = proto.close(&mut conn);
+				val _ = proto.close(conn);
 				return 1001;
 			}
-			match proto.query(&mut conn, &"SELECT 42 AS answer") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1002; },
+			match proto.query(conn, "SELECT 42 AS answer") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 1002; },
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
 					// Column count must be available even without metadata.
-					if proto.statement_column_count(&statement) != 1 {
-						val _ = proto.close(&mut conn);
+					if proto.statement_column_count(statement) != 1 {
+						val _ = proto.close(conn);
 						return 1003;
 					}
 					// Column defs should be empty (metadata suppressed).
-					if proto.statement_column_defs(&statement).len != 0 {
-						val _ = proto.close(&mut conn);
+					if proto.statement_column_defs(statement).len != 0 {
+						val _ = proto.close(conn);
 						return 1004;
 					}
 					// Read the single row.
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::Row(cells) => {
-									if cells.len != 1 { val _ = proto.close(&mut conn); return 1005; }
-									match proto.resultset_cell_bytes(&cells[0]) {
+									if cells.len != 1 { val _ = proto.close(conn); return 1005; }
+									match proto.resultset_cell_bytes(cells[0]) {
 										Optional::Some(v) => {
 											match text.utf8_from_bytes(v) {
 												core.Result::Ok(s) => {
-													if s != "42" { val _ = proto.close(&mut conn); return 1006; }
+													if s != "42" { val _ = proto.close(conn); return 1006; }
 												},
-												core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1006; }
+												core.Result::Err(_) => { val _ = proto.close(conn); return 1006; }
 											}
 										},
-										Optional::None() => { val _ = proto.close(&mut conn); return 1007; }
+										Optional::None() => { val _ = proto.close(conn); return 1007; }
 									}
 								},
-								default => { val _ = proto.close(&mut conn); return 1008; }
+								default => { val _ = proto.close(conn); return 1008; }
 							}
 						},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1009; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 1009; }
 					}
 					// Expect ResultSetEnd.
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::ResultSetEnd => {},
-								default => { val _ = proto.close(&mut conn); return 1010; }
+								default => { val _ = proto.close(conn); return 1010; }
 							}
 						},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1011; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 1011; }
 					}
 					// Expect StatementEnd.
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::StatementEnd(_) => {},
-								default => { val _ = proto.close(&mut conn); return 1012; }
+								default => { val _ = proto.close(conn); return 1012; }
 							}
 						},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 1013; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 1013; }
 					}
 				}
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}
@@ -111,52 +111,52 @@ fn scenario_single_resultset_metadata_suppressed() nothrow -> Int {
 // Scenario 2: multi-resultset SP with metadata suppressed.
 fn scenario_multi_resultset_metadata_suppressed() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 2000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
-			match proto.query(&mut conn, &"CALL sp_multi_rs()") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 2001; },
+			match proto.query(conn, "CALL sp_multi_rs()") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 2001; },
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
 					// First resultset: consume at least one row.
 					var rs1_rows = 0;
 					while true {
-						match proto.next_event(&mut statement) {
+						match proto.next_event(statement) {
 							core.Result::Ok(ev) => {
 								match ev {
 									proto.StatementEvent::Row(_) => { rs1_rows = rs1_rows + 1; },
 									proto.StatementEvent::ResultSetEnd => { break; },
-									default => { val _ = proto.close(&mut conn); return 2002; }
+									default => { val _ = proto.close(conn); return 2002; }
 								}
 							},
-							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 2003; }
+							core.Result::Err(_) => { val _ = proto.close(conn); return 2003; }
 						}
 					}
-					if rs1_rows < 1 { val _ = proto.close(&mut conn); return 2004; }
+					if rs1_rows < 1 { val _ = proto.close(conn); return 2004; }
 					// Second resultset: consume at least one row.
 					var rs2_rows = 0;
 					while true {
-						match proto.next_event(&mut statement) {
+						match proto.next_event(statement) {
 							core.Result::Ok(ev) => {
 								match ev {
 									proto.StatementEvent::Row(_) => { rs2_rows = rs2_rows + 1; },
 									proto.StatementEvent::ResultSetEnd => { break; },
-									default => { val _ = proto.close(&mut conn); return 2005; }
+									default => { val _ = proto.close(conn); return 2005; }
 								}
 							},
-							core.Result::Err(_) => { val _ = proto.close(&mut conn); return 2006; }
+							core.Result::Err(_) => { val _ = proto.close(conn); return 2006; }
 						}
 					}
-					if rs2_rows < 1 { val _ = proto.close(&mut conn); return 2007; }
+					if rs2_rows < 1 { val _ = proto.close(conn); return 2007; }
 					// Drain to terminal.
-					match proto.skip_remaining(&mut statement) {
+					match proto.skip_remaining(statement) {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 2008; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 2008; }
 					}
 				}
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}
@@ -172,60 +172,60 @@ fn scenario_multi_resultset_metadata_suppressed() nothrow -> Int {
 // the metadata flag only affects resultset packets.
 fn scenario_ok_response_unaffected() nothrow -> Int {
 	var s = _opts();
-	match proto.connect(&s, Optional<Int>::None()) {
+	match proto.connect(s, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 3000; },
 		core.Result::Ok(session) => {
 			var conn = move session;
 			// SET command returns OK, not a resultset.
-			match proto.query(&mut conn, &"SET @test_var = 1") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3001; },
+			match proto.query(conn, "SET @test_var = 1") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 3001; },
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::StatementEnd(_) => {},
-								default => { val _ = proto.close(&mut conn); return 3002; }
+								default => { val _ = proto.close(conn); return 3002; }
 							}
 						},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3003; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 3003; }
 					}
 				}
 			}
 			// Follow up with a resultset query to prove session is still functional.
-			match proto.query(&mut conn, &"SELECT @test_var AS v") {
-				core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3010; },
+			match proto.query(conn, "SELECT @test_var AS v") {
+				core.Result::Err(_) => { val _ = proto.close(conn); return 3010; },
 				core.Result::Ok(stmt) => {
 					var statement = move stmt;
-					match proto.next_event(&mut statement) {
+					match proto.next_event(statement) {
 						core.Result::Ok(ev) => {
 							match ev {
 								proto.StatementEvent::Row(cells) => {
-									if cells.len != 1 { val _ = proto.close(&mut conn); return 3011; }
-									match proto.resultset_cell_bytes(&cells[0]) {
+									if cells.len != 1 { val _ = proto.close(conn); return 3011; }
+									match proto.resultset_cell_bytes(cells[0]) {
 										Optional::Some(v) => {
 											match text.utf8_from_bytes(v) {
 												core.Result::Ok(s) => {
-													if s != "1" { val _ = proto.close(&mut conn); return 3012; }
+													if s != "1" { val _ = proto.close(conn); return 3012; }
 												},
-												core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3012; }
+												core.Result::Err(_) => { val _ = proto.close(conn); return 3012; }
 											}
 										},
-										Optional::None() => { val _ = proto.close(&mut conn); return 3013; }
+										Optional::None() => { val _ = proto.close(conn); return 3013; }
 									}
 								},
-								default => { val _ = proto.close(&mut conn); return 3014; }
+								default => { val _ = proto.close(conn); return 3014; }
 							}
 						},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3015; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 3015; }
 					}
-					match proto.skip_remaining(&mut statement) {
+					match proto.skip_remaining(statement) {
 						core.Result::Ok(_) => {},
-						core.Result::Err(_) => { val _ = proto.close(&mut conn); return 3016; }
+						core.Result::Err(_) => { val _ = proto.close(conn); return 3016; }
 					}
 				}
 			}
-			val _ = proto.close(&mut conn);
+			val _ = proto.close(conn);
 			return 0;
 		}
 	}

@@ -41,7 +41,7 @@ fn _connect_rebind(cfg: rpc.RpcConnectionConfig) nothrow -> core.Result<rpc.RpcC
 }
 
 fn _assert_post_bind_state(conn: &rpc.RpcConnection, base: Int) nothrow -> Int {
-	val st = wire.session_state(&conn.wire_session);
+	val st = wire.session_state(conn.wire_session);
 	if not st.reusable { return base + 1; }
 	if st.autocommit_enabled { return base + 2; }
 	if st.in_transaction { return base + 3; }
@@ -62,10 +62,10 @@ fn _scenario_direct() nothrow -> Int {
 		core.Result::Ok(c) => {
 			var cfg = move c;
 			match rpc.connect(move cfg) {
-				core.Result::Err(e) => { return 110 + _connect_err_code(&e); },
+				core.Result::Err(e) => { return 110 + _connect_err_code(e); },
 				core.Result::Ok(v) => {
 					var conn = move v;
-					return _assert_post_bind_state(&conn, 120);
+					return _assert_post_bind_state(conn, 120);
 				}
 			}
 		}
@@ -78,10 +78,10 @@ fn _scenario_passthrough() nothrow -> Int {
 		core.Result::Ok(c) => {
 			var cfg = move c;
 			match _connect_passthrough(move cfg) {
-				core.Result::Err(e) => { return 130 + _connect_err_code(&e); },
+				core.Result::Err(e) => { return 130 + _connect_err_code(e); },
 				core.Result::Ok(v) => {
 					var conn = move v;
-					return _assert_post_bind_state(&conn, 140);
+					return _assert_post_bind_state(conn, 140);
 				}
 			}
 		}
@@ -94,10 +94,10 @@ fn _scenario_rebind() nothrow -> Int {
 		core.Result::Ok(c) => {
 			var cfg = move c;
 			match _connect_rebind(move cfg) {
-				core.Result::Err(e) => { return 150 + _connect_err_code(&e); },
+				core.Result::Err(e) => { return 150 + _connect_err_code(e); },
 				core.Result::Ok(v) => {
 					var conn = move v;
-					return _assert_post_bind_state(&conn, 160);
+					return _assert_post_bind_state(conn, 160);
 				}
 			}
 		}

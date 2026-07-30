@@ -107,7 +107,7 @@ fn _arm_short_timeout(p: &pool.ConnectionPool, secs: Int) nothrow -> Int {
 				core.Result::Ok(c) => {
 					var args: Array<rpc.RpcArg> = [];
 					args.push(rpc.arg_int(secs));
-					match c.call(&"sp_set_wait_timeout", &args) {
+					match c.call("sp_set_wait_timeout", args) {
 						core.Result::Ok(s) => { val _ = move s; },  // drain the (resultless) CALL
 						core.Result::Err(e) => { console.println("[arm] sp_set_wait_timeout failed: " + e.tag); return 112; }
 					}
@@ -157,14 +157,14 @@ pub fn main() nothrow -> Int {
 					var p = move v;
 
 					// --- Phase 1: arm short server timeout, then watch for recycle ---
-					val arm_rc = _arm_short_timeout(&p, WAIT_TIMEOUT_SECS);
+					val arm_rc = _arm_short_timeout(p, WAIT_TIMEOUT_SECS);
 					if arm_rc != 0 { val _ = p.close(); return arm_rc; }
 					console.println("[phase1] conn armed with wait_timeout=" + format.format_int(WAIT_TIMEOUT_SECS) + "s; awaiting server close + poll recycle");
 
 					var waited = 0;
 					var recycled_seen = false;
 					while not recycled_seen {
-						if _recycled_count(&counter_arc) >= 1 {
+						if _recycled_count(counter_arc) >= 1 {
 							recycled_seen = true;
 						} else {
 							if waited >= RECYCLE_DEADLINE_MS {
@@ -179,15 +179,15 @@ pub fn main() nothrow -> Int {
 					console.println("[phase1] PASS: idle conn recycled by poll path after ~" + format.format_int(waited) + "ms (<< 60s keepalive)");
 
 					// --- Phase 2: healthy churn must NOT trigger further recycles ---
-					val baseline = _recycled_count(&counter_arc);
+					val baseline = _recycled_count(counter_arc);
 					var i = 0;
 					while i < 6 {
-						val rc = _healthy_cycle(&p);
+						val rc = _healthy_cycle(p);
 						if rc != 0 { val _ = p.close(); return rc; }
 						val _ = conc.sleep(conc.Duration(millis = 400));
 						i = i + 1;
 					}
-					val after = _recycled_count(&counter_arc);
+					val after = _recycled_count(counter_arc);
 					if after != baseline {
 						console.println("[phase2] FAIL: healthy churn caused " + format.format_int(after - baseline) + " spurious recycle(s)");
 						val _ = p.close();

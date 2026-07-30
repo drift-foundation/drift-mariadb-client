@@ -7,7 +7,7 @@ import mariadb.wire.proto.decode.err_packet as err_packet;
 import mariadb.wire.proto.decode.resultset as resultset;
 
 fn _decode_hex(hex: String, code: Int) nothrow -> core.Result<Array<Byte>, Int> {
-	match codec.hex_decode(&hex) {
+	match codec.hex_decode(hex) {
 		core.Result::Ok(v) => { return core.Result::Ok(move v); },
 		core.Result::Err(_) => { return core.Result::Err(code); }
 	}
@@ -19,7 +19,7 @@ fn _expect_ok_packet(hex: String, affected: Uint, last_id: Uint, status: Uint, w
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(c) => { return c; }
 	}
-	match resultset.discriminate_first_response(&payload) {
+	match resultset.discriminate_first_response(payload) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::OkPacket => {},
@@ -28,7 +28,7 @@ fn _expect_ok_packet(hex: String, affected: Uint, last_id: Uint, status: Uint, w
 		},
 		core.Result::Err(_) => { return bad_code + 2; }
 	}
-	match ok_packet.decode_ok_packet(&payload) {
+	match ok_packet.decode_ok_packet(payload) {
 		core.Result::Ok(v) => {
 			if v.affected_rows != affected { return bad_code + 3; }
 			if v.last_insert_id != last_id { return bad_code + 4; }
@@ -46,7 +46,7 @@ fn _expect_err_packet(hex: String, code: Uint, sql_state: String, message: Strin
 		core.Result::Ok(v) => { payload = move v; },
 		core.Result::Err(c) => { return c; }
 	}
-	match resultset.discriminate_first_response(&payload) {
+	match resultset.discriminate_first_response(payload) {
 		core.Result::Ok(route) => {
 			match route {
 				resultset.FirstResponseRoute::ErrPacket => {},
@@ -55,7 +55,7 @@ fn _expect_err_packet(hex: String, code: Uint, sql_state: String, message: Strin
 		},
 		core.Result::Err(_) => { return bad_code + 2; }
 	}
-	match err_packet.decode_err_packet(&payload) {
+	match err_packet.decode_err_packet(payload) {
 		core.Result::Ok(v) => {
 			if v.error_code != code { return bad_code + 3; }
 			if v.sql_state != sql_state { return bad_code + 4; }

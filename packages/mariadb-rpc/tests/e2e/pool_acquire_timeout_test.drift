@@ -75,7 +75,7 @@ pub fn main() nothrow -> Int {
 									rc = 4;
 								},
 								core.Result::Err(e) => {
-									val elapsed = time.elapsed_ms(&t0);
+									val elapsed = time.elapsed_ms(t0);
 									console.println("[main] second acquire returned tag=" + e.tag + " after " + format.format_int(elapsed) + "ms");
 									if e.tag != "acquire-timeout" {
 										console.println("[main] FAIL: expected acquire-timeout tag");

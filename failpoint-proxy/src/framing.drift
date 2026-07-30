@@ -134,7 +134,7 @@ pub fn feed_and_locate_commits(framer: &mut PacketFramer, chunk: &Array<Byte>, n
 				} else {
 					val total = 4 + len;
 					if framer.buf.len == total {
-						if _is_commit_payload(&framer.buf, 4, len) {
+						if _is_commit_payload(framer.buf, 4, len) {
 							commits = commits + 1;
 							// `i` is already one past the payload's last byte
 							// (pushed then incremented above), which is

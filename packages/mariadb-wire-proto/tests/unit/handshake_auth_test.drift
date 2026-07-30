@@ -13,7 +13,7 @@ fn _mk_req(database: String) nothrow -> types.HandshakeResponse41 {
 
 fn expect_encode_with_database() nothrow -> Int {
 	val req = _mk_req("appdb");
-	val r = auth.encode_handshake_response41(&req);
+	val r = auth.encode_handshake_response41(req);
 	match r {
 		Ok(out) => {
 			if out.len != 68 { return 1; }
@@ -36,7 +36,7 @@ fn expect_encode_with_database() nothrow -> Int {
 
 fn expect_encode_without_database() nothrow -> Int {
 	val req = _mk_req("");
-	val r = auth.encode_handshake_response41(&req);
+	val r = auth.encode_handshake_response41(req);
 	match r {
 		Ok(out) => {
 			if out.len != 62 { return 20; }

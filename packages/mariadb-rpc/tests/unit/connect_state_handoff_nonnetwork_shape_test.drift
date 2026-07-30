@@ -29,7 +29,7 @@ fn _connect_like() nothrow -> core.Result<FakeConnection, Int> {
 		strict_reuse = true
 	);
 
-	_apply_connect_mutations(&mut conn);
+	_apply_connect_mutations(conn);
 
 	if not conn.session.state.reusable { return core.Result::Err(101); }
 	if conn.session.state.autocommit_enabled { return core.Result::Err(102); }

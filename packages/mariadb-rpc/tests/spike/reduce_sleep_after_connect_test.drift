@@ -35,7 +35,7 @@ fn l0_baseline() nothrow -> Int {
 	console.println("--- L0: baseline sleep ---");
 	val t = time.now_monotonic();
 	val _ = conc.sleep(conc.Duration(millis = 550));
-	_report("L0", _ms(&t));
+	_report("L0", _ms(t));
 	return 0;
 }
 
@@ -43,7 +43,7 @@ fn l0_baseline() nothrow -> Int {
 fn l1_net_connect() nothrow -> Int {
 	console.println("--- L1: net.connect only ---");
 	val addr = net.socket_addr(HOST, PORT);
-	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+	match net.connect(addr, conc.Duration(millis = TIMEOUT_MS)) {
 		core.Result::Err(e) => {
 			console.println("[L1] net.connect failed kind=" + e.kind);
 			return 101;
@@ -53,7 +53,7 @@ fn l1_net_connect() nothrow -> Int {
 			console.println("[L1] tcp connected");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L1", _ms(&t));
+			_report("L1", _ms(t));
 			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
 			return 0;
 		}
@@ -64,18 +64,18 @@ fn l1_net_connect() nothrow -> Int {
 fn l2_net_connect_plus_one_read() nothrow -> Int {
 	console.println("--- L2: net.connect + 1 socket read ---");
 	val addr = net.socket_addr(HOST, PORT);
-	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+	match net.connect(addr, conc.Duration(millis = TIMEOUT_MS)) {
 		core.Result::Err(_) => { return 201; },
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var buf = io.buffer(256);
-			match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+			match stream.read(buf, conc.Duration(millis = TIMEOUT_MS)) {
 				core.Result::Err(e) => { console.println("[L2] read failed kind=" + e.kind); val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 202; },
 				core.Result::Ok(n) => { console.println("[L2] read " + format.format_int(n) + " bytes"); }
 			}
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L2", _ms(&t));
+			_report("L2", _ms(t));
 			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
 			return 0;
 		}
@@ -86,12 +86,12 @@ fn l2_net_connect_plus_one_read() nothrow -> Int {
 fn l2b_net_connect_read_write() nothrow -> Int {
 	console.println("--- L2b: net.connect + 1 read + 1 write ---");
 	val addr = net.socket_addr(HOST, PORT);
-	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+	match net.connect(addr, conc.Duration(millis = TIMEOUT_MS)) {
 		core.Result::Err(_) => { return 211; },
 		core.Result::Ok(s) => {
 			var stream = move s;
 			var rbuf = io.buffer(256);
-			match stream.read(&mut rbuf, conc.Duration(millis = TIMEOUT_MS)) {
+			match stream.read(rbuf, conc.Duration(millis = TIMEOUT_MS)) {
 				core.Result::Err(_) => { val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 212; },
 				core.Result::Ok(_) => {}
 			}
@@ -102,13 +102,13 @@ fn l2b_net_connect_read_write() nothrow -> Int {
 			io.buffer_write(&mut wbuf, 1, cast<Byte>(0));
 			io.buffer_write(&mut wbuf, 2, cast<Byte>(0));
 			io.buffer_write(&mut wbuf, 3, cast<Byte>(1));
-			match stream.write(&wbuf, conc.Duration(millis = TIMEOUT_MS)) {
+			match stream.write(wbuf, conc.Duration(millis = TIMEOUT_MS)) {
 				core.Result::Err(_) => { val _ = stream.close(conc.Duration(millis = TIMEOUT_MS)); return 213; },
 				core.Result::Ok(n) => { console.println("[L2b] wrote " + format.format_int(n) + " bytes"); }
 			}
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L2b", _ms(&t));
+			_report("L2b", _ms(t));
 			val _ = stream.close(conc.Duration(millis = TIMEOUT_MS));
 			return 0;
 		}
@@ -119,15 +119,15 @@ fn l2b_net_connect_read_write() nothrow -> Int {
 fn l2w_wire_connect() nothrow -> Int {
 	console.println("--- L2w: wire.connect (no SET NAMES / autocommit) ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(e) => { console.println("[L2w] wire.connect failed " + e.tag); return 221; },
 		core.Result::Ok(s) => {
 			var session = move s;
 			console.println("[L2w] wire connected");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L2w", _ms(&t));
-			val _ = wire.close(&mut session);
+			_report("L2w", _ms(t));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}
@@ -138,19 +138,19 @@ fn l2w_wire_connect() nothrow -> Int {
 fn l2q_wire_connect_plus_one_query() nothrow -> Int {
 	console.println("--- L2q: wire.connect + 1 wire.query (drain to end) ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(e) => { console.println("[L2q] wire.connect failed " + e.tag); return 231; },
 		core.Result::Ok(s) => {
 			var session = move s;
 			val sql = "SELECT 1";
-			match wire.query(&mut session, &sql) {
-				core.Result::Err(e) => { console.println("[L2q] wire.query failed " + e.tag); val _ = wire.close(&mut session); return 232; },
+			match wire.query(session, sql) {
+				core.Result::Err(e) => { console.println("[L2q] wire.query failed " + e.tag); val _ = wire.close(session); return 232; },
 				core.Result::Ok(stv) => {
 					var stmt = move stv;
 					// Drain to terminal event.
 					var drained = false;
 					while not drained {
-						match wire.next_event(&mut stmt) {
+						match wire.next_event(stmt) {
 							core.Result::Err(_) => { drained = true; },
 							core.Result::Ok(ev) => {
 								match ev {
@@ -167,8 +167,8 @@ fn l2q_wire_connect_plus_one_query() nothrow -> Int {
 			}
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L2q", _ms(&t));
-			val _ = wire.close(&mut session);
+			_report("L2q", _ms(t));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}
@@ -198,20 +198,20 @@ fn _drain(stmt: &mut wire.Statement) nothrow -> Void {
 fn l3a_set_names_only() nothrow -> Int {
 	console.println("--- L3a: wire.connect + ONE 'SET NAMES utf8mb4' query ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 341; },
 		core.Result::Ok(s) => {
 			var session = move s;
 			val sql = "SET NAMES utf8mb4";
-			match wire.query(&mut session, &sql) {
-				core.Result::Err(_) => { val _ = wire.close(&mut session); return 342; },
-				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			match wire.query(session, sql) {
+				core.Result::Err(_) => { val _ = wire.close(session); return 342; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(stmt); }
 			}
 			console.println("[L3a] SET NAMES drained");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L3a", _ms(&t));
-			val _ = wire.close(&mut session);
+			_report("L3a", _ms(t));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}
@@ -222,19 +222,19 @@ fn l3a_set_names_only() nothrow -> Int {
 fn l3b_set_autocommit_only() nothrow -> Int {
 	console.println("--- L3b: wire.connect + set_autocommit(false), no prior query ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 351; },
 		core.Result::Ok(s) => {
 			var session = move s;
-			match wire.set_autocommit(&mut session, false) {
-				core.Result::Err(_) => { val _ = wire.close(&mut session); return 352; },
+			match wire.set_autocommit(session, false) {
+				core.Result::Err(_) => { val _ = wire.close(session); return 352; },
 				core.Result::Ok(_) => {}
 			}
 			console.println("[L3b] set_autocommit done");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L3b", _ms(&t));
-			val _ = wire.close(&mut session);
+			_report("L3b", _ms(t));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}
@@ -245,26 +245,26 @@ fn l3b_set_autocommit_only() nothrow -> Int {
 fn l3c_two_queries() nothrow -> Int {
 	console.println("--- L3c: wire.connect + 'SELECT 1' x 2 ---");
 	val opts = wire.create_connect_options(HOST, PORT, USER, PASSWORD, DB, wire.DEFAULT_CHARSET_ID, cast<Uint>(0), TIMEOUT_MS, TIMEOUT_MS);
-	match wire.connect(&opts, Optional<Int>::None()) {
+	match wire.connect(opts, Optional<Int>::None()) {
 		core.Result::Err(_) => { return 361; },
 		core.Result::Ok(s) => {
 			var session = move s;
 			val sql = "SELECT 1";
-			match wire.query(&mut session, &sql) {
-				core.Result::Err(_) => { val _ = wire.close(&mut session); return 362; },
-				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			match wire.query(session, sql) {
+				core.Result::Err(_) => { val _ = wire.close(session); return 362; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(stmt); }
 			}
 			console.println("[L3c] first SELECT 1 drained");
 			val sql2 = "SELECT 1";
-			match wire.query(&mut session, &sql2) {
-				core.Result::Err(_) => { val _ = wire.close(&mut session); return 363; },
-				core.Result::Ok(stv) => { var stmt = move stv; _drain(&mut stmt); }
+			match wire.query(session, sql2) {
+				core.Result::Err(_) => { val _ = wire.close(session); return 363; },
+				core.Result::Ok(stv) => { var stmt = move stv; _drain(stmt); }
 			}
 			console.println("[L3c] second SELECT 1 drained");
 			val t = time.now_monotonic();
 			val _ = conc.sleep(conc.Duration(millis = 550));
-			_report("L3c", _ms(&t));
-			val _ = wire.close(&mut session);
+			_report("L3c", _ms(t));
+			val _ = wire.close(session);
 			return 0;
 		}
 	}
@@ -294,8 +294,8 @@ fn l3_full_rpc_connect() nothrow -> Int {
 					console.println("[L3] rpc connected");
 					val t = time.now_monotonic();
 					val _ = conc.sleep(conc.Duration(millis = 550));
-					_report("L3", _ms(&t));
-					val _ = rpc.close(&mut conn);
+					_report("L3", _ms(t));
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}

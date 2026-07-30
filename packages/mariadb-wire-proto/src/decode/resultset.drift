@@ -105,7 +105,7 @@ pub fn decode_text_row(payload: &Array<Byte>, column_count: Int) nothrow -> core
 			core.Result::Ok(v) => { decoded = move v; },
 			core.Result::Err(e) => { return core.Result::Err(e); }
 		}
-		var cell_bytes = _copy_bytes(&decoded.value);
+		var cell_bytes = _copy_bytes(decoded.value);
 		idx = decoded.next_offset;
 		row.push(ResultSetCell::Value(move cell_bytes));
 		col = col + 1;

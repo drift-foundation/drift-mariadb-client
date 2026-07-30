@@ -82,7 +82,7 @@ fn _write_all(stream: &mut net.TcpStream, bytes: &mut Array<Byte>, n: Int) nothr
 	val start = time.now_monotonic();
 	var off = 0;
 	while off < n {
-		if time.elapsed_ms(&start) >= CONTROL_OVERALL_TIMEOUT_MS { return false; }
+		if time.elapsed_ms(start) >= CONTROL_OVERALL_TIMEOUT_MS { return false; }
 		match stream.write_bytes(bytes, off, n - off, conc.Duration(millis = TIMEOUT_MS)) {
 			core.Result::Ok(w) => {
 				if w <= 0 { return false; }
@@ -98,14 +98,14 @@ fn _write_all(stream: &mut net.TcpStream, bytes: &mut Array<Byte>, n: Int) nothr
 
 fn _control_request(req: String) nothrow -> core.Result<String, String> {
 	val addr = net.socket_addr(PROXY_HOST, PROXY_CONTROL_PORT);
-	match net.connect(&addr, conc.Duration(millis = TIMEOUT_MS)) {
+	match net.connect(addr, conc.Duration(millis = TIMEOUT_MS)) {
 		core.Result::Err(_) => { return core.Result::Err("connect-failed"); },
 		core.Result::Ok(s) => {
 			var stream = move s;
 			val line = req + "\n";
-			var bytes = core.string_to_utf8_bytes(&line);
+			var bytes = core.string_to_utf8_bytes(line);
 			val n = bytes.len;
-			if not _write_all(&mut stream, &mut bytes, n) {
+			if not _write_all(stream, bytes, n) {
 				val _ = stream.close(conc.Duration(millis = 1000));
 				return core.Result::Err("write-failed-or-timeout");
 			}
@@ -113,12 +113,12 @@ fn _control_request(req: String) nothrow -> core.Result<String, String> {
 			var lf = -1;
 			val read_start = time.now_monotonic();
 			while lf < 0 {
-				if time.elapsed_ms(&read_start) >= CONTROL_OVERALL_TIMEOUT_MS {
+				if time.elapsed_ms(read_start) >= CONTROL_OVERALL_TIMEOUT_MS {
 					val _ = stream.close(conc.Duration(millis = 1000));
 					return core.Result::Err("response-timeout");
 				}
 				var buf = io.buffer(4096);
-				match stream.read(&mut buf, conc.Duration(millis = TIMEOUT_MS)) {
+				match stream.read(buf, conc.Duration(millis = TIMEOUT_MS)) {
 					core.Result::Ok(rn) => {
 						if rn <= 0 {
 							val _ = stream.close(conc.Duration(millis = 1000));
@@ -144,7 +144,7 @@ fn _control_request(req: String) nothrow -> core.Result<String, String> {
 				}
 			}
 			val _ = stream.close(conc.Duration(millis = 1000));
-			match text.utf8_from_bytes_range(&acc, 0, lf) {
+			match text.utf8_from_bytes_range(acc, 0, lf) {
 				core.Result::Ok(s2) => { return core.Result::Ok(s2); },
 				core.Result::Err(_) => { return core.Result::Err("utf8-decode-failed"); }
 			}
@@ -177,7 +177,7 @@ pub fn main() nothrow -> Int {
 	match _control_request("{\"op\":\"clear\"}") {
 		core.Result::Err(tag) => { console.println("[main] control clear failed: " + tag + " (is the proxy running on " + PROXY_HOST + ":" + format.format_int(PROXY_CONTROL_PORT) + "?)"); return 1; },
 		core.Result::Ok(clear_resp) => {
-			if not _json_bool(&clear_resp, "ok") { console.println("[main] clear not ok: " + clear_resp); return 1; }
+			if not _json_bool(clear_resp, "ok") { console.println("[main] clear not ok: " + clear_resp); return 1; }
 		}
 	}
 
@@ -185,8 +185,8 @@ pub fn main() nothrow -> Int {
 	match _control_request("{\"op\":\"arm\",\"label\":\"domain-isolation\",\"match\":{\"nth\":1}}") {
 		core.Result::Err(tag) => { console.println("[main] arm request failed: " + tag); return 2; },
 		core.Result::Ok(arm_resp) => {
-			if not _json_bool(&arm_resp, "ok") { console.println("[main] arm not ok: " + arm_resp); return 2; }
-			arm_id = _json_int(&arm_resp, "id");
+			if not _json_bool(arm_resp, "ok") { console.println("[main] arm not ok: " + arm_resp); return 2; }
+			arm_id = _json_int(arm_resp, "id");
 		}
 	}
 
@@ -203,12 +203,12 @@ pub fn main() nothrow -> Int {
 						core.Result::Ok(_) => { console.println("[main] direct commit -> Ok (expected — never touched the proxy)"); },
 						core.Result::Err(de) => {
 							console.println("[main] UNEXPECTED: direct commit failed, cause_tag=" + de.cause_tag);
-							val _ = rpc.close(&mut direct_conn);
+							val _ = rpc.close(direct_conn);
 							_best_effort_clear();
 							return 5;
 						}
 					}
-					val _ = rpc.close(&mut direct_conn);
+					val _ = rpc.close(direct_conn);
 				}
 			}
 		}
@@ -220,12 +220,12 @@ pub fn main() nothrow -> Int {
 	match _control_request(status_req) {
 		core.Result::Err(tag) => { console.println("[main] status request failed: " + tag); _best_effort_clear(); return 6; },
 		core.Result::Ok(status_resp) => {
-			if _json_bool(&status_resp, "fired") {
+			if _json_bool(status_resp, "fired") {
 				console.println("[main] UNEXPECTED: direct traffic consumed the armed failpoint: " + status_resp);
 				_best_effort_clear();
 				return 7;
 			}
-			if not _json_bool(&status_resp, "armed") {
+			if not _json_bool(status_resp, "armed") {
 				console.println("[main] UNEXPECTED: failpoint no longer armed after direct traffic: " + status_resp);
 				_best_effort_clear();
 				return 8;
@@ -256,7 +256,7 @@ pub fn main() nothrow -> Int {
 							}
 						}
 					}
-					val _ = rpc.close(&mut proxied_conn);
+					val _ = rpc.close(proxied_conn);
 					if rc != 0 { _best_effort_clear(); return rc; }
 				}
 			}
@@ -266,7 +266,7 @@ pub fn main() nothrow -> Int {
 	match _control_request("{\"op\":\"assert_all_fired\"}") {
 		core.Result::Err(tag) => { console.println("[main] assert_all_fired request failed: " + tag); _best_effort_clear(); return 13; },
 		core.Result::Ok(assert_resp) => {
-			if not _json_bool(&assert_resp, "ok") { console.println("[main] assert_all_fired not ok: " + assert_resp); _best_effort_clear(); return 14; }
+			if not _json_bool(assert_resp, "ok") { console.println("[main] assert_all_fired not ok: " + assert_resp); _best_effort_clear(); return 14; }
 		}
 	}
 

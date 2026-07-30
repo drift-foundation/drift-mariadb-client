@@ -31,13 +31,13 @@ fn _inc(inner: &conc.Arc<Inner>) nothrow -> Void {
 
 fn _loop(inner: conc.Arc<Inner>) nothrow -> Int {
 	val _ = console.println("[DBG] loop start");
-	while not _inner_stop(&inner) {
+	while not _inner_stop(inner) {
 		match conc.sleep(conc.Duration(millis = 100)) {
 			core.Result::Err(_) => { val _ = console.println("[DBG] sleep err"); return 0; },
 			core.Result::Ok(_) => { val _ = console.println("[DBG] sleep ok"); }
 		}
-		if _inner_stop(&inner) { return 0; }
-		_inc(&inner);
+		if _inner_stop(inner) { return 0; }
+		_inc(inner);
 	}
 	return 0;
 }

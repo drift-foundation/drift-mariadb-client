@@ -17,7 +17,7 @@ import mariadb.rpc as rpc;
 // Map a wire failure tag through the real mapping.
 fn _mapped(wire_tag: String) nothrow -> rpc.RpcCommitError {
 	val t = move wire_tag;
-	return rpc.classify_commit_wire_tag(&t);
+	return rpc.classify_commit_wire_tag(t);
 }
 
 // 1 = AmbiguousWrite, 2 = NotSent, 3 = ServerRejected.

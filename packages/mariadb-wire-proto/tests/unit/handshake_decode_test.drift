@@ -53,7 +53,7 @@ fn build_handshake_payload() nothrow -> Array<Byte> {
 	val plugin = "mysql_native_password";
 	var k = 0;
 	while k < plugin.byte_length() {
-		b.push(core.string_byte_at(&plugin, k));
+		b.push(core.string_byte_at(plugin, k));
 		k = k + 1;
 	}
 	b.push(cast<Byte>(0));
@@ -62,7 +62,7 @@ fn build_handshake_payload() nothrow -> Array<Byte> {
 
 fn expect_handshake_decode_ok() nothrow -> Int {
 	val payload = build_handshake_payload();
-	val r = hello.decode_handshake_hello(&payload);
+	val r = hello.decode_handshake_hello(payload);
 	match r {
 		Ok(v) => {
 			if v.protocol_version != cast<Byte>(10) { return 1; }
@@ -82,7 +82,7 @@ fn expect_handshake_decode_ok() nothrow -> Int {
 fn expect_handshake_truncated() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(cast<Byte>(10));
-	val r = hello.decode_handshake_hello(&payload);
+	val r = hello.decode_handshake_hello(payload);
 	match r {
 		Ok(_) => { return 10; },
 		Err(e) => {

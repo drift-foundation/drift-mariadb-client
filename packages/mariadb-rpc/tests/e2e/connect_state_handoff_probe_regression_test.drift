@@ -43,13 +43,13 @@ pub fn main() nothrow -> Int {
 		core.Result::Ok(c) => {
 			var cfg = move c;
 			match rpc.connect_handoff_probe(move cfg) {
-				core.Result::Err(e) => { return _connect_err_code(&e); },
+				core.Result::Err(e) => { return _connect_err_code(e); },
 				core.Result::Ok(p) => {
 					var probe = move p;
 					if not probe.pre_reusable { return 134; }
 					if probe.pre_autocommit_enabled { return 135; }
 					if probe.pre_in_transaction { return 136; }
-					val post = wire.session_state(&probe.conn.wire_session);
+					val post = wire.session_state(probe.conn.wire_session);
 					if not post.reusable { return 141; }
 					if post.autocommit_enabled { return 142; }
 					if post.in_transaction { return 143; }

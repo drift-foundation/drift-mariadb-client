@@ -23,7 +23,7 @@ fn expect_constant_values() nothrow -> Int {
 fn expect_ok_error_tag() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(cast<Byte>(1));
-	match ok_packet.decode_ok_packet(&payload) {
+	match ok_packet.decode_ok_packet(payload) {
 		core.Result::Ok(_) => { return 10; },
 		core.Result::Err(e) => {
 			if e.tag != errors.TAG_INVALID_OK_HEADER { return 11; }
@@ -38,7 +38,7 @@ fn expect_err_error_tag() nothrow -> Int {
 	payload.push(cast<Byte>(0));
 	payload.push(cast<Byte>(1));
 	payload.push(cast<Byte>(0));
-	match err_packet.decode_err_packet(&payload) {
+	match err_packet.decode_err_packet(payload) {
 		core.Result::Ok(_) => { return 20; },
 		core.Result::Err(e) => {
 			if e.tag != errors.TAG_INVALID_ERR_HEADER { return 21; }
@@ -50,7 +50,7 @@ fn expect_err_error_tag() nothrow -> Int {
 
 fn expect_resultset_error_tags() nothrow -> Int {
 	var empty: Array<Byte> = [];
-	match resultset.discriminate_first_response(&empty) {
+	match resultset.discriminate_first_response(empty) {
 		core.Result::Ok(_) => { return 30; },
 		core.Result::Err(e) => {
 			if e.tag != errors.TAG_SHORT_RESPONSE_PAYLOAD { return 31; }
@@ -69,7 +69,7 @@ fn expect_resultset_error_tags() nothrow -> Int {
 	p2.push(cast<Byte>(1));
 	p2.push(cast<Byte>(120));
 	packets.push(move p2);
-	match resultset.decode_text_resultset_packets(&packets) {
+	match resultset.decode_text_resultset_packets(packets) {
 		core.Result::Ok(_) => { return 33; },
 		core.Result::Err(e) => {
 			if e.tag != errors.TAG_RESULTSET_MISSING_TERMINATOR { return 34; }
@@ -84,14 +84,14 @@ fn expect_handshake_auth_nul_tag() nothrow -> Int {
 	bytes.push(cast<Byte>(0));
 	bytes.push(cast<Byte>(98));
 	var username = "";
-	match text.utf8_from_bytes(&bytes) {
+	match text.utf8_from_bytes(bytes) {
 		core.Result::Ok(s) => { username = move s; },
 		core.Result::Err(_) => { return 40; }
 	}
 	var auth_response: Array<Byte> = [];
 	auth_response.push(cast<Byte>(1));
 	val req = types.HandshakeResponse41(capabilities = cast<Uint>(1), max_packet_size = cast<Uint>(1), character_set = cast<Byte>(45), username = move username, auth_response = move auth_response, database = "", auth_plugin_name = "mysql_native_password", mariadb_ext_capabilities = cast<Uint>(0));
-	match handshake_auth.encode_handshake_response41(&req) {
+	match handshake_auth.encode_handshake_response41(req) {
 		core.Result::Ok(_) => { return 41; },
 		core.Result::Err(e) => {
 			if e.tag != errors.TAG_HANDSHAKE_AUTH_NUL_IN_PREFIX + "username" { return 42; }

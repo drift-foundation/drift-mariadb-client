@@ -5,7 +5,7 @@ import mariadb.wire.proto.decode.resultset as resultset;
 fn expect_ok_route() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(resultset.FIRST_RESPONSE_OK_HEADER);
-	val r = resultset.discriminate_first_response(&payload);
+	val r = resultset.discriminate_first_response(payload);
 	match r {
 		Ok(route) => {
 			match route {
@@ -20,7 +20,7 @@ fn expect_ok_route() nothrow -> Int {
 fn expect_err_route() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(resultset.FIRST_RESPONSE_ERR_HEADER);
-	val r = resultset.discriminate_first_response(&payload);
+	val r = resultset.discriminate_first_response(payload);
 	match r {
 		Ok(route) => {
 			match route {
@@ -35,7 +35,7 @@ fn expect_err_route() nothrow -> Int {
 fn expect_resultset_route() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(cast<Byte>(1));
-	val r = resultset.discriminate_first_response(&payload);
+	val r = resultset.discriminate_first_response(payload);
 	match r {
 		Ok(route) => {
 			match route {
@@ -50,7 +50,7 @@ fn expect_resultset_route() nothrow -> Int {
 fn expect_local_infile_rejected() nothrow -> Int {
 	var payload: Array<Byte> = [];
 	payload.push(resultset.FIRST_RESPONSE_LOCAL_INFILE_HEADER);
-	val r = resultset.discriminate_first_response(&payload);
+	val r = resultset.discriminate_first_response(payload);
 	match r {
 		Ok(_) => { return 30; },
 		Err(e) => {
@@ -63,7 +63,7 @@ fn expect_local_infile_rejected() nothrow -> Int {
 
 fn expect_short_payload_error() nothrow -> Int {
 	var payload: Array<Byte> = [];
-	val r = resultset.discriminate_first_response(&payload);
+	val r = resultset.discriminate_first_response(payload);
 	match r {
 		Ok(_) => { return 40; },
 		Err(e) => {

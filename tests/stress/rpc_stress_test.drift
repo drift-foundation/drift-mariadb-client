@@ -69,7 +69,7 @@ fn _drain_expect_server_err(stmt: &mut rpc.RpcStatement) nothrow -> Int {
 
 // Verify connection state is clean for pool reuse.
 fn _assert_clean_state(conn: &rpc.RpcConnection) nothrow -> Int {
-	val st = wire.session_state(&conn.wire_session);
+	val st = wire.session_state(conn.wire_session);
 	if not st.reusable { return 1; }
 	if not st.autocommit_enabled { return 2; }
 	if st.in_transaction { return 3; }
@@ -92,15 +92,15 @@ fn _stress_connection_churn(worker_id: Int) nothrow -> Int {
 					core.Result::Err(_) => { return 110000 + worker_id * 1000 + i; },
 					core.Result::Ok(c) => {
 						var conn = move c;
-						match conn.call(&"sp_ping") {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 120000 + worker_id * 1000 + i; },
+						match conn.call("sp_ping") {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 120000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _drain(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return 130000 + worker_id * 1000 + i; }
+								val rc = _drain(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return 130000 + worker_id * 1000 + i; }
 							}
 						}
-						val _ = rpc.close(&mut conn);
+						val _ = rpc.close(conn);
 					}
 				}
 			}
@@ -128,41 +128,41 @@ fn _stress_pool_reuse(worker_id: Int) nothrow -> Int {
 					var i = 0;
 					while i < ITERATIONS {
 						// Call sp_multi_rs, consume one row, skip the rest.
-						match conn.call(&"sp_multi_rs") {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 220000 + worker_id * 1000 + i; },
+						match conn.call("sp_multi_rs") {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 220000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
 								// Consume first row.
 								var saw_row = false;
 								while not saw_row {
 									match stmt.next_event() {
-										core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 230000 + worker_id * 1000 + i; },
+										core.Result::Err(_) => { val _ = rpc.close(conn); return 230000 + worker_id * 1000 + i; },
 										core.Result::Ok(ev) => {
 											match ev {
 												rpc.RpcEvent::Row(_) => { saw_row = true; },
 												rpc.RpcEvent::ResultSetEnd => {},
-												rpc.RpcEvent::ServerErr(_) => { val _ = rpc.close(&mut conn); return 231000 + worker_id * 1000 + i; },
-												rpc.RpcEvent::StatementEnd(_) => { val _ = rpc.close(&mut conn); return 232000 + worker_id * 1000 + i; }
+												rpc.RpcEvent::ServerErr(_) => { val _ = rpc.close(conn); return 231000 + worker_id * 1000 + i; },
+												rpc.RpcEvent::StatementEnd(_) => { val _ = rpc.close(conn); return 232000 + worker_id * 1000 + i; }
 											}
 										}
 									}
 								}
 								match stmt.skip_remaining() {
-									core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 240000 + worker_id * 1000 + i; },
+									core.Result::Err(_) => { val _ = rpc.close(conn); return 240000 + worker_id * 1000 + i; },
 									core.Result::Ok(_) => {}
 								}
 							}
 						}
 						// Reset and verify clean state.
 						match conn.reset_for_pool_reuse() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 250000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 250000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
-						val sc = _assert_clean_state(&conn);
-						if sc != 0 { val _ = rpc.close(&mut conn); return 260000 + worker_id * 1000 + sc * 100 + i; }
+						val sc = _assert_clean_state(conn);
+						if sc != 0 { val _ = rpc.close(conn); return 260000 + worker_id * 1000 + sc * 100 + i; }
 						i = i + 1;
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -187,28 +187,28 @@ fn _stress_multi_resultset(worker_id: Int) nothrow -> Int {
 					var conn = move c;
 					var i = 0;
 					while i < ITERATIONS {
-						match conn.call(&"sp_multi_rs") {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 320000 + worker_id * 1000 + i; },
+						match conn.call("sp_multi_rs") {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 320000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
 								val pattern = i % 3;
 								if pattern == 0 {
 									// Full consume.
-									val rc = _drain(&mut stmt);
-									if rc != 0 { val _ = rpc.close(&mut conn); return 330000 + worker_id * 1000 + i; }
+									val rc = _drain(stmt);
+									if rc != 0 { val _ = rpc.close(conn); return 330000 + worker_id * 1000 + i; }
 								} else {
 									if pattern == 1 {
 										// Skip first result, drain rest.
 										match stmt.skip_result() {
-											core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 340000 + worker_id * 1000 + i; },
+											core.Result::Err(_) => { val _ = rpc.close(conn); return 340000 + worker_id * 1000 + i; },
 											core.Result::Ok(_) => {}
 										}
-										val rc = _drain(&mut stmt);
-										if rc != 0 { val _ = rpc.close(&mut conn); return 341000 + worker_id * 1000 + i; }
+										val rc = _drain(stmt);
+										if rc != 0 { val _ = rpc.close(conn); return 341000 + worker_id * 1000 + i; }
 									} else {
 										// Skip everything.
 										match stmt.skip_remaining() {
-											core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 350000 + worker_id * 1000 + i; },
+											core.Result::Err(_) => { val _ = rpc.close(conn); return 350000 + worker_id * 1000 + i; },
 											core.Result::Ok(_) => {}
 										}
 									}
@@ -216,12 +216,12 @@ fn _stress_multi_resultset(worker_id: Int) nothrow -> Int {
 							}
 						}
 						match conn.commit() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 360000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 360000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
 						i = i + 1;
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -246,41 +246,41 @@ fn _stress_tx_boundaries(worker_id: Int) nothrow -> Int {
 					var i = 0;
 					while i < ITERATIONS {
 						// sp_1: creates table + inserts. Commit.
-						match conn.call(&"sp_1") {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 420000 + worker_id * 1000 + i; },
+						match conn.call("sp_1") {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 420000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _drain(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return 421000 + worker_id * 1000 + i; }
+								val rc = _drain(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return 421000 + worker_id * 1000 + i; }
 							}
 						}
 						match conn.commit() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 430000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 430000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
 						// sp_2: inserts. Rollback.
-						match conn.call(&"sp_2") {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 440000 + worker_id * 1000 + i; },
+						match conn.call("sp_2") {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 440000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _drain(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return 441000 + worker_id * 1000 + i; }
+								val rc = _drain(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return 441000 + worker_id * 1000 + i; }
 							}
 						}
 						match conn.rollback() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 450000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 450000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
 						// Reset and verify clean state.
 						match conn.reset_for_pool_reuse() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 460000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 460000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
-						val sc = _assert_clean_state(&conn);
-						if sc != 0 { val _ = rpc.close(&mut conn); return 470000 + worker_id * 1000 + sc * 100 + i; }
+						val sc = _assert_clean_state(conn);
+						if sc != 0 { val _ = rpc.close(conn); return 470000 + worker_id * 1000 + sc * 100 + i; }
 						i = i + 1;
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -305,34 +305,34 @@ fn _stress_error_cycling(worker_id: Int) nothrow -> Int {
 					var i = 0;
 					while i < ITERATIONS {
 						// Error path: sp_error (returns ServerErr, not RpcError).
-						match conn.call(&"sp_error") {
-							core.Result::Err(e) => { val _ = rpc.close(&mut conn); return 530000 + worker_id * 1000 + i; },
+						match conn.call("sp_error") {
+							core.Result::Err(e) => { val _ = rpc.close(conn); return 530000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _drain_expect_server_err(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return 531000 + worker_id * 1000 + i; }
+								val rc = _drain_expect_server_err(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return 531000 + worker_id * 1000 + i; }
 							}
 						}
 						// Success path: sp_add.
 						var args: Array<rpc.RpcArg> = [];
 						args.push(rpc.arg_int(1));
 						args.push(rpc.arg_int(2));
-						match conn.call(&"sp_add", &args) {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 520000 + worker_id * 1000 + i; },
+						match conn.call("sp_add", args) {
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 520000 + worker_id * 1000 + i; },
 							core.Result::Ok(s) => {
 								var stmt = move s;
-								val rc = _drain(&mut stmt);
-								if rc != 0 { val _ = rpc.close(&mut conn); return 521000 + worker_id * 1000 + i; }
+								val rc = _drain(stmt);
+								if rc != 0 { val _ = rpc.close(conn); return 521000 + worker_id * 1000 + i; }
 							}
 						}
 						// Commit to clear tx state.
 						match conn.commit() {
-							core.Result::Err(_) => { val _ = rpc.close(&mut conn); return 540000 + worker_id * 1000 + i; },
+							core.Result::Err(_) => { val _ = rpc.close(conn); return 540000 + worker_id * 1000 + i; },
 							core.Result::Ok(_) => {}
 						}
 						i = i + 1;
 					}
-					val _ = rpc.close(&mut conn);
+					val _ = rpc.close(conn);
 					return 0;
 				}
 			}
@@ -372,7 +372,7 @@ fn _run_connection_churn() nothrow -> Int {
 		dq.push_back(move t);
 		i = i + 1;
 	}
-	return _join_all(&mut dq);
+	return _join_all(dq);
 }
 
 fn _run_pool_reuse() nothrow -> Int {
@@ -386,7 +386,7 @@ fn _run_pool_reuse() nothrow -> Int {
 		dq.push_back(move t);
 		i = i + 1;
 	}
-	return _join_all(&mut dq);
+	return _join_all(dq);
 }
 
 fn _run_multi_resultset() nothrow -> Int {
@@ -400,7 +400,7 @@ fn _run_multi_resultset() nothrow -> Int {
 		dq.push_back(move t);
 		i = i + 1;
 	}
-	return _join_all(&mut dq);
+	return _join_all(dq);
 }
 
 fn _run_tx_boundaries() nothrow -> Int {
@@ -414,7 +414,7 @@ fn _run_tx_boundaries() nothrow -> Int {
 		dq.push_back(move t);
 		i = i + 1;
 	}
-	return _join_all(&mut dq);
+	return _join_all(dq);
 }
 
 fn _run_error_cycling() nothrow -> Int {
@@ -428,7 +428,7 @@ fn _run_error_cycling() nothrow -> Int {
 		dq.push_back(move t);
 		i = i + 1;
 	}
-	return _join_all(&mut dq);
+	return _join_all(dq);
 }
 
 pub fn main() nothrow -> Int {

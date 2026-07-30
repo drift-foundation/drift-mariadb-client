@@ -9,61 +9,61 @@ fn _err(tag: String) nothrow -> rpc.RpcError {
 
 fn scenario_wire_connect_failed_is_transport() nothrow -> Int {
 	val e = _err("rpc-wire-connect-failed");
-	if not rpc.is_transport_error(&e) { return 101; }
+	if not rpc.is_transport_error(e) { return 101; }
 	return 0;
 }
 
 fn scenario_wire_query_failed_is_transport() nothrow -> Int {
 	val e = _err("rpc-wire-query-failed");
-	if not rpc.is_transport_error(&e) { return 201; }
+	if not rpc.is_transport_error(e) { return 201; }
 	return 0;
 }
 
 fn scenario_wire_next_event_failed_is_transport() nothrow -> Int {
 	val e = _err("rpc-wire-next-event-failed");
-	if not rpc.is_transport_error(&e) { return 301; }
+	if not rpc.is_transport_error(e) { return 301; }
 	return 0;
 }
 
 fn scenario_wire_ping_failed_is_transport() nothrow -> Int {
 	val e = _err("rpc-wire-ping-failed");
-	if not rpc.is_transport_error(&e) { return 401; }
+	if not rpc.is_transport_error(e) { return 401; }
 	return 0;
 }
 
 fn scenario_server_error_not_transport() nothrow -> Int {
 	val e = _err("rpc-server-error");
-	if rpc.is_transport_error(&e) { return 501; }
+	if rpc.is_transport_error(e) { return 501; }
 	return 0;
 }
 
 fn scenario_row_null_not_transport() nothrow -> Int {
 	val e = _err("rpc-row-null");
-	if rpc.is_transport_error(&e) { return 601; }
+	if rpc.is_transport_error(e) { return 601; }
 	return 0;
 }
 
 fn scenario_invalid_proc_name_not_transport() nothrow -> Int {
 	val e = _err("rpc-invalid-proc-name");
-	if rpc.is_transport_error(&e) { return 701; }
+	if rpc.is_transport_error(e) { return 701; }
 	return 0;
 }
 
 fn scenario_binary_length_mismatch_not_transport() nothrow -> Int {
 	val e = _err("rpc-binary-length-mismatch");
-	if rpc.is_transport_error(&e) { return 801; }
+	if rpc.is_transport_error(e) { return 801; }
 	return 0;
 }
 
 fn scenario_empty_tag_not_transport() nothrow -> Int {
 	val e = _err("");
-	if rpc.is_transport_error(&e) { return 901; }
+	if rpc.is_transport_error(e) { return 901; }
 	return 0;
 }
 
 fn scenario_prefix_without_dash_not_transport() nothrow -> Int {
 	val e = _err("rpc-wirex-foo");
-	if rpc.is_transport_error(&e) { return 1001; }
+	if rpc.is_transport_error(e) { return 1001; }
 	return 0;
 }
 
