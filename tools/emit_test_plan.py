@@ -40,6 +40,8 @@ import re
 import sys
 from pathlib import Path
 
+import cert_deps
+
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "drift" / "manifest.json"
 LOCK = ROOT / "drift" / "lock.json"
@@ -104,28 +106,26 @@ def manifest_versions():
 def resolve_artifact(artifact):
     """(src_dirs, deps) for compiling against `artifact` FROM SOURCE — pulling in
     co-artifact deps' src dirs (rpc consumes wire-proto in-repo, so a rpc test
-    compiles both src trees), and external deps as name@version pins."""
+    compiles both src trees), and external deps as name@version pins. Pin
+    derivation is lane-aware via cert_deps: strict (dev) reads the committed
+    lock; certify (DRIFT_CERT_MODE=certify) execs the run toolchain's
+    `drift lock emit --source-rebuild` per the build-orchestrator contract."""
     manifest = json.loads(MANIFEST.read_text())
     arts = {a["name"]: a for a in manifest.get("artifacts", [])}
     target = arts.get(artifact)
     if not target:
         sys.exit(f"error: artifact {artifact!r} not in manifest")
-    resolved = {}
-    if LOCK.exists():
-        lock = json.loads(LOCK.read_text())
-        resolved = (lock.get("artifacts", {}).get(artifact, {}) or {}).get("resolved", {}) or {}
-    src_dirs, deps = set(), []
+    src_dirs, declared = set(), {}
     for mod in target.get("modules", []):
         src_dirs.add(os.path.dirname(mod))
     for dep in target.get("package_deps", []):
-        name, ver = dep["name"], dep["version"]
-        co = arts.get(name)
+        co = arts.get(dep["name"])
         if co:
             for mod in co.get("modules", []):
                 src_dirs.add(os.path.dirname(mod))
         else:
-            rv = resolved.get(name, {}).get("version") or ver
-            deps.append(f"{name}@{rv}")
+            declared[dep["name"]] = dep["version"]
+    deps = cert_deps.external_pins(MANIFEST, artifact, LOCK, declared, set(arts))
     return sorted(src_dirs), deps
 
 
