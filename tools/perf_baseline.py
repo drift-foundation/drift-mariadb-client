@@ -360,7 +360,13 @@ def main() -> int:
     RESULT_ROOT.mkdir(parents=True, exist_ok=True)
     CAPTURE_ROOT.mkdir(parents=True, exist_ok=True)
     machine_id = _get_machine_id()
-    version = subprocess.run([driftc, "--version"], check=True, cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    version_info = json.loads(
+        subprocess.run([driftc, "--version", "--json"], check=True, cwd=ROOT, capture_output=True, text=True).stdout
+    )
+    if version_info.get("format") != "drift-toolchain-info/v1":
+        raise SystemExit(f"error: unexpected --version --json format: {version_info.get('format')!r}")
+    tc = version_info["toolchain"]
+    version = f"driftc {tc['driftc']} (ABI {tc['abi']})"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
 
     # ---- Measure-only phase: run prebuilt binaries from --bin-dir, serial ----

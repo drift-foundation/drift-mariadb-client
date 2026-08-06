@@ -30,10 +30,13 @@ protocol instrumentation).
 
 ## Consumer prerequisites
 
-- Current Drift toolchain — **driftc 0.33.91+ / ABI 22** for
-  `mariadb-wire-proto` 0.6.1+ / `mariadb-rpc` 0.8.1+ (the packages are
-  migrated to the 0.33.91 borrow rules: a parameter declared `&T`/`&mut T`
-  supplies the borrow, so source-written argument borrows are rejected).
+- Current Drift toolchain — **driftc 0.34.1+ / ABI 22** for
+  `mariadb-wire-proto` 0.6.2+ / `mariadb-rpc` 0.8.2+ (the source tree is
+  aligned to the 0.34.1 surface: strict `std.json.parse()` replaces the
+  removed `parse_strict()`, and machine consumers of tool versions use
+  `--version --json`; the 0.33.91 borrow rules still apply — a parameter
+  declared `&T`/`&mut T` supplies the borrow, so source-written argument
+  borrows are rejected).
   Historical note on the trust formats: the trust model is trust-v1, but
   claim bodies are schema v2 and provenance is schema v4 as of 0.33.57;
   toolchains older than 0.33.57 parse only v1 bodies and reject these

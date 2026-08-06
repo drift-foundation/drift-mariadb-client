@@ -403,7 +403,7 @@ fn _handle_health(reg: &conc.Arc<Registry>) nothrow -> String {
 // trailing newline — the socket writer appends it). No sockets, no logging —
 // see failpoint-proxy/tests/unit/control_test.drift for direct unit tests.
 pub fn handle_line(reg: &conc.Arc<Registry>, line: &String) nothrow -> String {
-	match json.parse_strict(line) {
+	match json.parse(line) {
 		core.Result::Err(_) => { return _err_response("bad-json", "invalid json"); },
 		core.Result::Ok(root) => {
 			val op = root.select().field("op").as_string_or("");
